@@ -83,8 +83,8 @@ def run_decision(
             logger.info("[%s] Entered trade: %s", agent_id, fill)
             return {"action": "enter", "detail": str(fill)}
 
-        logger.warning("[%s] Unknown LLM action: %s", agent_id, action)
-        return {"action": "unknown", "detail": str(response)}
+        logger.warning("[%s] Unrecognized LLM action '%s', treating as wait", agent_id, action)
+        return {"action": "wait", "detail": f"unrecognized LLM action: {action}"}
 
     except Exception as exc:
         logger.error("[%s] Decision loop error: %s", agent_id, exc, exc_info=True)
