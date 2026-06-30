@@ -6,12 +6,12 @@ as {"action": "error", "detail": str(exc)}.
 """
 
 import asyncio
-import json
 import logging
 from agents.persona import build_system_prompt
 from agents.prompt_builder import build_decision_prompt
 from risk.gate import validate_order, RiskViolation
 from store.db import get_positions, get_trades, insert_trade
+from store.fingerprint import write_entry, write_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -80,22 +80,18 @@ async def run_decision(
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
 
-            # Write reasoning fields to the trade record
+            # Write the full fingerprint: market snapshot at entry (OHLCV,
+            # funding/OI/liquidation context, regime) plus the agent's
+            # reasoning, onto the trade row the bridge just created.
             if fill.get("trade_id"):
-                conn.execute(
-                    """UPDATE trades SET hypothesis=?,
-                       key_conditions_met=?, key_conditions_missing=?,
-                       confidence=?, expected_value=? WHERE id=?""",
-                    (
-                        response.get("hypothesis", ""),
-                        json.dumps(response.get("key_conditions_met", [])),
-                        json.dumps(response.get("key_conditions_missing", [])),
-                        response.get("confidence", 0.0),
-                        response.get("expected_value", ""),
-                        fill["trade_id"],
-                    ),
+                asset_snapshot = market_state.get(response["asset"], {})
+                write_entry(
+                    conn,
+                    fill["trade_id"],
+                    asset_snapshot,
+                    regime=market_state.get("_regime"),
+                    reasoning=response,
                 )
-                conn.commit()
 
             logger.info("[%s] Entered trade: %s", agent_id, fill)
             return {"action": "enter", "detail": str(fill)}
@@ -171,8 +167,7 @@ async def run_postmortem(conn, agent_id: str, trade_id: str, llm_fn, system_prom
         else:
             postmortem = str(result) if result else ""
         if postmortem:
-            conn.execute("UPDATE trades SET agent_postmortem=? WHERE id=?", (postmortem.strip(), trade_id))
-            conn.commit()
+            write_outcome(conn, trade_id, {"agent_postmortem": postmortem.strip()})
     except Exception as exc:
         logger.warning("[%s] Postmortem failed for %s: %s", agent_id, trade_id, exc)
 

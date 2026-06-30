@@ -48,7 +48,6 @@ class HyperliquidClient:
     _MAX_RETRIES = 3
     _FAILURE_THRESHOLD = 5
     _CIRCUIT_COOLDOWN = 60.0
-    _PROBE_FAILURES = 0
     _PROBE_FAILURE_LIMIT = 2
 
     def __init__(self):
@@ -56,6 +55,8 @@ class HyperliquidClient:
         self._consecutive_failures = 0
         self._circuit_open_until: float = 0.0
         self.available = True
+        self._probe_failures = 0
+        self._circuit_lock = asyncio.Lock()
         self._sem = asyncio.Semaphore(10)
 
     async def __aenter__(self):
@@ -68,13 +69,18 @@ class HyperliquidClient:
             self._client = None
 
     async def _post(self, body: dict) -> dict:
-        if not self.available:
+        global_endpoint = body.get("type") in ("allMids", "metaAndAssetCtxs")
+        if global_endpoint and not self.available:
             if time.monotonic() < self._circuit_open_until:
                 raise RuntimeError(
                     "HyperliquidClient circuit breaker open — skipping request"
                 )
-            self._PROBE_FAILURES = 0
-            logger.info("HyperliquidClient: circuit breaker reset, retrying")
+            async with self._circuit_lock:
+                if not self.available:
+                    self.available = True
+                    self._consecutive_failures = 0
+                    self._probe_failures = 0
+                    logger.info("HyperliquidClient: circuit breaker reset, retrying")
 
         last_exc: Exception | None = None
         retry_count = 0
@@ -100,8 +106,9 @@ class HyperliquidClient:
                         retry_count += 1
                         continue
                     resp.raise_for_status()
-                    self._consecutive_failures = 0
-                    self._PROBE_FAILURES = 0
+                    if global_endpoint:
+                        self._consecutive_failures = 0
+                        self._probe_failures = 0
                     return resp.json()
                 except (httpx.HTTPStatusError, httpx.RequestError) as req_err:
                     last_exc = req_err
@@ -110,27 +117,28 @@ class HyperliquidClient:
                 except Exception:
                     retry_count += 1
                     wait = 2.0 ** attempt
-        self._record_failure(retry_count)
+        if global_endpoint:
+            self._record_failure(1)
         raise last_exc or RuntimeError("HyperliquidClient: max retries exceeded")
 
     def _record_failure(self, count: int = 1):
-        self._consecutive_failures += count
-        if not self.available:
-            self._PROBE_FAILURES += 1
-        if self._consecutive_failures >= self._FAILURE_THRESHOLD and self.available:
-            self.available = False
-            self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
-            logger.error(
-                "HyperliquidClient: %d consecutive failures — circuit breaker opened",
-                self._consecutive_failures,
-            )
-        elif not self.available and self._PROBE_FAILURES >= self._PROBE_FAILURE_LIMIT:
-            self.available = False
-            self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
-            logger.error(
-                "HyperliquidClient: probe failed %d times — circuit re-opened",
-                self._PROBE_FAILURES,
-            )
+        if self.available:
+            self._consecutive_failures += count
+            if self._consecutive_failures >= self._FAILURE_THRESHOLD:
+                self.available = False
+                self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
+                logger.error(
+                    "HyperliquidClient: %d consecutive failures — circuit breaker opened",
+                    self._consecutive_failures,
+                )
+        else:
+            self._probe_failures += count
+            if self._probe_failures >= self._PROBE_FAILURE_LIMIT:
+                self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
+                logger.error(
+                    "HyperliquidClient: probe failed %d times — circuit re-opened",
+                    self._probe_failures,
+                )
 
     async def get_all_mids(self) -> dict[str, float]:
         data = await self._post({"type": "allMids"})
@@ -210,7 +218,7 @@ class HyperliquidClient:
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         data = await self._post({"type": "l2Book", "coin": asset})
         if data is None:
-            logger.warning("l2Book returned None for %s", asset)
+            logger.debug("l2Book returned None for %s", asset)
             return {"bids": [], "asks": []}
         levels = data["levels"]
         bids = [[float(lv["px"]), float(lv["sz"])] for lv in levels[0][:depth]]

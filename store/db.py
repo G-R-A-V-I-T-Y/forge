@@ -15,7 +15,43 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     schema = SCHEMA_PATH.read_text()
-    conn.executescript(schema)
+    # Split on the "-- INDEXES" marker: tables must exist (and any pending
+    # column migration must run) before indexes on new columns are created,
+    # otherwise CREATE INDEX on e.g. trades(regime) fails against a
+    # pre-existing local DB that predates that column.
+    tables_sql, _, indexes_sql = schema.partition("-- INDEXES")
+    conn.executescript(tables_sql)
+    conn.commit()
+    _migrate_trades_columns(conn)
+    if indexes_sql:
+        conn.executescript(indexes_sql)
+        conn.commit()
+
+
+# Columns added after the initial M1-M3 schema. CREATE TABLE IF NOT EXISTS
+# above is a no-op against a pre-existing local data/forge.db (gitignored,
+# never committed), so any column added here must also be backfilled via
+# ALTER TABLE for users who already initialized a DB before this change.
+_TRADES_MIGRATION_COLUMNS = {
+    "ohlcv_15m_blob": "BLOB",
+    "ohlcv_1h_blob": "BLOB",
+    "ohlcv_4h_blob": "BLOB",
+    "funding_rate_current": "REAL",
+    "funding_rate_8h_history": "TEXT",
+    "open_interest_usd": "REAL",
+    "open_interest_24h_change_pct": "REAL",
+    "liquidation_volume_1h_usd": "REAL",
+    "liquidation_direction_dominant": "TEXT",
+    "regime": "TEXT",
+}
+
+
+def _migrate_trades_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add M4 fingerprint columns to an existing trades table."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+    for col, sql_type in _TRADES_MIGRATION_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}")
     conn.commit()
 
 

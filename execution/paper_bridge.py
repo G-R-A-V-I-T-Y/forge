@@ -34,9 +34,12 @@ class PaperBridge(TradingBridge):
         except Exception:
             pass
         try:
-            return await self.provider.get_mid_price(asset)
+            mid = await self.provider.get_mid_price(asset)
+            if mid > 0:
+                return mid
         except Exception:
-            return 0.0
+            pass
+        raise RuntimeError(f"Cannot determine fill price for {asset} — exchange may be unavailable")
 
     async def enter(self, order: dict) -> dict:
         asset = order["asset"]

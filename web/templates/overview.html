@@ -52,12 +52,13 @@
 
 <h2>Last 10 Trades</h2>
 {% if trades %}
-<table>
+<table id="trades-table">
   <tr>
-    <th>ID</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Status</th><th>Time</th>
+    <th></th><th>ID</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Conf</th><th>Status</th><th>Time</th>
   </tr>
   {% for t in trades %}
-  <tr>
+  <tr class="trade-row" data-trade="{{ t.id }}" onclick="toggleReasoning('{{ t.id }}')" style="cursor:pointer;">
+    <td style="color:#8b949e;font-size:11px;">&#9654;</td>
     <td style="font-size:11px;color:#8b949e">{{ t.id[-20:] if t.id else '' }}</td>
     <td>{{ t.asset }}</td>
     <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
@@ -66,13 +67,58 @@
     <td class="{{ 'win' if (t.pnl_pct or 0) > 0 else ('loss' if (t.pnl_pct or 0) < 0 else '') }}">
       {{ "{:+.2%}".format(t.pnl_pct) if t.pnl_pct is not none else '&mdash;' }}
     </td>
+    <td>{{ "{:.0%}".format(t.confidence) if t.confidence else '&mdash;' }}</td>
     <td class="{{ 'open' if t.status == 'open' else ('win' if t.result == 'win' else 'loss') }}">
       {{ t.status.upper() if t.status else '' }}
     </td>
     <td style="font-size:11px">{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
   </tr>
+  <tr id="reasoning-{{ t.id }}" class="reasoning-row" style="display:none;">
+    <td colspan="10" style="padding:12px 20px;background:#0d1117;border:1px solid #21262d;border-radius:4px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Hypothesis</div>
+          <div style="color:#e6edf3;font-size:13px;">{{ t.hypothesis or '&mdash;' }}</div>
+        </div>
+        <div>
+          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Expected Value</div>
+          <div style="color:#e6edf3;font-size:13px;">{{ t.expected_value or '&mdash;' }}</div>
+        </div>
+        <div>
+          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Key Conditions Met</div>
+          <div style="color:#3fb950;font-size:13px;">{{ t.key_conditions_met or '&mdash;' }}</div>
+        </div>
+        <div>
+          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Key Conditions Missing</div>
+          <div style="color:#f85149;font-size:13px;">{{ t.key_conditions_missing or '&mdash;' }}</div>
+        </div>
+      </div>
+      {% if t.agent_postmortem %}
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #21262d;">
+        <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Postmortem</div>
+        <div style="color:#e6edf3;font-size:13px;">{{ t.agent_postmortem }}</div>
+      </div>
+      {% endif %}
+      {% if t.exit_reason %}
+      <div style="margin-top:4px;">
+        <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Exit Reason</div>
+        <div style="color:#e6edf3;font-size:13px;">{{ t.exit_reason }}</div>
+      </div>
+      {% endif %}
+    </td>
+  </tr>
   {% endfor %}
 </table>
+<script>
+function toggleReasoning(id) {
+  var row = document.getElementById('reasoning-' + id);
+  if (!row) return;
+  var hidden = row.style.display === 'none' || row.style.display === '';
+  row.style.display = hidden ? 'table-row' : 'none';
+  var arrow = row.previousElementSibling.querySelector('td:first-child');
+  if (arrow) arrow.innerHTML = hidden ? '&#9660;' : '&#9654;';
+}
+</script>
 {% else %}
 <p style="color:#8b949e; margin-top: 12px;">No trades yet. Agent wakes every 60 seconds.</p>
 {% endif %}

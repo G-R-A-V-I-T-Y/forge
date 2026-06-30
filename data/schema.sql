@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS trades (
     confidence REAL,
     expected_value TEXT,
     agent_postmortem TEXT,
+    ohlcv_15m_blob BLOB,
+    ohlcv_1h_blob BLOB,
+    ohlcv_4h_blob BLOB,
+    funding_rate_current REAL,
+    funding_rate_8h_history TEXT,
+    open_interest_usd REAL,
+    open_interest_24h_change_pct REAL,
+    liquidation_volume_1h_usd REAL,
+    liquidation_direction_dominant TEXT,
+    regime TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -125,9 +135,17 @@ CREATE TABLE IF NOT EXISTS chat_history (
     created_at TEXT NOT NULL
 );
 
+-- INDEXES
+-- (store/db.py.init_schema executes table-creation statements, then runs
+-- the trades-column migration, then this block — so indexes on columns
+-- added after the original M1-M3 schema, e.g. regime, can never run
+-- against a table that doesn't have them yet.)
 CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_asset ON trades(asset);
+CREATE INDEX IF NOT EXISTS idx_trades_regime ON trades(regime);
+CREATE INDEX IF NOT EXISTS idx_trades_result ON trades(result);
+CREATE INDEX IF NOT EXISTS idx_trades_direction ON trades(direction);
 CREATE INDEX IF NOT EXISTS idx_positions_agent ON positions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_positions_asset ON positions(asset);
 CREATE INDEX IF NOT EXISTS idx_accounts_agent ON accounts(agent_id);

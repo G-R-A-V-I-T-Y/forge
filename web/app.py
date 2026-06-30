@@ -1,11 +1,14 @@
 import asyncio
 import json
 import logging
+import math
 from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+
+from store.query import query_trades, count_trades, get_trade
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -92,3 +95,107 @@ async def get_prices():
         return result
     except Exception:
         return {}
+
+
+PAGE_SIZE = 25
+
+
+def _trade_filters(agent, asset, direction, outcome, regime, date_from, date_to):
+    return {
+        "agent_id": agent or None,
+        "asset": asset or None,
+        "direction": direction or None,
+        "outcome": outcome or None,
+        "regime": regime or None,
+        "date_from": date_from or None,
+        "date_to": date_to or None,
+    }
+
+
+@app.get("/trades", response_class=HTMLResponse)
+async def trades_page(
+    request: Request,
+    agent: str = "",
+    asset: str = "",
+    direction: str = "",
+    outcome: str = "",
+    regime: str = "",
+    page: int = 1,
+):
+    conn = app.state.conn
+    page = max(1, page)
+    filters = _trade_filters(agent, asset, direction, outcome, regime, None, None)
+
+    total = count_trades(conn, **filters)
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = min(page, total_pages)
+    offset = (page - 1) * PAGE_SIZE
+
+    trades = query_trades(conn, decode_ohlcv=False, limit=PAGE_SIZE, offset=offset, **filters)
+
+    agents = [r["id"] for r in conn.execute("SELECT id FROM agents ORDER BY id")]
+    assets = [r[0] for r in conn.execute("SELECT DISTINCT asset FROM trades ORDER BY asset")]
+    regimes = [r[0] for r in conn.execute(
+        "SELECT DISTINCT regime FROM trades WHERE regime IS NOT NULL ORDER BY regime"
+    )]
+
+    return templates.TemplateResponse("trade_bank.html", {
+        "request": request,
+        "trades": trades,
+        "agents": agents,
+        "assets": assets,
+        "regimes": regimes,
+        "filters": {
+            "agent": agent, "asset": asset, "direction": direction,
+            "outcome": outcome, "regime": regime,
+        },
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    })
+
+
+@app.get("/api/query")
+async def api_query(
+    agent: str | None = None,
+    asset: str | None = None,
+    direction: str | None = None,
+    outcome: str | None = None,
+    regime: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    funding_rate_min: float | None = None,
+    funding_rate_max: float | None = None,
+    oi_change_min: float | None = None,
+    oi_change_max: float | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    include_ohlcv: bool = False,
+):
+    """Cross-agent trade bank query, e.g. for the Head of Desk chat (M7).
+
+    agent=None searches every agent. OHLCV blobs are omitted by default to
+    keep list responses small; pass include_ohlcv=true to decode them.
+    """
+    conn = app.state.conn
+    trades = query_trades(
+        conn,
+        agent_id=agent, asset=asset, direction=direction, regime=regime,
+        outcome=outcome, status=status, date_from=date_from, date_to=date_to,
+        funding_rate_min=funding_rate_min, funding_rate_max=funding_rate_max,
+        oi_change_min=oi_change_min, oi_change_max=oi_change_max,
+        limit=limit, offset=offset, decode_ohlcv=include_ohlcv,
+    )
+    return JSONResponse(trades)
+
+
+@app.get("/api/trades/{trade_id}")
+async def api_trade_detail(trade_id: str):
+    """Full fingerprint for one trade, including decoded OHLCV — used by the
+    /trades page to render the candlestick chart on row expand."""
+    conn = app.state.conn
+    trade = get_trade(conn, trade_id, decode_ohlcv=True)
+    if trade is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(trade)
