@@ -1,0 +1,97 @@
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA_PATH = Path(__file__).parent.parent / "data" / "schema.sql"
+
+
+def get_connection(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_schema(conn: sqlite3.Connection) -> None:
+    schema = SCHEMA_PATH.read_text()
+    conn.executescript(schema)
+    conn.commit()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def insert_agent(conn: sqlite3.Connection, agent_id: str, name: str,
+                 spawn_date: str, config_json: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO agents (id, name, spawn_date, config_json) VALUES (?, ?, ?, ?)",
+        (agent_id, name, spawn_date, config_json),
+    )
+    conn.commit()
+
+
+def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def insert_trade(conn: sqlite3.Connection, trade: dict) -> None:
+    cols = list(trade.keys())
+    placeholders = ", ".join("?" * len(cols))
+    col_names = ", ".join(cols)
+    conn.execute(
+        f"INSERT OR IGNORE INTO trades ({col_names}) VALUES ({placeholders})",
+        list(trade.values()),
+    )
+    conn.commit()
+
+
+def get_trades(conn: sqlite3.Connection, agent_id: str, limit: int = 10) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE agent_id = ? ORDER BY entry_timestamp DESC LIMIT ?",
+        (agent_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def insert_position(conn: sqlite3.Connection, position: dict) -> None:
+    cols = list(position.keys())
+    placeholders = ", ".join("?" * len(cols))
+    col_names = ", ".join(cols)
+    conn.execute(
+        f"INSERT OR REPLACE INTO positions ({col_names}) VALUES ({placeholders})",
+        list(position.values()),
+    )
+    conn.commit()
+
+
+def get_positions(conn: sqlite3.Connection, agent_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM positions WHERE agent_id = ?", (agent_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_position(conn: sqlite3.Connection, position_id: str) -> None:
+    conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+    conn.commit()
+
+
+def insert_account_snapshot(conn: sqlite3.Connection, agent_id: str,
+                             mode: str, balance: float, peak: float) -> None:
+    conn.execute(
+        "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        (agent_id, mode, balance, peak, _now()),
+    )
+    conn.commit()
+
+
+def get_latest_account(conn: sqlite3.Connection, agent_id: str,
+                        mode: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM accounts WHERE agent_id = ? AND mode = ? ORDER BY id DESC LIMIT 1",
+        (agent_id, mode),
+    ).fetchone()
+    return dict(row) if row else None
