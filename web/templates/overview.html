@@ -6,6 +6,9 @@
   <span class="badge badge-{{ agent.get('status', 'rookie') }}">
     {{ agent.get('status', 'ROOKIE').upper() }}
   </span>
+  <span class="badge badge-{{ 'live-data' if exchange_ok else 'stub' }}">
+    {{ data_source }}
+  </span>
 </h2>
 
 <div>
