@@ -48,20 +48,21 @@
   {% block content %}{% endblock %}
   <script>
     (function() {
-      const ticker = document.getElementById('ticker');
-      const ws = new WebSocket('ws://' + location.host + '/api/prices');
-      ws.onmessage = function(evt) {
-        const prices = JSON.parse(evt.data);
-        const html = Object.entries(prices).slice(0, 15).map(function(kv) {
-          var coin = kv[0].replace('-PERP', '');
-          var price = parseFloat(kv[1]).toFixed(2);
-          return '<span class="ticker-item"><span class="price">' + coin + '</span> $' + price + '</span>';
-        }).join('');
-        ticker.innerHTML = html;
-      };
-      ws.onclose = function() {
-        ticker.innerHTML = 'Prices disconnected';
-      };
+      var ticker = document.getElementById('ticker');
+      function fetchPrices() {
+        fetch('/api/prices').then(function(r) { return r.json(); }).then(function(prices) {
+          var html = Object.entries(prices).map(function(kv) {
+            var coin = kv[0].replace('-PERP', '');
+            var price = parseFloat(kv[1]).toFixed(2);
+            return '<span class="ticker-item"><span class="price">' + coin + '</span> $' + price + '</span>';
+          }).join('');
+          ticker.innerHTML = html || 'No prices';
+        }).catch(function() {
+          ticker.innerHTML = 'Prices unavailable';
+        });
+      }
+      fetchPrices();
+      setInterval(fetchPrices, 60000);
     })();
   </script>
 </body>

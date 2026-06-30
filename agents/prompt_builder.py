@@ -1,4 +1,5 @@
 from store.db import get_trades, get_positions, get_latest_account
+from store.performance import compute_metrics, format_performance_summary
 
 
 async def build_decision_prompt(agent_id: str, thesis_text: str,
@@ -12,19 +13,21 @@ async def build_decision_prompt(agent_id: str, thesis_text: str,
     peak = account["peak_balance"]
     dd_pct = (peak - balance) / peak if peak > 0 else 0.0
 
-    all_trades = get_trades(conn, agent_id, limit=10)
-    closed_trades = [t for t in all_trades if t.get("status") == "closed"]
-    wins = [t for t in closed_trades if t.get("result") == "win"]
-    win_rate = len(wins) / len(closed_trades) if closed_trades else 0.0
+    metrics = compute_metrics(conn, agent_id)
+    perf_summary = format_performance_summary(metrics, agent_id)
 
     open_positions = get_positions(conn, agent_id)
 
+    closed_trades = get_trades(conn, agent_id, limit=10)
+    closed_only = [t for t in closed_trades if t.get("status") == "closed"]
     trade_lines = []
-    for t in closed_trades:
+    for t in closed_only[:10]:
         pnl = t.get("pnl_pct", 0) or 0
+        postmortem = t.get("agent_postmortem", "")
+        pm = f" — {postmortem[:80]}" if postmortem else ""
         trade_lines.append(
             f"  {t['asset']} {t['direction']} | PnL: {pnl:+.2%} | "
-            f"exit: {t.get('exit_reason', '?')}"
+            f"exit: {t.get('exit_reason', '?')}{pm}"
         )
     trades_section = "\n".join(trade_lines) if trade_lines else "  No closed trades yet."
 
@@ -60,9 +63,9 @@ async def build_decision_prompt(agent_id: str, thesis_text: str,
     return f"""=== YOUR THESIS ===
 {thesis_text}
 
-=== PERFORMANCE SUMMARY ===
+{perf_summary}
+
 Account: ${balance:,.2f} | Peak: ${peak:,.2f} | Current DD: {dd_pct:.1%}
-Closed trades: {len(closed_trades)} | Win rate: {win_rate:.0%}
 
 === LAST 10 CLOSED TRADES ===
 {trades_section}

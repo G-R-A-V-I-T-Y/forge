@@ -45,6 +45,12 @@ CREATE TABLE IF NOT EXISTS trades (
     market_context_json TEXT,
     agent_reasoning_json TEXT,
     postmortem TEXT,
+    hypothesis TEXT,
+    key_conditions_met TEXT,
+    key_conditions_missing TEXT,
+    confidence REAL,
+    expected_value TEXT,
+    agent_postmortem TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 

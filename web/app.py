@@ -74,26 +74,21 @@ async def health():
     }
 
 
-@app.websocket("/api/prices")
-async def prices_websocket(websocket: WebSocket):
-    await websocket.accept()
+@app.get("/api/prices")
+async def get_prices():
     provider = getattr(app.state, "provider", None)
+    config = getattr(app.state, "config", None)
     if provider is None:
-        await websocket.send_json({"error": "no provider"})
-        await websocket.close()
-        return
+        return {}
+    universe = config.get("universe", []) if config else []
     try:
-        while True:
-            try:
-                mids = await provider.get_all_mids()
-                enriched = {}
-                for coin, mid in mids.items():
-                    enriched[f"{coin}-PERP"] = mid
-                await websocket.send_json(enriched)
-            except Exception:
-                await websocket.send_json({})
-            await asyncio.sleep(3)
-    except WebSocketDisconnect:
-        pass
+        mids = await provider.get_all_mids()
+        result = {}
+        for asset in universe:
+            coin = asset.replace("-PERP", "")
+            mid = mids.get(coin)
+            if mid is not None:
+                result[asset] = mid
+        return result
     except Exception:
-        pass
+        return {}
