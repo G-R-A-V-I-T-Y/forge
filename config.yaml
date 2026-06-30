@@ -1,0 +1,28 @@
+universe:
+  - BTC-PERP
+  - ETH-PERP
+  - SOL-PERP
+  - BNB-PERP
+  - XRP-PERP
+  - DOGE-PERP
+  - AVAX-PERP
+  - LINK-PERP
+  - ARB-PERP
+  - OP-PERP
+  - SUI-PERP
+  - TON-PERP
+  - PEPE-PERP
+  - WIF-PERP
+  - TRUMP-PERP
+
+desk:
+  max_leverage: 10
+  max_position_size_pct: 0.20
+  max_concurrent_positions: 3
+  wake_interval_seconds: 60
+  starting_balance: 50000.0
+  target_agent_count: 8
+  drawdown_kill_pct: 0.15
+
+data_source: stub
+llm_backend: stub
