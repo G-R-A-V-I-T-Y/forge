@@ -73,3 +73,24 @@ def test_close_marks_trade_closed(bridge, conn):
     trades = get_trades(conn, AGENT_ID)
     assert trades[0]["status"] == "closed"
     assert trades[0]["exit_reason"] == "take_profit"
+
+
+def test_close_updates_account_balance(bridge, conn):
+    """close() computes leveraged PnL and writes updated account snapshot."""
+    # Enter at 145.20 with 3x leverage, 10% of 50000 = 5000 notional
+    fill = bridge.enter(ORDER)
+
+    # Manually set exit price in market_state to simulate profit
+    bridge.market_state["SOL-PERP"]["mid_price"] = 149.00  # +2.62% raw, *3 leverage = +7.86%
+
+    pos_id = bridge.get_positions()[0]["id"]
+    result = bridge.close(pos_id, "take_profit")
+
+    # PnL: (149.00 - 145.20) / 145.20 * 3 = 0.0785... leveraged
+    expected_pnl_pct = (149.00 - 145.20) / 145.20 * 3
+    assert result["pnl_pct"] == pytest.approx(expected_pnl_pct, rel=0.01)
+
+    # Account balance should increase
+    account = bridge.get_account()
+    assert account["balance"] > 50000.0
+    assert account["peak"] >= account["balance"]

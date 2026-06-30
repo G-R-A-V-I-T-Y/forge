@@ -4,8 +4,6 @@ from store.db import (
     insert_trade,
     insert_position,
     get_positions,
-    delete_position,
-    insert_account_snapshot,
     get_latest_account,
 )
 from execution.bridge import TradingBridge
@@ -106,27 +104,23 @@ class PaperBridge(TradingBridge):
         pnl_usd = pos["notional_usd"] * pnl_pct
 
         now = _now()
-        self.conn.execute(
-            """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
-               exit_reason=?, pnl_pct=?, pnl_usd=?,
-               result=? WHERE id=?""",
-            (
-                exit_price,
-                now,
-                reason,
-                pnl_pct,
-                pnl_usd,
-                "win" if pnl_pct > 0 else "loss",
-                pos["trade_id"],
-            ),
-        )
-        self.conn.commit()
-        delete_position(self.conn, position_id)
-
         account = self.get_account()
         new_balance = account["balance"] + pnl_usd
         peak = max(account["peak"], new_balance)
-        insert_account_snapshot(self.conn, self.agent_id, "paper", new_balance, peak)
+
+        # Single transaction: all three writes commit together or roll back together
+        with self.conn:
+            self.conn.execute(
+                """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
+                   exit_reason=?, pnl_pct=?, pnl_usd=?, result=? WHERE id=?""",
+                (exit_price, now, reason, pnl_pct, pnl_usd,
+                 "win" if pnl_pct > 0 else "loss", pos["trade_id"]),
+            )
+            self.conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+            self.conn.execute(
+                "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                (self.agent_id, "paper", new_balance, peak, now),
+            )
 
         return {"exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
