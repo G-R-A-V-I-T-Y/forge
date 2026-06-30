@@ -1,5 +1,6 @@
 """Hardcoded deterministic market data for skeleton testing."""
 import time
+import asyncio
 
 # Reference prices for each asset (close to real prices as of mid-2026)
 _PRICES = {
@@ -53,6 +54,63 @@ def _make_candles(price: float, n: int, interval_seconds: int) -> list:
         v = price * 500
         candles.append([ts, round(o, 6), round(h, 6), round(l, 6), round(c, 6), round(v, 2)])
     return candles
+
+
+_INTERVAL_SECONDS = {
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
+
+
+class StubMarket:
+    """Async stub implementing the MarketProvider interface with deterministic data."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+    async def get_ohlcv(self, asset: str, interval: str, lookback_candles: int) -> list[list]:
+        interval_sec = _INTERVAL_SECONDS.get(interval, 900)
+        price = _PRICES.get(asset, 100.0)
+        return _make_candles(price, lookback_candles, interval_sec)
+
+    async def get_funding_rate(self, asset: str) -> dict:
+        rate = _FUNDING.get(asset, 0.0001)
+        price = _PRICES.get(asset, 100.0)
+        return {
+            "fundingRate": rate,
+            "openInterest": 420_000_000.0,
+            "prevDayPx": price * 0.998,
+        }
+
+    async def get_open_interest(self, asset: str) -> dict:
+        return {
+            "openInterest": 420_000_000.0,
+            "openInterest24hChange": -3.2,
+        }
+
+    async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
+        price = _PRICES.get(asset, 100.0)
+        return [
+            {"side": "long", "volume_usd": 8_500_000.0, "price": price, "ts": int(time.time() * 1000)},
+        ]
+
+    async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
+        price = _PRICES.get(asset, 100.0)
+        spread = price * 0.0001
+        bids = [[round(price - spread * (i + 1), 6), round(10.0 / (i + 1), 4)] for i in range(depth)]
+        asks = [[round(price + spread * (i + 1), 6), round(10.0 / (i + 1), 4)] for i in range(depth)]
+        return {"bids": bids, "asks": asks}
+
+    async def get_mid_price(self, asset: str) -> float:
+        return _PRICES.get(asset, 100.0)
+
+    async def get_all_mids(self) -> dict[str, float]:
+        return dict(_PRICES)
 
 
 def get_market_state(assets: list[str]) -> dict:
