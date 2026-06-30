@@ -87,17 +87,10 @@ async def test_get_orderbook_returns_bids_asks():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_mid_price_returns_float():
+    # allMids is the primary source now
     respx.post(BASE).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "levels": [
-                    [{"px": "65000.0", "sz": "1.0", "n": 1}],
-                    [{"px": "65010.0", "sz": "1.0", "n": 1}],
-                ]
-            },
-        )
+        return_value=httpx.Response(200, json={"BTC": "65000.0"}),
     )
     async with HyperliquidClient() as client:
         mid = await client.get_mid_price("BTC")
-    assert mid == pytest.approx(65005.0)
+    assert mid == 65000.0

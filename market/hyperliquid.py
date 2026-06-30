@@ -136,6 +136,10 @@ class HyperliquidClient:
         data = await self._post({"type": "allMids"})
         return {k: float(v) for k, v in data.items()}
 
+    def _normalize_asset(self, asset: str) -> str:
+        """Strip -PERP suffix for Hyperliquid API lookups."""
+        return asset.replace("-PERP", "")
+
     async def get_ohlcv(
         self, asset: str, interval: str, lookback_candles: int
     ) -> list[list]:
@@ -146,7 +150,7 @@ class HyperliquidClient:
             {
                 "type": "candleSnapshot",
                 "req": {
-                    "coin": asset,
+                    "coin": self._normalize_asset(asset),
                     "interval": interval,
                     "startTime": start_ms,
                     "endTime": now_ms,
@@ -169,9 +173,12 @@ class HyperliquidClient:
         meta, asset_ctxs = await self._post({"type": "metaAndAssetCtxs"})
         idx = _asset_index(meta, asset)
         ctx = asset_ctxs[idx]
+        # Hyperliquid API returns "funding", not "fundingRate"
+        funding_str = ctx.get("funding") or ctx.get("fundingRate", "0")
+        prev_day_str = ctx.get("prevDayPx", "0")
         return {
-            "fundingRate": float(ctx["fundingRate"]),
-            "prevDayPx": float(ctx["prevDayPx"]),
+            "fundingRate": float(funding_str),
+            "prevDayPx": float(prev_day_str),
         }
 
     async def get_open_interest(self, asset: str) -> dict:
@@ -202,20 +209,27 @@ class HyperliquidClient:
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         data = await self._post({"type": "l2Book", "coin": asset})
+        if data is None:
+            logger.warning("l2Book returned None for %s", asset)
+            return {"bids": [], "asks": []}
         levels = data["levels"]
         bids = [[float(lv["px"]), float(lv["sz"])] for lv in levels[0][:depth]]
         asks = [[float(lv["px"]), float(lv["sz"])] for lv in levels[1][:depth]]
         return {"bids": bids, "asks": asks}
 
     async def get_mid_price(self, asset: str) -> float:
+        all_mids = await self.get_all_mids()
+        coin = self._normalize_asset(asset)
+        if coin in all_mids:
+            return all_mids[coin]
         book = await self.get_orderbook(asset, depth=1)
-        if not book["bids"] or not book["asks"]:
-            raise ValueError(
-                f"Empty order book for {asset!r}: cannot compute mid price"
-            )
-        best_bid = book["bids"][0][0]
-        best_ask = book["asks"][0][0]
-        return (best_bid + best_ask) / 2.0
+        if book["bids"] and book["asks"]:
+            best_bid = book["bids"][0][0]
+            best_ask = book["asks"][0][0]
+            return (best_bid + best_ask) / 2.0
+        raise ValueError(
+            f"Empty order book for {asset!r} and no allMids entry: cannot compute mid price"
+        )
 
 
 def _interval_to_ms(interval: str) -> int:

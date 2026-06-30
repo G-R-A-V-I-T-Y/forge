@@ -1,7 +1,10 @@
 """Unified market data interface. config['data_source'] selects the backend."""
 from __future__ import annotations
+import logging
 
 from market.regime import classify_regime
+
+logger = logging.getLogger(__name__)
 
 
 class MarketProvider:
@@ -52,13 +55,40 @@ class MarketProvider:
         """Aggregated market snapshot enriched with regime."""
         state = {}
         for asset in assets:
-            mid = await self._backend.get_mid_price(asset)
-            funding = await self._backend.get_funding_rate(asset)
-            ohlcv_15m = await self._backend.get_ohlcv(asset, "15m", 40)
-            ohlcv_1h = await self._backend.get_ohlcv(asset, "1h", 20)
-            ohlcv_4h = await self._backend.get_ohlcv(asset, "4h", 10)
-            oi = await self._backend.get_open_interest(asset)
-            liq = await self._backend.get_liquidations(asset, hours=4)
+            try:
+                mid = await self._backend.get_mid_price(asset)
+            except Exception:
+                logger.warning("get_market_state: skipping %s (mid price unavailable)", asset)
+                continue
+
+            try:
+                funding = await self._backend.get_funding_rate(asset)
+            except Exception:
+                funding = {"fundingRate": 0, "prevDayPx": 0}
+
+            ohlcv_15m = ohlcv_1h = ohlcv_4h = []
+            for interval, candles in (("15m", 40), ("1h", 20), ("4h", 10)):
+                try:
+                    data = await self._backend.get_ohlcv(asset, interval, candles)
+                    if interval == "15m":
+                        ohlcv_15m = data
+                    elif interval == "1h":
+                        ohlcv_1h = data
+                    elif interval == "4h":
+                        ohlcv_4h = data
+                except Exception:
+                    pass
+
+            try:
+                oi = await self._backend.get_open_interest(asset)
+            except Exception:
+                oi = {"openInterest": 0}
+
+            try:
+                liq = await self._backend.get_liquidations(asset, hours=4)
+            except Exception:
+                liq = []
+
             book = None
             try:
                 book = await self._backend.get_orderbook(asset, depth=1)
@@ -75,8 +105,9 @@ class MarketProvider:
                 liq_dir = "short"
 
             oi_24h_chg = 0.0
-            if "prevDayPx" in funding:
-                oi_24h_chg = (mid - funding["prevDayPx"]) / funding["prevDayPx"] * 100
+            prev = funding.get("prevDayPx", 0)
+            if prev:
+                oi_24h_chg = (mid - prev) / prev * 100
 
             state[asset] = {
                 "ohlcv_15m": ohlcv_15m,
