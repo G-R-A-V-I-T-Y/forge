@@ -1,5 +1,4 @@
 """Tests for market/hyperliquid.py — HyperliquidClient with mocked HTTP."""
-import time
 import pytest
 import httpx
 import respx
@@ -25,7 +24,9 @@ async def test_get_all_mids_returns_dict():
 @pytest.mark.asyncio
 @respx.mock
 async def test_circuit_breaker_opens_after_5_failures():
-    respx.post(BASE).mock(return_value=httpx.Response(500, json={"error": "server error"}))
+    respx.post(BASE).mock(
+        return_value=httpx.Response(500, json={"error": "server error"})
+    )
     async with HyperliquidClient() as client:
         for _ in range(5):
             try:
@@ -59,12 +60,21 @@ async def test_rate_limit_retries():
 @respx.mock
 async def test_get_orderbook_returns_bids_asks():
     respx.post(BASE).mock(
-        return_value=httpx.Response(200, json={
-            "levels": [
-                [{"px": "64990.0", "sz": "1.5", "n": 1}, {"px": "64980.0", "sz": "2.0", "n": 1}],
-                [{"px": "65010.0", "sz": "0.8", "n": 1}, {"px": "65020.0", "sz": "1.2", "n": 1}],
-            ]
-        })
+        return_value=httpx.Response(
+            200,
+            json={
+                "levels": [
+                    [
+                        {"px": "64990.0", "sz": "1.5", "n": 1},
+                        {"px": "64980.0", "sz": "2.0", "n": 1},
+                    ],
+                    [
+                        {"px": "65010.0", "sz": "0.8", "n": 1},
+                        {"px": "65020.0", "sz": "1.2", "n": 1},
+                    ],
+                ]
+            },
+        )
     )
     async with HyperliquidClient() as client:
         book = await client.get_orderbook("BTC", depth=2)
@@ -78,12 +88,15 @@ async def test_get_orderbook_returns_bids_asks():
 @respx.mock
 async def test_get_mid_price_returns_float():
     respx.post(BASE).mock(
-        return_value=httpx.Response(200, json={
-            "levels": [
-                [{"px": "65000.0", "sz": "1.0", "n": 1}],
-                [{"px": "65010.0", "sz": "1.0", "n": 1}],
-            ]
-        })
+        return_value=httpx.Response(
+            200,
+            json={
+                "levels": [
+                    [{"px": "65000.0", "sz": "1.0", "n": 1}],
+                    [{"px": "65010.0", "sz": "1.0", "n": 1}],
+                ]
+            },
+        )
     )
     async with HyperliquidClient() as client:
         mid = await client.get_mid_price("BTC")

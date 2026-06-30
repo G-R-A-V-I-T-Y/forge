@@ -7,9 +7,11 @@ class MarketProvider:
         source = config.get("data_source", "stub")
         if source == "hyperliquid":
             from market.hyperliquid import HyperliquidClient
+
             self._backend = HyperliquidClient()
         elif source == "stub":
             from market.stub import StubMarket
+
             self._backend = StubMarket()
         else:
             raise ValueError(
@@ -23,7 +25,9 @@ class MarketProvider:
     async def __aexit__(self, *args):
         await self._backend.__aexit__(*args)
 
-    async def get_ohlcv(self, asset: str, interval: str, lookback_candles: int) -> list[list]:
+    async def get_ohlcv(
+        self, asset: str, interval: str, lookback_candles: int
+    ) -> list[list]:
         return await self._backend.get_ohlcv(asset, interval, lookback_candles)
 
     async def get_funding_rate(self, asset: str) -> dict:

@@ -36,6 +36,7 @@ async def test_stub_provider_get_mid_price():
 @pytest.mark.asyncio
 async def test_provider_selects_stub_by_default():
     from market.stub import StubMarket
+
     provider = MarketProvider({})
     assert isinstance(provider._backend, StubMarket)
 
@@ -43,6 +44,7 @@ async def test_provider_selects_stub_by_default():
 @pytest.mark.asyncio
 async def test_provider_selects_hyperliquid_when_configured():
     from market.hyperliquid import HyperliquidClient
+
     provider = MarketProvider({"data_source": "hyperliquid"})
     assert isinstance(provider._backend, HyperliquidClient)
 

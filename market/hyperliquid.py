@@ -68,7 +68,9 @@ class HyperliquidClient:
     async def _post(self, body: dict) -> dict:
         if not self.available:
             if time.monotonic() < self._circuit_open_until:
-                raise RuntimeError("HyperliquidClient circuit breaker open — skipping request")
+                raise RuntimeError(
+                    "HyperliquidClient circuit breaker open — skipping request"
+                )
             # Auto-recovery: reset and try again
             logger.info("HyperliquidClient: circuit breaker reset, retrying")
             self.available = True
@@ -88,7 +90,9 @@ class HyperliquidClient:
                             wait = float(resp.headers.get("Retry-After", "1"))
                         except ValueError:
                             wait = 1.0
-                        logger.warning("Rate limited by Hyperliquid, waiting %.1fs", wait)
+                        logger.warning(
+                            "Rate limited by Hyperliquid, waiting %.1fs", wait
+                        )
                         last_exc = httpx.HTTPStatusError(
                             "429 rate limit", request=resp.request, response=resp
                         )
@@ -120,16 +124,34 @@ class HyperliquidClient:
         data = await self._post({"type": "allMids"})
         return {k: float(v) for k, v in data.items()}
 
-    async def get_ohlcv(self, asset: str, interval: str, lookback_candles: int) -> list[list]:
+    async def get_ohlcv(
+        self, asset: str, interval: str, lookback_candles: int
+    ) -> list[list]:
         now_ms = int(time.time() * 1000)
         interval_ms = _interval_to_ms(interval)
         start_ms = now_ms - lookback_candles * interval_ms
-        data = await self._post({
-            "type": "candleSnapshot",
-            "req": {"coin": asset, "interval": interval, "startTime": start_ms, "endTime": now_ms},
-        })
-        return [[c["T"], float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]), float(c["v"])]
-                for c in data]
+        data = await self._post(
+            {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": asset,
+                    "interval": interval,
+                    "startTime": start_ms,
+                    "endTime": now_ms,
+                },
+            }
+        )
+        return [
+            [
+                c["T"],
+                float(c["o"]),
+                float(c["h"]),
+                float(c["l"]),
+                float(c["c"]),
+                float(c["v"]),
+            ]
+            for c in data
+        ]
 
     async def get_funding_rate(self, asset: str) -> dict:
         meta, asset_ctxs = await self._post({"type": "metaAndAssetCtxs"})
@@ -155,7 +177,12 @@ class HyperliquidClient:
         cutoff_ms = now_ms - hours * 3600 * 1000
         data = await self._post({"type": "recentTrades", "coin": asset})
         return [
-            {"side": t["side"], "price": float(t["px"]), "size": float(t["sz"]), "ts": t["time"]}
+            {
+                "side": t["side"],
+                "price": float(t["px"]),
+                "size": float(t["sz"]),
+                "ts": t["time"],
+            }
             for t in data
             if t["time"] >= cutoff_ms
         ]
@@ -163,14 +190,16 @@ class HyperliquidClient:
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         data = await self._post({"type": "l2Book", "coin": asset})
         levels = data["levels"]
-        bids = [[float(l["px"]), float(l["sz"])] for l in levels[0][:depth]]
-        asks = [[float(l["px"]), float(l["sz"])] for l in levels[1][:depth]]
+        bids = [[float(lv["px"]), float(lv["sz"])] for lv in levels[0][:depth]]
+        asks = [[float(lv["px"]), float(lv["sz"])] for lv in levels[1][:depth]]
         return {"bids": bids, "asks": asks}
 
     async def get_mid_price(self, asset: str) -> float:
         book = await self.get_orderbook(asset, depth=1)
         if not book["bids"] or not book["asks"]:
-            raise ValueError(f"Empty order book for {asset!r}: cannot compute mid price")
+            raise ValueError(
+                f"Empty order book for {asset!r}: cannot compute mid price"
+            )
         best_bid = book["bids"][0][0]
         best_ask = book["asks"][0][0]
         return (best_bid + best_ask) / 2.0
@@ -180,7 +209,9 @@ def _interval_to_ms(interval: str) -> int:
     units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
     suffix = interval[-1]
     if suffix not in units:
-        raise ValueError(f"Unknown interval suffix {suffix!r} in {interval!r}; valid: m, h, d")
+        raise ValueError(
+            f"Unknown interval suffix {suffix!r} in {interval!r}; valid: m, h, d"
+        )
     n = int(interval[:-1])
     return n * units[suffix]
 

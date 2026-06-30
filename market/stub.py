@@ -3,38 +3,38 @@ import time
 
 # Reference prices for each asset (close to real prices as of mid-2026)
 _PRICES = {
-    "BTC-PERP":   65_000.0,
-    "ETH-PERP":    3_500.0,
-    "SOL-PERP":      145.2,
-    "BNB-PERP":      580.0,
-    "XRP-PERP":        0.52,
-    "DOGE-PERP":      0.12,
-    "AVAX-PERP":      38.0,
-    "LINK-PERP":      14.5,
-    "ARB-PERP":        1.05,
-    "OP-PERP":         2.40,
-    "SUI-PERP":        1.80,
-    "TON-PERP":        7.20,
-    "PEPE-PERP":  0.0000142,
-    "WIF-PERP":        2.10,
-    "TRUMP-PERP":     12.50,
+    "BTC-PERP": 65_000.0,
+    "ETH-PERP": 3_500.0,
+    "SOL-PERP": 145.2,
+    "BNB-PERP": 580.0,
+    "XRP-PERP": 0.52,
+    "DOGE-PERP": 0.12,
+    "AVAX-PERP": 38.0,
+    "LINK-PERP": 14.5,
+    "ARB-PERP": 1.05,
+    "OP-PERP": 2.40,
+    "SUI-PERP": 1.80,
+    "TON-PERP": 7.20,
+    "PEPE-PERP": 0.0000142,
+    "WIF-PERP": 2.10,
+    "TRUMP-PERP": 12.50,
 }
 
 _FUNDING = {
-    "BTC-PERP":  0.0001,
-    "ETH-PERP":  0.0002,
-    "SOL-PERP": -0.0042,   # negative — short pressure
-    "BNB-PERP":  0.0003,
+    "BTC-PERP": 0.0001,
+    "ETH-PERP": 0.0002,
+    "SOL-PERP": -0.0042,  # negative — short pressure
+    "BNB-PERP": 0.0003,
     "XRP-PERP": -0.0015,
     "DOGE-PERP": 0.0005,
     "AVAX-PERP": 0.0001,
     "LINK-PERP": 0.0002,
-    "ARB-PERP":  0.0003,
-    "OP-PERP":   0.0001,
-    "SUI-PERP":  0.0008,
-    "TON-PERP":  0.0002,
+    "ARB-PERP": 0.0003,
+    "OP-PERP": 0.0001,
+    "SUI-PERP": 0.0008,
+    "TON-PERP": 0.0002,
     "PEPE-PERP": 0.0010,
-    "WIF-PERP":  0.0015,
+    "WIF-PERP": 0.0015,
     "TRUMP-PERP": -0.0020,
 }
 
@@ -48,10 +48,12 @@ def _make_candles(price: float, n: int, interval_seconds: int) -> list:
         offset = price * 0.002 * ((i % 5) - 2)
         o = price + offset
         h = o * 1.003
-        l = o * 0.997
+        lo = o * 0.997
         c = o + price * 0.001
         v = price * 500
-        candles.append([ts, round(o, 6), round(h, 6), round(l, 6), round(c, 6), round(v, 2)])
+        candles.append(
+            [ts, round(o, 6), round(h, 6), round(lo, 6), round(c, 6), round(v, 2)]
+        )
     return candles
 
 
@@ -72,7 +74,9 @@ class StubMarket:
     async def __aexit__(self, *_):
         pass
 
-    async def get_ohlcv(self, asset: str, interval: str, lookback_candles: int) -> list[list]:
+    async def get_ohlcv(
+        self, asset: str, interval: str, lookback_candles: int
+    ) -> list[list]:
         if interval not in _INTERVAL_SECONDS:
             raise ValueError(
                 f"Unknown interval {interval!r}; valid: {list(_INTERVAL_SECONDS)}"
@@ -97,14 +101,25 @@ class StubMarket:
         price = _PRICES.get(asset, 100.0)
         # ts is set to now so the entry always passes any time-window filter
         return [
-            {"side": "long", "size": 8_500_000.0, "price": price, "ts": int(time.time() * 1000)},
+            {
+                "side": "long",
+                "size": 8_500_000.0,
+                "price": price,
+                "ts": int(time.time() * 1000),
+            },
         ]
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         price = _PRICES.get(asset, 100.0)
         spread = price * 0.0001
-        bids = [[round(price - spread * (i + 1), 6), round(10.0 / (i + 1), 4)] for i in range(depth)]
-        asks = [[round(price + spread * (i + 1), 6), round(10.0 / (i + 1), 4)] for i in range(depth)]
+        bids = [
+            [round(price - spread * (i + 1), 6), round(10.0 / (i + 1), 4)]
+            for i in range(depth)
+        ]
+        asks = [
+            [round(price + spread * (i + 1), 6), round(10.0 / (i + 1), 4)]
+            for i in range(depth)
+        ]
         return {"bids": bids, "asks": asks}
 
     async def get_mid_price(self, asset: str) -> float:
