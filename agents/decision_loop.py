@@ -5,6 +5,7 @@ run_decision never raises. All exceptions are caught, logged, and returned
 as {"action": "error", "detail": str(exc)}.
 """
 
+import asyncio
 import json
 import logging
 from agents.persona import build_system_prompt
@@ -56,6 +57,11 @@ async def run_decision(
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.close(pos_id, reason)
             logger.info("[%s] Closed position %s: %s", agent_id, pos_id, fill)
+            trade_id = fill.get("trade_id")
+            if trade_id:
+                asyncio.ensure_future(
+                    run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
+                )
             return {"action": "close", "detail": str(fill)}
 
         if action == "enter":

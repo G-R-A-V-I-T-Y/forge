@@ -132,7 +132,7 @@ class PaperBridge(TradingBridge):
                 (self.agent_id, "paper", new_balance, peak, now),
             )
 
-        return {"exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
+        return {"trade_id": pos["trade_id"], "exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
     async def get_account(self) -> dict:
         latest = get_latest_account(self.conn, self.agent_id, "paper")
