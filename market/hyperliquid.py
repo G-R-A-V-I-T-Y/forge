@@ -84,7 +84,10 @@ class HyperliquidClient:
                 try:
                     resp = await self._client.post(self.BASE_URL, json=body)
                     if resp.status_code == 429:
-                        wait = float(resp.headers.get("Retry-After", "1"))
+                        try:
+                            wait = float(resp.headers.get("Retry-After", "1"))
+                        except ValueError:
+                            wait = 1.0
                         logger.warning("Rate limited by Hyperliquid, waiting %.1fs", wait)
                         last_exc = httpx.HTTPStatusError(
                             "429 rate limit", request=resp.request, response=resp
