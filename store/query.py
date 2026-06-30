@@ -50,52 +50,67 @@ def query_trades(
     candle arrays (unless decode_ohlcv=False, e.g. for lightweight list
     views) and JSON columns parsed back into Python objects.
     """
+    where, params = _build_where(
+        agent_id=agent_id, asset=asset, direction=direction, regime=regime,
+        outcome=outcome, status=status, date_from=date_from, date_to=date_to,
+        funding_rate_min=funding_rate_min, funding_rate_max=funding_rate_max,
+        oi_change_min=oi_change_min, oi_change_max=oi_change_max,
+    )
+    sql = f"SELECT * FROM trades {where} ORDER BY {order_by} LIMIT ? OFFSET ?"
+    rows = conn.execute(sql, [*params, limit, offset]).fetchall()
+    return [_decode_row(dict(r), decode_ohlcv) for r in rows]
+
+
+def count_trades(
+    conn,
+    agent_id: str | None = None,
+    asset: str | None = None,
+    direction: str | None = None,
+    regime: str | None = None,
+    outcome: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    funding_rate_min: float | None = None,
+    funding_rate_max: float | None = None,
+    oi_change_min: float | None = None,
+    oi_change_max: float | None = None,
+) -> int:
+    """Count trades matching the same filters as query_trades(), for pagination."""
+    where, params = _build_where(
+        agent_id=agent_id, asset=asset, direction=direction, regime=regime,
+        outcome=outcome, status=status, date_from=date_from, date_to=date_to,
+        funding_rate_min=funding_rate_min, funding_rate_max=funding_rate_max,
+        oi_change_min=oi_change_min, oi_change_max=oi_change_max,
+    )
+    row = conn.execute(f"SELECT COUNT(*) FROM trades {where}", params).fetchone()
+    return row[0]
+
+
+def _build_where(**filters) -> tuple[str, list]:
+    column_map = {
+        "agent_id": "agent_id = ?",
+        "asset": "asset = ?",
+        "direction": "direction = ?",
+        "regime": "regime = ?",
+        "outcome": "result = ?",
+        "status": "status = ?",
+        "date_from": "entry_timestamp >= ?",
+        "date_to": "entry_timestamp <= ?",
+        "funding_rate_min": "funding_rate_current >= ?",
+        "funding_rate_max": "funding_rate_current <= ?",
+        "oi_change_min": "open_interest_24h_change_pct >= ?",
+        "oi_change_max": "open_interest_24h_change_pct <= ?",
+    }
     clauses = []
     params: list = []
-
-    if agent_id is not None:
-        clauses.append("agent_id = ?")
-        params.append(agent_id)
-    if asset is not None:
-        clauses.append("asset = ?")
-        params.append(asset)
-    if direction is not None:
-        clauses.append("direction = ?")
-        params.append(direction)
-    if regime is not None:
-        clauses.append("regime = ?")
-        params.append(regime)
-    if outcome is not None:
-        clauses.append("result = ?")
-        params.append(outcome)
-    if status is not None:
-        clauses.append("status = ?")
-        params.append(status)
-    if date_from is not None:
-        clauses.append("entry_timestamp >= ?")
-        params.append(date_from)
-    if date_to is not None:
-        clauses.append("entry_timestamp <= ?")
-        params.append(date_to)
-    if funding_rate_min is not None:
-        clauses.append("funding_rate_current >= ?")
-        params.append(funding_rate_min)
-    if funding_rate_max is not None:
-        clauses.append("funding_rate_current <= ?")
-        params.append(funding_rate_max)
-    if oi_change_min is not None:
-        clauses.append("open_interest_24h_change_pct >= ?")
-        params.append(oi_change_min)
-    if oi_change_max is not None:
-        clauses.append("open_interest_24h_change_pct <= ?")
-        params.append(oi_change_max)
-
+    for key, clause in column_map.items():
+        value = filters.get(key)
+        if value is not None:
+            clauses.append(clause)
+            params.append(value)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f"SELECT * FROM trades {where} ORDER BY {order_by} LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    rows = conn.execute(sql, params).fetchall()
-    return [_decode_row(dict(r), decode_ohlcv) for r in rows]
+    return where, params
 
 
 def _decode_row(row: dict, decode_ohlcv: bool) -> dict:
@@ -120,6 +135,14 @@ def _decode_row(row: dict, decode_ohlcv: bool) -> dict:
             row.pop(blob_col, None)
 
     return row
+
+
+def get_trade(conn, trade_id: str, decode_ohlcv: bool = True) -> dict | None:
+    """Fetch a single trade's full fingerprint by id."""
+    row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
+    if not row:
+        return None
+    return _decode_row(dict(row), decode_ohlcv)
 
 
 def win_rate(trades: list[dict]) -> float:

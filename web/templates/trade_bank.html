@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}Forge &mdash; Trade Bank{% endblock %}
+{% block content %}
+
+<h2>Trade Bank <span style="color:#8b949e;font-size:13px;">({{ total }} trades)</span></h2>
+
+<form method="get" action="/trades" style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;align-items:end;">
+  <div>
+    <div class="stat-label">Agent</div>
+    <select name="agent">
+      <option value="">All</option>
+      {% for a in agents %}
+      <option value="{{ a }}" {{ 'selected' if filters.agent == a else '' }}>{{ a }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <div class="stat-label">Asset</div>
+    <select name="asset">
+      <option value="">All</option>
+      {% for a in assets %}
+      <option value="{{ a }}" {{ 'selected' if filters.asset == a else '' }}>{{ a }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <div class="stat-label">Direction</div>
+    <select name="direction">
+      <option value="">All</option>
+      <option value="long" {{ 'selected' if filters.direction == 'long' else '' }}>Long</option>
+      <option value="short" {{ 'selected' if filters.direction == 'short' else '' }}>Short</option>
+    </select>
+  </div>
+  <div>
+    <div class="stat-label">Outcome</div>
+    <select name="outcome">
+      <option value="">All</option>
+      <option value="win" {{ 'selected' if filters.outcome == 'win' else '' }}>Win</option>
+      <option value="loss" {{ 'selected' if filters.outcome == 'loss' else '' }}>Loss</option>
+    </select>
+  </div>
+  <div>
+    <div class="stat-label">Regime</div>
+    <select name="regime">
+      <option value="">All</option>
+      {% for r in regimes %}
+      <option value="{{ r }}" {{ 'selected' if filters.regime == r else '' }}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <button type="submit" style="background:#1f6feb;color:#fff;border:none;border-radius:4px;padding:7px 14px;cursor:pointer;">Filter</button>
+  </div>
+</form>
+
+{% if trades %}
+<table id="trades-table">
+  <tr>
+    <th></th><th>Agent</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th>
+    <th>PnL%</th><th>Conf</th><th>Regime</th><th>Status</th><th>Time</th>
+  </tr>
+  {% for t in trades %}
+  <tr class="trade-row" data-trade="{{ t.id }}" onclick="toggleFingerprint('{{ t.id }}')" style="cursor:pointer;">
+    <td style="color:#8b949e;font-size:11px;">&#9654;</td>
+    <td>{{ t.agent_id }}</td>
+    <td>{{ t.asset }}</td>
+    <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
+    <td>{{ "%.4f"|format(t.entry_price) if t.entry_price is not none else '&mdash;' }}</td>
+    <td>{{ "%.4f"|format(t.exit_price) if t.exit_price is not none else '&mdash;' }}</td>
+    <td class="{{ 'win' if (t.pnl_pct or 0) > 0 else ('loss' if (t.pnl_pct or 0) < 0 else '') }}">
+      {{ "{:+.2%}".format(t.pnl_pct) if t.pnl_pct is not none else '&mdash;' }}
+    </td>
+    <td>{{ "{:.0%}".format(t.confidence) if t.confidence else '&mdash;' }}</td>
+    <td style="font-size:11px;">{{ t.regime or '&mdash;' }}</td>
+    <td class="{{ 'open' if t.status == 'open' else ('win' if t.result == 'win' else 'loss') }}">
+      {{ t.status.upper() if t.status else '' }}
+    </td>
+    <td style="font-size:11px">{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
+  </tr>
+  <tr id="fingerprint-{{ t.id }}" class="fingerprint-row" style="display:none;">
+    <td colspan="11" style="padding:12px 20px;background:#0d1117;border:1px solid #21262d;border-radius:4px;">
+      <div id="fingerprint-body-{{ t.id }}" style="color:#8b949e;font-size:12px;">Loading fingerprint&hellip;</div>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+  {% set base_qs = '?agent=' ~ filters.agent ~ '&asset=' ~ filters.asset ~ '&direction=' ~ filters.direction ~ '&outcome=' ~ filters.outcome ~ '&regime=' ~ filters.regime %}
+  {% if page > 1 %}<a href="/trades{{ base_qs }}&page={{ page - 1 }}" style="color:#58a6ff;">&laquo; Prev</a>{% endif %}
+  <span style="color:#8b949e;">Page {{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}<a href="/trades{{ base_qs }}&page={{ page + 1 }}" style="color:#58a6ff;">Next &raquo;</a>{% endif %}
+</div>
+
+{% else %}
+<p style="color:#8b949e; margin-top: 12px;">No trades match these filters.</p>
+{% endif %}
+
+<script src="/static/forge.js"></script>
+<script>
+var fingerprintCache = {};
+
+function toggleFingerprint(id) {
+  var row = document.getElementById('fingerprint-' + id);
+  if (!row) return;
+  var hidden = row.style.display === 'none' || row.style.display === '';
+  row.style.display = hidden ? 'table-row' : 'none';
+  var arrow = row.previousElementSibling.querySelector('td:first-child');
+  if (arrow) arrow.innerHTML = hidden ? '&#9660;' : '&#9654;';
+  if (hidden && !fingerprintCache[id]) {
+    loadFingerprint(id);
+  }
+}
+
+function loadFingerprint(id) {
+  fetch('/api/trades/' + encodeURIComponent(id))
+    .then(function (r) { return r.json(); })
+    .then(function (t) {
+      fingerprintCache[id] = t;
+      renderFingerprint(id, t);
+    })
+    .catch(function () {
+      var body = document.getElementById('fingerprint-body-' + id);
+      if (body) body.innerHTML = '<span style="color:#f85149;">Failed to load fingerprint.</span>';
+    });
+}
+
+function renderFingerprint(id, t) {
+  var body = document.getElementById('fingerprint-body-' + id);
+  if (!body) return;
+  var conditionsMet = Array.isArray(t.key_conditions_met) ? t.key_conditions_met.join(', ') : (t.key_conditions_met || '');
+  var conditionsMissing = Array.isArray(t.key_conditions_missing) ? t.key_conditions_missing.join(', ') : (t.key_conditions_missing || '');
+  body.innerHTML =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">' +
+      '<div><div style="color:#8b949e;font-size:11px;">Hypothesis</div><div style="color:#e6edf3;font-size:13px;">' + (t.hypothesis || '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">Expected Value</div><div style="color:#e6edf3;font-size:13px;">' + (t.expected_value || '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">Key Conditions Met</div><div style="color:#3fb950;font-size:13px;">' + (conditionsMet || '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">Key Conditions Missing</div><div style="color:#f85149;font-size:13px;">' + (conditionsMissing || '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">Funding @ Entry</div><div style="color:#e6edf3;font-size:13px;">' + (t.funding_rate_current != null ? (t.funding_rate_current * 100).toFixed(3) + '%' : '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">OI 24h Change</div><div style="color:#e6edf3;font-size:13px;">' + (t.open_interest_24h_change_pct != null ? t.open_interest_24h_change_pct.toFixed(2) + '%' : '&mdash;') + '</div></div>' +
+    '</div>' +
+    (t.agent_postmortem ? '<div style="margin-bottom:8px;"><div style="color:#8b949e;font-size:11px;">Postmortem</div><div style="color:#e6edf3;font-size:13px;">' + t.agent_postmortem + '</div></div>' : '') +
+    '<div style="color:#8b949e;font-size:11px;margin-bottom:4px;">OHLCV (15m)</div>' +
+    '<div id="chart-' + id + '"></div>';
+  renderCandleChart('chart-' + id, t.ohlcv_15m, { height: 160 });
+}
+</script>
+
+{% endblock %}
