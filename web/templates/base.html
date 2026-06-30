@@ -19,6 +19,8 @@
     .badge-suspended { background: #da3633; }
     .badge-shadow { background: #6e40c9; }
     .badge-live { background: #f0883e; color: #0d1117; }
+    .badge-stub { background: #da3633; }
+    .badge-live-data { background: #238636; }
     .win { color: #3fb950; }
     .loss { color: #f85149; }
     .open { color: #f0883e; }
@@ -29,14 +31,38 @@
     nav { margin-bottom: 24px; }
     nav a { color: #58a6ff; text-decoration: none; margin-right: 16px; }
     nav a:hover { text-decoration: underline; }
+    #ticker { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+              padding: 8px 12px; margin-bottom: 16px; font-size: 12px; display: flex; gap: 16px;
+              overflow-x: auto; white-space: nowrap; }
+    .ticker-item { display: inline-block; }
+    .ticker-item .price { font-weight: bold; }
   </style>
 </head>
 <body>
   <h1>Forge &mdash; Prop Trading Desk</h1>
+  <div id="ticker">Loading prices...</div>
   <nav>
     <a href="/">Overview</a>
     <a href="/health">Health</a>
   </nav>
   {% block content %}{% endblock %}
+  <script>
+    (function() {
+      const ticker = document.getElementById('ticker');
+      const ws = new WebSocket('ws://' + location.host + '/api/prices');
+      ws.onmessage = function(evt) {
+        const prices = JSON.parse(evt.data);
+        const html = Object.entries(prices).slice(0, 15).map(function(kv) {
+          var coin = kv[0].replace('-PERP', '');
+          var price = parseFloat(kv[1]).toFixed(2);
+          return '<span class="ticker-item"><span class="price">' + coin + '</span> $' + price + '</span>';
+        }).join('');
+        ticker.innerHTML = html;
+      };
+      ws.onclose = function() {
+        ticker.innerHTML = 'Prices disconnected';
+      };
+    })();
+  </script>
 </body>
 </html>

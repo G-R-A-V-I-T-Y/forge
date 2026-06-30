@@ -1,18 +1,9 @@
 from store.db import get_trades, get_positions, get_latest_account
 
 
-def build_decision_prompt(agent_id: str, thesis_text: str,
-                          market_state: dict, conn,
-                          starting_balance: float = 50000.0) -> str:
-    """
-    Assembles the full decision prompt from:
-    1. Thesis text
-    2. Performance summary (from accounts table — balance, peak, drawdown)
-    3. Last 10 closed trades (from trades table)
-    4. Current open positions (from positions table)
-    5. Market state summary (top 5 assets by abs(funding_rate_current))
-    6. Decision instruction with JSON format examples
-    """
+async def build_decision_prompt(agent_id: str, thesis_text: str,
+                                market_state: dict, conn, provider,
+                                starting_balance: float = 50000.0) -> str:
     account = get_latest_account(conn, agent_id, "paper") or {
         "balance": starting_balance,
         "peak_balance": starting_balance,
@@ -28,7 +19,6 @@ def build_decision_prompt(agent_id: str, thesis_text: str,
 
     open_positions = get_positions(conn, agent_id)
 
-    # Format last 10 closed trades
     trade_lines = []
     for t in closed_trades:
         pnl = t.get("pnl_pct", 0) or 0
@@ -38,7 +28,6 @@ def build_decision_prompt(agent_id: str, thesis_text: str,
         )
     trades_section = "\n".join(trade_lines) if trade_lines else "  No closed trades yet."
 
-    # Format open positions
     pos_lines = []
     for p in open_positions:
         pos_lines.append(
@@ -47,20 +36,26 @@ def build_decision_prompt(agent_id: str, thesis_text: str,
         )
     positions_section = "\n".join(pos_lines) if pos_lines else "  No open positions."
 
-    # Format market state summary (top 5 assets by absolute funding rate)
+    assets_only = {k: v for k, v in market_state.items() if isinstance(v, dict)}
     sorted_assets = sorted(
-        market_state.items(),
+        assets_only.items(),
         key=lambda kv: abs(kv[1].get("funding_rate_current", 0)),
         reverse=True,
-    )[:5]
+    )
     market_lines = []
     for asset, data in sorted_assets:
+        funding = data.get("funding_rate_current", 0)
+        oi_chg = data.get("open_interest_24h_change_pct", 0)
+        liq_vol = data.get("liquidation_volume_1h_usd", 0)
+        liq_dir = data.get("liquidation_direction_dominant", "?")
         market_lines.append(
             f"  {asset:12s} price={data['mid_price']:.4f} "
-            f"funding={data['funding_rate_current']:+.4%} "
-            f"OI_24h_chg={data['open_interest_24h_change_pct']:+.1f}%"
+            f"funding={funding:+.4%} OI_chg={oi_chg:+.1f}% "
+            f"liq={liq_vol:,.0f}({liq_dir})"
         )
     market_section = "\n".join(market_lines)
+
+    regime = market_state.get("_regime", "range_low_vol")
 
     return f"""=== YOUR THESIS ===
 {thesis_text}
@@ -75,7 +70,10 @@ Closed trades: {len(closed_trades)} | Win rate: {win_rate:.0%}
 === YOUR OPEN POSITIONS ===
 {positions_section}
 
-=== MARKET STATE (top 5 by funding magnitude) ===
+=== MARKET REGIME ===
+{regime}
+
+=== MARKET STATE (all {len(sorted_assets)} assets) ===
 {market_section}
 
 === DECISION ===

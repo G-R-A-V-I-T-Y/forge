@@ -1,17 +1,17 @@
 """Unified market data interface. config['data_source'] selects the backend."""
 from __future__ import annotations
 
+from market.regime import classify_regime
+
 
 class MarketProvider:
     def __init__(self, config: dict):
         source = config.get("data_source", "stub")
         if source == "hyperliquid":
             from market.hyperliquid import HyperliquidClient
-
             self._backend = HyperliquidClient()
         elif source == "stub":
             from market.stub import StubMarket
-
             self._backend = StubMarket()
         else:
             raise ValueError(
@@ -49,8 +49,7 @@ class MarketProvider:
         return await self._backend.get_all_mids()
 
     async def get_market_state(self, assets: list[str]) -> dict:
-        """Aggregated market snapshot matching the old stub.get_market_state."""
-        import time
+        """Aggregated market snapshot enriched with regime."""
         state = {}
         for asset in assets:
             mid = await self._backend.get_mid_price(asset)
@@ -58,15 +57,46 @@ class MarketProvider:
             ohlcv_15m = await self._backend.get_ohlcv(asset, "15m", 40)
             ohlcv_1h = await self._backend.get_ohlcv(asset, "1h", 20)
             ohlcv_4h = await self._backend.get_ohlcv(asset, "4h", 10)
-            book = await self._backend.get_orderbook(asset, depth=1)
-            spread = book["bids"][0][0] - book["asks"][0][0] if book.get("bids") and book.get("asks") else 0
+            oi = await self._backend.get_open_interest(asset)
+            liq = await self._backend.get_liquidations(asset, hours=4)
+            book = None
+            try:
+                book = await self._backend.get_orderbook(asset, depth=1)
+            except Exception:
+                pass
+            bid = book["bids"][0][0] if book and book.get("bids") else mid
+            ask = book["asks"][0][0] if book and book.get("asks") else mid
+
+            liq_vol_1h = sum(x["size"] for x in liq)
+            liq_dir = "long"
+            long_vol = sum(x["size"] for x in liq if x.get("side") == "long")
+            short_vol = sum(x["size"] for x in liq if x.get("side") == "short")
+            if short_vol > long_vol:
+                liq_dir = "short"
+
+            oi_24h_chg = 0.0
+            if "prevDayPx" in funding:
+                oi_24h_chg = (mid - funding["prevDayPx"]) / funding["prevDayPx"] * 100
+
             state[asset] = {
                 "ohlcv_15m": ohlcv_15m,
                 "ohlcv_1h": ohlcv_1h,
                 "ohlcv_4h": ohlcv_4h,
                 "mid_price": mid,
-                "bid": book["bids"][0][0] if book.get("bids") else mid,
-                "ask": book["asks"][0][0] if book.get("asks") else mid,
+                "bid": bid,
+                "ask": ask,
                 "funding_rate_current": funding.get("fundingRate", 0),
+                "funding_rate_8h_history": [],
+                "open_interest_usd": oi.get("openInterest", 0),
+                "open_interest_24h_change_pct": oi_24h_chg,
+                "liquidation_volume_1h_usd": liq_vol_1h,
+                "liquidation_direction_dominant": liq_dir,
             }
+
+        try:
+            btc_1d = await self._backend.get_ohlcv("BTC-PERP", "1d", 30)
+            state["_regime"] = classify_regime(btc_1d)
+        except Exception:
+            state["_regime"] = "range_low_vol"
+
         return state

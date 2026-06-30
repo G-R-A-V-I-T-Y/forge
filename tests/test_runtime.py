@@ -1,7 +1,7 @@
 import pytest
 from store.db import insert_agent, insert_account_snapshot
 from agents.runtime import AgentRuntime
-from market.stub import get_market_state
+from market.provider import MarketProvider
 from execution.paper_bridge import PaperBridge
 
 
@@ -16,6 +16,7 @@ async def test_tick_swallows_raising_llm(conn):
 
     config = {
         "universe": ["SOL-PERP"],
+        "data_source": "stub",
         "desk": {
             "starting_balance": 50000.0,
             "max_leverage": 10,
@@ -24,16 +25,17 @@ async def test_tick_swallows_raising_llm(conn):
         },
     }
 
-    runtime = AgentRuntime(
-        agent_id="test",
-        thesis_path="agents/theses/jade_hawk_v1.md",
-        config=config,
-        conn=conn,
-        get_market_fn=get_market_state,
-        llm_fn=bad_llm,
-        bridge_factory=lambda agent_id, conn, market_state: PaperBridge(
-            agent_id=agent_id, conn=conn, market_state=market_state
-        ),
-    )
-
-    await runtime.tick()  # must not raise
+    provider = MarketProvider(config)
+    async with provider:
+        runtime = AgentRuntime(
+            agent_id="test",
+            thesis_path="agents/theses/jade_hawk_v1.md",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=bad_llm,
+            bridge_factory=lambda agent_id, conn, provider: PaperBridge(
+                agent_id=agent_id, conn=conn, provider=provider
+            ),
+        )
+        await runtime.tick()  # must not raise

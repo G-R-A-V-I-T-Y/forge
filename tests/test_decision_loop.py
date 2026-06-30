@@ -1,7 +1,7 @@
 import pytest
 from store.db import init_schema, insert_agent, insert_account_snapshot
 from agents.decision_loop import run_decision
-from market.stub import get_market_state
+from market.provider import MarketProvider
 from llm.stub import decide
 from execution.paper_bridge import PaperBridge
 
@@ -9,6 +9,7 @@ AGENT_ID = "jade_hawk"
 THESIS = "Funding rate mean reversion: persistent negative funding signals short squeeze."
 CONFIG = {
     "universe": ["SOL-PERP"],
+    "data_source": "stub",
     "desk": {
         "starting_balance": 50000.0,
         "max_leverage": 10,
@@ -19,23 +20,26 @@ CONFIG = {
 }
 
 
-def bridge_factory(agent_id, conn, market_state):
-    return PaperBridge(agent_id=agent_id, conn=conn, market_state=market_state)
+def bridge_factory(agent_id, conn, provider):
+    return PaperBridge(agent_id=agent_id, conn=conn, provider=provider)
 
 
-def test_decision_loop_enter_creates_trade(conn):
+@pytest.mark.asyncio
+async def test_decision_loop_enter_creates_trade(conn):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    result = run_decision(
-        agent_id=AGENT_ID,
-        thesis_text=THESIS,
-        config=CONFIG,
-        conn=conn,
-        get_market_fn=get_market_state,
-        llm_fn=decide,
-        bridge_factory=bridge_factory,
-    )
+    provider = MarketProvider(CONFIG)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=CONFIG,
+            conn=conn,
+            provider=provider,
+            llm_fn=decide,
+            bridge_factory=bridge_factory,
+        )
 
     assert result["action"] == "enter"
     from store.db import get_trades
@@ -43,11 +47,11 @@ def test_decision_loop_enter_creates_trade(conn):
     assert len(trades) == 1
 
 
-def test_decision_loop_risk_block_does_not_create_trade(conn):
+@pytest.mark.asyncio
+async def test_decision_loop_risk_block_does_not_create_trade(conn):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    # LLM that returns an invalid order (leverage over cap)
     def bad_llm(sys, prompt):
         return {
             "action": "enter",
@@ -56,7 +60,7 @@ def test_decision_loop_risk_block_does_not_create_trade(conn):
             "entry_price": 145.20,
             "stop_loss_price": 143.00,
             "take_profit_price": 152.00,
-            "leverage": 15,  # over cap
+            "leverage": 15,
             "position_size_pct": 0.10,
             "hypothesis": "test",
             "key_conditions_met": [],
@@ -65,37 +69,42 @@ def test_decision_loop_risk_block_does_not_create_trade(conn):
             "expected_value": "test",
         }
 
-    result = run_decision(
-        agent_id=AGENT_ID,
-        thesis_text=THESIS,
-        config=CONFIG,
-        conn=conn,
-        get_market_fn=get_market_state,
-        llm_fn=bad_llm,
-        bridge_factory=bridge_factory,
-    )
+    provider = MarketProvider(CONFIG)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=CONFIG,
+            conn=conn,
+            provider=provider,
+            llm_fn=bad_llm,
+            bridge_factory=bridge_factory,
+        )
 
     assert result["action"] == "risk_blocked"
     from store.db import get_trades
     assert get_trades(conn, AGENT_ID) == []
 
 
-def test_decision_loop_wait_does_not_create_trade(conn):
+@pytest.mark.asyncio
+async def test_decision_loop_wait_does_not_create_trade(conn):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
     def wait_llm(sys, prompt):
         return {"action": "wait", "reason": "no setup fits thesis today"}
 
-    result = run_decision(
-        agent_id=AGENT_ID,
-        thesis_text=THESIS,
-        config=CONFIG,
-        conn=conn,
-        get_market_fn=get_market_state,
-        llm_fn=wait_llm,
-        bridge_factory=bridge_factory,
-    )
+    provider = MarketProvider(CONFIG)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=CONFIG,
+            conn=conn,
+            provider=provider,
+            llm_fn=wait_llm,
+            bridge_factory=bridge_factory,
+        )
 
     assert result["action"] == "wait"
     from store.db import get_trades

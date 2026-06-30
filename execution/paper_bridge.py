@@ -20,19 +20,29 @@ def _trade_id(agent_id: str, asset: str) -> str:
 
 
 class PaperBridge(TradingBridge):
-    def __init__(self, agent_id: str, conn, market_state: dict,
-                 config: dict | None = None):
+    def __init__(self, agent_id: str, conn, provider, config: dict | None = None):
         self.agent_id = agent_id
         self.conn = conn
-        self.market_state = market_state
+        self.provider = provider
         self.config = config
 
-    def enter(self, order: dict) -> dict:
-        asset = order["asset"]
-        market = self.market_state.get(asset, {})
-        fill_price = market.get("mid_price", order["entry_price"])
+    async def _fill_price(self, asset: str) -> float:
+        try:
+            book = await self.provider.get_orderbook(asset, depth=1)
+            if book.get("bids") and book.get("asks"):
+                return (book["bids"][0][0] + book["asks"][0][0]) / 2.0
+        except Exception:
+            pass
+        try:
+            return await self.provider.get_mid_price(asset)
+        except Exception:
+            return 0.0
 
-        account = self.get_account()
+    async def enter(self, order: dict) -> dict:
+        asset = order["asset"]
+        fill_price = await self._fill_price(asset)
+
+        account = await self.get_account()
         balance = account["balance"]
         notional = balance * order["position_size_pct"]
 
@@ -86,7 +96,7 @@ class PaperBridge(TradingBridge):
     def get_positions(self) -> list[dict]:
         return get_positions(self.conn, self.agent_id)
 
-    def close(self, position_id: str, reason: str) -> dict:
+    async def close(self, position_id: str, reason: str) -> dict:
         row = self.conn.execute(
             "SELECT * FROM positions WHERE id = ?", (position_id,)
         ).fetchone()
@@ -95,8 +105,7 @@ class PaperBridge(TradingBridge):
         pos = dict(row)
 
         asset = pos["asset"]
-        market = self.market_state.get(asset, {})
-        exit_price = market.get("mid_price", pos["entry_price"])
+        exit_price = await self._fill_price(asset)
 
         entry = pos["entry_price"]
         if pos["direction"] == "long":
@@ -106,11 +115,10 @@ class PaperBridge(TradingBridge):
         pnl_usd = pos["notional_usd"] * pnl_pct
 
         now = _now()
-        account = self.get_account()
+        account = await self.get_account()
         new_balance = account["balance"] + pnl_usd
         peak = max(account["peak"], new_balance)
 
-        # Single transaction: all three writes commit together or roll back together
         with self.conn:
             self.conn.execute(
                 """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
@@ -126,7 +134,7 @@ class PaperBridge(TradingBridge):
 
         return {"exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
-    def get_account(self) -> dict:
+    async def get_account(self) -> dict:
         latest = get_latest_account(self.conn, self.agent_id, "paper")
         if latest:
             return {"balance": latest["balance"], "peak": latest["peak_balance"]}
