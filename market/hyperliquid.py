@@ -74,31 +74,34 @@ class HyperliquidClient:
             self.available = True
             self._consecutive_failures = 0
 
-        async with self._sem:
-            last_exc: Exception | None = None
-            for attempt in range(self._MAX_RETRIES):
+        last_exc: Exception | None = None
+        wait: float = 0.0
+        for attempt in range(self._MAX_RETRIES):
+            if wait:
+                await asyncio.sleep(wait)
+                wait = 0.0
+            async with self._sem:
                 try:
                     resp = await self._client.post(self.BASE_URL, json=body)
                     if resp.status_code == 429:
                         wait = float(resp.headers.get("Retry-After", "1"))
                         logger.warning("Rate limited by Hyperliquid, waiting %.1fs", wait)
-                        await asyncio.sleep(wait)
                         last_exc = httpx.HTTPStatusError(
-                            f"429 rate limit", request=resp.request, response=resp
+                            "429 rate limit", request=resp.request, response=resp
                         )
                         continue
                     resp.raise_for_status()
                     self._consecutive_failures = 0
                     return resp.json()
-                except httpx.HTTPStatusError as exc:
+                except httpx.HTTPStatusError:
                     self._record_failure()
                     raise
-                except Exception as exc:
+                except Exception:
                     self._record_failure()
                     raise
-            # Exhausted retries
-            self._record_failure()
-            raise last_exc or RuntimeError("HyperliquidClient: max retries exceeded")
+        # Exhausted retries
+        self._record_failure()
+        raise last_exc or RuntimeError("HyperliquidClient: max retries exceeded")
 
     def _record_failure(self):
         self._consecutive_failures += 1
@@ -140,11 +143,7 @@ class HyperliquidClient:
         idx = _asset_index(meta, asset)
         ctx = asset_ctxs[idx]
         oi = float(ctx["openInterest"])
-        prev_px = float(ctx["prevDayPx"])
-        mark_px = float(ctx.get("markPx", prev_px))
-        # Approximate 24h OI change as price-driven change (no direct OI history endpoint)
-        change_pct = ((mark_px - prev_px) / prev_px * 100) if prev_px else 0.0
-        return {"openInterest": oi, "openInterest24hChange": change_pct}
+        return {"openInterest": oi}
 
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         # NOTE: Hyperliquid has no public liquidation history endpoint.

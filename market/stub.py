@@ -73,7 +73,11 @@ class StubMarket:
         pass
 
     async def get_ohlcv(self, asset: str, interval: str, lookback_candles: int) -> list[list]:
-        interval_sec = _INTERVAL_SECONDS.get(interval, 900)
+        if interval not in _INTERVAL_SECONDS:
+            raise ValueError(
+                f"Unknown interval {interval!r}; valid: {list(_INTERVAL_SECONDS)}"
+            )
+        interval_sec = _INTERVAL_SECONDS[interval]
         price = _PRICES.get(asset, 100.0)
         return _make_candles(price, lookback_candles, interval_sec)
 
@@ -87,10 +91,7 @@ class StubMarket:
         }
 
     async def get_open_interest(self, asset: str) -> dict:
-        return {
-            "openInterest": 420_000_000.0,
-            "openInterest24hChange": -3.2,
-        }
+        return {"openInterest": 420_000_000.0}
 
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         price = _PRICES.get(asset, 100.0)

@@ -8,9 +8,13 @@ class MarketProvider:
         if source == "hyperliquid":
             from market.hyperliquid import HyperliquidClient
             self._backend = HyperliquidClient()
-        else:
+        elif source == "stub":
             from market.stub import StubMarket
             self._backend = StubMarket()
+        else:
+            raise ValueError(
+                f"Unknown data_source {source!r}; valid options: 'stub', 'hyperliquid'"
+            )
 
     async def __aenter__(self):
         await self._backend.__aenter__()
