@@ -2,7 +2,8 @@ from store.db import get_trades, get_positions, get_latest_account
 
 
 def build_decision_prompt(agent_id: str, thesis_text: str,
-                          market_state: dict, conn) -> str:
+                          market_state: dict, conn,
+                          starting_balance: float = 50000.0) -> str:
     """
     Assembles the full decision prompt from:
     1. Thesis text
@@ -13,8 +14,8 @@ def build_decision_prompt(agent_id: str, thesis_text: str,
     6. Decision instruction with JSON format examples
     """
     account = get_latest_account(conn, agent_id, "paper") or {
-        "balance": 50000.0,
-        "peak_balance": 50000.0,
+        "balance": starting_balance,
+        "peak_balance": starting_balance,
     }
     balance = account["balance"]
     peak = account["peak_balance"]

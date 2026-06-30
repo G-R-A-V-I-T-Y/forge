@@ -43,7 +43,10 @@ def run_decision(
 
         # 2. Build prompts
         system_prompt = build_system_prompt(agent_id, config)
-        decision_prompt = build_decision_prompt(agent_id, thesis_text, market_state, conn)
+        decision_prompt = build_decision_prompt(
+            agent_id, thesis_text, market_state, conn,
+            starting_balance=desk_config["starting_balance"],
+        )
 
         # 3. Call LLM
         response = llm_fn(system_prompt, decision_prompt)
@@ -69,7 +72,7 @@ def run_decision(
             try:
                 validate_order(
                     order=response,
-                    account_balance=_get_balance(conn, agent_id),
+                    account_balance=_get_balance(conn, agent_id, desk_config["starting_balance"]),
                     config=desk_config,
                     open_position_count=len(open_positions),
                 )
@@ -91,7 +94,7 @@ def run_decision(
         return {"action": "error", "detail": str(exc)}
 
 
-def _get_balance(conn, agent_id: str) -> float:
+def _get_balance(conn, agent_id: str, starting_balance: float) -> float:
     from store.db import get_latest_account
     latest = get_latest_account(conn, agent_id, "paper")
-    return latest["balance"] if latest else 50000.0
+    return latest["balance"] if latest else starting_balance

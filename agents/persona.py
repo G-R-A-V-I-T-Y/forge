@@ -24,7 +24,7 @@ You are evaluated on:
   Profit factor (target: >1.4)
   Avg win / avg loss (target: >1.2)
   Weekly return (target: positive)
-  Max drawdown (hard limit: 15%)
+  Max drawdown (target limit: 15% — kill-switch enforcement in later milestone)
   Sharpe ratio (target: >1.5)
   Trade frequency (target: 3–15 per day)
 

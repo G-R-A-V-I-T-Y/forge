@@ -20,10 +20,12 @@ def _trade_id(agent_id: str, asset: str) -> str:
 
 
 class PaperBridge(TradingBridge):
-    def __init__(self, agent_id: str, conn, market_state: dict):
+    def __init__(self, agent_id: str, conn, market_state: dict,
+                 config: dict | None = None):
         self.agent_id = agent_id
         self.conn = conn
         self.market_state = market_state
+        self.config = config
 
     def enter(self, order: dict) -> dict:
         asset = order["asset"]
@@ -128,4 +130,9 @@ class PaperBridge(TradingBridge):
         latest = get_latest_account(self.conn, self.agent_id, "paper")
         if latest:
             return {"balance": latest["balance"], "peak": latest["peak_balance"]}
-        return {"balance": 50000.0, "peak": 50000.0}
+        starting = (
+            self.config["desk"]["starting_balance"]
+            if self.config
+            else 50000.0
+        )
+        return {"balance": starting, "peak": starting}
