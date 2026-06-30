@@ -605,7 +605,9 @@ forge/
 │       └── ...
 │
 ├── market/
-│   ├── hyperliquid.py            ← Hyperliquid REST client (OHLCV, funding, OI, liquidations)
+│   ├── provider.py               ← MarketProvider facade; selects stub or hyperliquid via config
+│   ├── stub.py                   ← StubMarket async class + get_market_state() (deterministic data)
+│   ├── hyperliquid.py            ← HyperliquidClient: REST, circuit breaker, rate-limit retry
 │   ├── regime.py                 ← market regime classifier
 │   └── web_research.py           ← search API client (reflection only)
 │
