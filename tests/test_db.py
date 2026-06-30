@@ -5,6 +5,7 @@ from store.db import (
     get_connection, init_schema, insert_agent, get_agent,
     insert_trade, get_trades, insert_position, get_positions,
     delete_position, insert_account_snapshot, get_latest_account,
+    _TRADES_MIGRATION_COLUMNS,
 )
 
 
@@ -106,3 +107,61 @@ def test_account_snapshot(conn):
     insert_account_snapshot(conn, "jade_hawk", "paper", 51000.0, 51000.0)
     latest = get_latest_account(conn, "jade_hawk", "paper")
     assert latest["balance"] == 51000.0
+
+
+def test_init_schema_adds_m4_fingerprint_columns(tmp_path):
+    db_file = str(tmp_path / "test.db")
+    conn = get_connection(db_file)
+    init_schema(conn)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+    for col in _TRADES_MIGRATION_COLUMNS:
+        assert col in columns
+    conn.close()
+
+
+def test_init_schema_migration_is_idempotent_on_pre_m4_db(tmp_path):
+    """Simulates a local data/forge.db created before M4: trades table exists
+    without the new fingerprint columns. init_schema() must backfill them
+    via ALTER TABLE without erroring on a second call."""
+    db_file = str(tmp_path / "legacy.db")
+    conn = get_connection(db_file)
+    # Mirrors the pre-M4 (M1-M3) trades table: no ohlcv blobs, no regime,
+    # no funding/OI/liquidation columns — everything else M4 builds on.
+    conn.executescript("""
+        CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'rookie', spawn_date TEXT NOT NULL,
+            cull_date TEXT, config_json TEXT NOT NULL DEFAULT '{}',
+            current_thesis_version INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE trades (
+            id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+            thesis_version INTEGER NOT NULL DEFAULT 1,
+            account_balance_at_entry REAL, mode TEXT NOT NULL DEFAULT 'paper',
+            asset TEXT NOT NULL, direction TEXT NOT NULL, entry_price REAL,
+            stop_loss_price REAL, take_profit_price REAL, leverage INTEGER,
+            position_size_pct REAL, notional_usd REAL, entry_timestamp TEXT,
+            exit_price REAL, exit_timestamp TEXT, exit_reason TEXT,
+            duration_minutes REAL, pnl_pct REAL, pnl_usd REAL, result TEXT,
+            status TEXT NOT NULL DEFAULT 'open', market_context_json TEXT,
+            agent_reasoning_json TEXT, postmortem TEXT, hypothesis TEXT,
+            key_conditions_met TEXT, key_conditions_missing TEXT,
+            confidence REAL, expected_value TEXT, agent_postmortem TEXT
+        );
+    """)
+    conn.commit()
+    insert_agent(conn, "jade_hawk", "jade_hawk", "2026-06-29T00:00:00Z", "{}")
+    conn.execute("INSERT INTO trades (id, agent_id, asset, direction) VALUES (?, ?, ?, ?)",
+                 ("t1", "jade_hawk", "SOL-PERP", "long"))
+    conn.commit()
+
+    init_schema(conn)  # should ALTER TABLE the existing trades table, not fail
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+    for col in _TRADES_MIGRATION_COLUMNS:
+        assert col in columns
+
+    # pre-existing row survives the migration
+    row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
+    assert row["asset"] == "SOL-PERP"
+    assert row["regime"] is None
+
+    init_schema(conn)  # second call must be a no-op, not raise "duplicate column"
+    conn.close()

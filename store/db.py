@@ -15,9 +15,17 @@ def get_connection(db_path: str) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     schema = SCHEMA_PATH.read_text()
-    conn.executescript(schema)
+    # Split on the "-- INDEXES" marker: tables must exist (and any pending
+    # column migration must run) before indexes on new columns are created,
+    # otherwise CREATE INDEX on e.g. trades(regime) fails against a
+    # pre-existing local DB that predates that column.
+    tables_sql, _, indexes_sql = schema.partition("-- INDEXES")
+    conn.executescript(tables_sql)
     conn.commit()
     _migrate_trades_columns(conn)
+    if indexes_sql:
+        conn.executescript(indexes_sql)
+        conn.commit()
 
 
 # Columns added after the initial M1-M3 schema. CREATE TABLE IF NOT EXISTS

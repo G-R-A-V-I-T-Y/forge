@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS chat_history (
     created_at TEXT NOT NULL
 );
 
+-- INDEXES
+-- (store/db.py.init_schema executes table-creation statements, then runs
+-- the trades-column migration, then this block — so indexes on columns
+-- added after the original M1-M3 schema, e.g. regime, can never run
+-- against a table that doesn't have them yet.)
 CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_asset ON trades(asset);
