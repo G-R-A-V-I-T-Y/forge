@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
 from market.provider import MarketProvider
-from llm.stub import decide
+from llm import client as llm_client
 from execution.paper_bridge import PaperBridge
 from agents.runtime import AgentRuntime
 from web.app import app as web_app
@@ -51,6 +51,9 @@ async def main():
     def bridge_factory(agent_id: str, conn, provider) -> PaperBridge:
         return PaperBridge(agent_id=agent_id, conn=conn, provider=provider, config=config)
 
+    def llm_fn(system_prompt: str, decision_prompt: str) -> dict:
+        return llm_client.decide(system_prompt, decision_prompt, config=config)
+
     conn = get_connection(str(DB_PATH))
     init_schema(conn)
 
@@ -68,7 +71,7 @@ async def main():
         config=config,
         conn=conn,
         provider=provider,
-        llm_fn=decide,
+        llm_fn=llm_fn,
         bridge_factory=bridge_factory,
     )
 
@@ -82,9 +85,10 @@ async def main():
     server = uvicorn.Server(server_config)
     logger.info("Web UI starting at http://localhost:8000")
 
-    await server.serve()
-
-    await provider.__aexit__(None, None, None)
+    try:
+        await server.serve()
+    finally:
+        await provider.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":
