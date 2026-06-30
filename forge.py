@@ -44,12 +44,12 @@ def setup_agent(conn, agent_id: str, config: dict) -> None:
     logger.info("Agent %s ready", agent_id)
 
 
-def bridge_factory(agent_id: str, conn, market_state: dict) -> PaperBridge:
-    return PaperBridge(agent_id=agent_id, conn=conn, market_state=market_state)
-
-
 async def main():
     config = load_config()
+
+    def bridge_factory(agent_id: str, conn, market_state: dict) -> PaperBridge:
+        return PaperBridge(agent_id=agent_id, conn=conn, market_state=market_state, config=config)
+
     conn = get_connection(str(DB_PATH))
     init_schema(conn)
 
