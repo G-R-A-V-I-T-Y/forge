@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Forge{% endblock %}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Courier New', monospace; background: #0d1117; color: #e6edf3; padding: 20px; }
+    h1 { color: #f0883e; margin-bottom: 16px; }
+    h2 { color: #58a6ff; margin: 20px 0 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th { background: #161b22; color: #8b949e; text-align: left; padding: 8px 12px; font-size: 12px; }
+    td { padding: 8px 12px; border-bottom: 1px solid #21262d; font-size: 13px; }
+    tr:hover td { background: #161b22; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+    .badge-rookie { background: #238636; }
+    .badge-active { background: #1f6feb; }
+    .badge-suspended { background: #da3633; }
+    .badge-shadow { background: #6e40c9; }
+    .badge-live { background: #f0883e; color: #0d1117; }
+    .win { color: #3fb950; }
+    .loss { color: #f85149; }
+    .open { color: #f0883e; }
+    .stat-card { display: inline-block; background: #161b22; border: 1px solid #30363d;
+                 border-radius: 6px; padding: 12px 20px; margin: 8px 8px 8px 0; min-width: 140px; }
+    .stat-label { color: #8b949e; font-size: 11px; }
+    .stat-value { color: #e6edf3; font-size: 20px; font-weight: bold; margin-top: 4px; }
+    nav { margin-bottom: 24px; }
+    nav a { color: #58a6ff; text-decoration: none; margin-right: 16px; }
+    nav a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Forge &mdash; Prop Trading Desk</h1>
+  <nav>
+    <a href="/">Overview</a>
+    <a href="/health">Health</a>
+  </nav>
+  {% block content %}{% endblock %}
+</body>
+</html>
