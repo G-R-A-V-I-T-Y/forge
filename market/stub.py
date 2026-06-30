@@ -1,6 +1,5 @@
 """Hardcoded deterministic market data for skeleton testing."""
 import time
-import asyncio
 
 # Reference prices for each asset (close to real prices as of mid-2026)
 _PRICES = {
@@ -95,8 +94,9 @@ class StubMarket:
 
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         price = _PRICES.get(asset, 100.0)
+        # ts is set to now so the entry always passes any time-window filter
         return [
-            {"side": "long", "volume_usd": 8_500_000.0, "price": price, "ts": int(time.time() * 1000)},
+            {"side": "long", "size": 8_500_000.0, "price": price, "ts": int(time.time() * 1000)},
         ]
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:

@@ -91,9 +91,6 @@ class HyperliquidClient:
                     self._consecutive_failures = 0
                     return resp.json()
                 except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 429:
-                        last_exc = exc
-                        continue
                     self._record_failure()
                     raise
                 except Exception as exc:
@@ -151,11 +148,14 @@ class HyperliquidClient:
 
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         # NOTE: Hyperliquid has no public liquidation history endpoint.
-        # recentTrades is used as a proxy for liquidation-driven volume.
+        # recentTrades is used as a proxy; filtered to the requested time window.
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - hours * 3600 * 1000
         data = await self._post({"type": "recentTrades", "coin": asset})
         return [
             {"side": t["side"], "price": float(t["px"]), "size": float(t["sz"]), "ts": t["time"]}
             for t in data
+            if t["time"] >= cutoff_ms
         ]
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
@@ -167,6 +167,8 @@ class HyperliquidClient:
 
     async def get_mid_price(self, asset: str) -> float:
         book = await self.get_orderbook(asset, depth=1)
+        if not book["bids"] or not book["asks"]:
+            raise ValueError(f"Empty order book for {asset!r}: cannot compute mid price")
         best_bid = book["bids"][0][0]
         best_ask = book["asks"][0][0]
         return (best_bid + best_ask) / 2.0
@@ -174,8 +176,11 @@ class HyperliquidClient:
 
 def _interval_to_ms(interval: str) -> int:
     units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+    suffix = interval[-1]
+    if suffix not in units:
+        raise ValueError(f"Unknown interval suffix {suffix!r} in {interval!r}; valid: m, h, d")
     n = int(interval[:-1])
-    return n * units[interval[-1]]
+    return n * units[suffix]
 
 
 def _asset_index(meta: dict, asset: str) -> int:
