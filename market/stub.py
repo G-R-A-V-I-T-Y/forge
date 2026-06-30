@@ -57,12 +57,27 @@ def _make_candles(price: float, n: int, interval_seconds: int) -> list:
     return candles
 
 
-_INTERVAL_SECONDS = {
-    "15m": 900,
-    "1h": 3600,
-    "4h": 14400,
-    "1d": 86400,
-}
+def _interval_to_seconds(interval: str) -> int:
+    """Match HyperliquidClient._interval_to_ms but return seconds for candle gen."""
+    if not interval or len(interval) < 2:
+        raise ValueError(
+            f"Invalid interval {interval!r}; expected format '<N>m', '<N>h', or '<N>d'"
+        )
+    units = {"m": 60, "h": 3600, "d": 86400}
+    suffix = interval[-1]
+    if suffix not in units:
+        raise ValueError(
+            f"Unknown interval suffix {suffix!r} in {interval!r}; valid: m, h, d"
+        )
+    try:
+        n = int(interval[:-1])
+    except ValueError:
+        raise ValueError(
+            f"Invalid interval number in {interval!r}; expected '<N>m', '<N>h', or '<N>d'"
+        )
+    if n <= 0:
+        raise ValueError(f"Interval number must be positive, got {n} in {interval!r}")
+    return n * units[suffix]
 
 
 class StubMarket:
@@ -77,11 +92,7 @@ class StubMarket:
     async def get_ohlcv(
         self, asset: str, interval: str, lookback_candles: int
     ) -> list[list]:
-        if interval not in _INTERVAL_SECONDS:
-            raise ValueError(
-                f"Unknown interval {interval!r}; valid: {list(_INTERVAL_SECONDS)}"
-            )
-        interval_sec = _INTERVAL_SECONDS[interval]
+        interval_sec = _interval_to_seconds(interval)
         price = _PRICES.get(asset, 100.0)
         return _make_candles(price, lookback_candles, interval_sec)
 
@@ -99,15 +110,20 @@ class StubMarket:
 
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         price = _PRICES.get(asset, 100.0)
-        # ts is set to now so the entry always passes any time-window filter
-        return [
-            {
-                "side": "long",
-                "size": 8_500_000.0,
-                "price": price,
-                "ts": int(time.time() * 1000),
-            },
-        ]
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - hours * 3600 * 1000
+        entry_ts = now_ms
+        if entry_ts >= cutoff_ms:
+            return [
+                {
+                    "side": "long",
+                    "price": price,
+                    "size": 8_500_000.0,
+                    "ts": entry_ts,
+                    "_proxy": "recentTrades",
+                },
+            ]
+        return []
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         price = _PRICES.get(asset, 100.0)
@@ -126,7 +142,8 @@ class StubMarket:
         return _PRICES.get(asset, 100.0)
 
     async def get_all_mids(self) -> dict[str, float]:
-        return dict(_PRICES)
+        # Return bare coin names (no -PERP suffix) matching HyperliquidClient
+        return {k.replace("-PERP", ""): v for k, v in _PRICES.items()}
 
 
 def get_market_state(assets: list[str]) -> dict:

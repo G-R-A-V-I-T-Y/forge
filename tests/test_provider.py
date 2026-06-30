@@ -55,8 +55,8 @@ async def test_stub_provider_get_all_mids():
     async with provider:
         mids = await provider.get_all_mids()
     assert isinstance(mids, dict)
-    assert "BTC-PERP" in mids
-    assert mids["BTC-PERP"] > 0.0
+    assert "BTC" in mids
+    assert mids["BTC"] > 0.0
 
 
 @pytest.mark.asyncio

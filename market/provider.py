@@ -47,3 +47,26 @@ class MarketProvider:
 
     async def get_all_mids(self) -> dict[str, float]:
         return await self._backend.get_all_mids()
+
+    async def get_market_state(self, assets: list[str]) -> dict:
+        """Aggregated market snapshot matching the old stub.get_market_state."""
+        import time
+        state = {}
+        for asset in assets:
+            mid = await self._backend.get_mid_price(asset)
+            funding = await self._backend.get_funding_rate(asset)
+            ohlcv_15m = await self._backend.get_ohlcv(asset, "15m", 40)
+            ohlcv_1h = await self._backend.get_ohlcv(asset, "1h", 20)
+            ohlcv_4h = await self._backend.get_ohlcv(asset, "4h", 10)
+            book = await self._backend.get_orderbook(asset, depth=1)
+            spread = book["bids"][0][0] - book["asks"][0][0] if book.get("bids") and book.get("asks") else 0
+            state[asset] = {
+                "ohlcv_15m": ohlcv_15m,
+                "ohlcv_1h": ohlcv_1h,
+                "ohlcv_4h": ohlcv_4h,
+                "mid_price": mid,
+                "bid": book["bids"][0][0] if book.get("bids") else mid,
+                "ask": book["asks"][0][0] if book.get("asks") else mid,
+                "funding_rate_current": funding.get("fundingRate", 0),
+            }
+        return state

@@ -47,7 +47,9 @@ class HyperliquidClient:
     BASE_URL = "https://api.hyperliquid.xyz/info"
     _MAX_RETRIES = 3
     _FAILURE_THRESHOLD = 5
-    _CIRCUIT_COOLDOWN = 60.0  # seconds before auto-recovery attempt
+    _CIRCUIT_COOLDOWN = 60.0
+    _PROBE_FAILURES = 0
+    _PROBE_FAILURE_LIMIT = 2
 
     def __init__(self):
         self._client: httpx.AsyncClient | None = None
@@ -71,12 +73,11 @@ class HyperliquidClient:
                 raise RuntimeError(
                     "HyperliquidClient circuit breaker open — skipping request"
                 )
-            # Auto-recovery: reset and try again
+            self._PROBE_FAILURES = 0
             logger.info("HyperliquidClient: circuit breaker reset, retrying")
-            self.available = True
-            self._consecutive_failures = 0
 
         last_exc: Exception | None = None
+        retry_count = 0
         wait: float = 0.0
         for attempt in range(self._MAX_RETRIES):
             if wait:
@@ -96,28 +97,39 @@ class HyperliquidClient:
                         last_exc = httpx.HTTPStatusError(
                             "429 rate limit", request=resp.request, response=resp
                         )
+                        retry_count += 1
                         continue
                     resp.raise_for_status()
                     self._consecutive_failures = 0
+                    self._PROBE_FAILURES = 0
                     return resp.json()
-                except httpx.HTTPStatusError:
-                    self._record_failure()
-                    raise
+                except (httpx.HTTPStatusError, httpx.RequestError) as req_err:
+                    last_exc = req_err
+                    retry_count += 1
+                    wait = 2.0 ** attempt
                 except Exception:
-                    self._record_failure()
-                    raise
-        # Exhausted retries
-        self._record_failure()
+                    retry_count += 1
+                    wait = 2.0 ** attempt
+        self._record_failure(retry_count)
         raise last_exc or RuntimeError("HyperliquidClient: max retries exceeded")
 
-    def _record_failure(self):
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._FAILURE_THRESHOLD:
+    def _record_failure(self, count: int = 1):
+        self._consecutive_failures += count
+        if not self.available:
+            self._PROBE_FAILURES += 1
+        if self._consecutive_failures >= self._FAILURE_THRESHOLD and self.available:
             self.available = False
             self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
             logger.error(
                 "HyperliquidClient: %d consecutive failures — circuit breaker opened",
                 self._consecutive_failures,
+            )
+        elif not self.available and self._PROBE_FAILURES >= self._PROBE_FAILURE_LIMIT:
+            self.available = False
+            self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN
+            logger.error(
+                "HyperliquidClient: probe failed %d times — circuit re-opened",
+                self._PROBE_FAILURES,
             )
 
     async def get_all_mids(self) -> dict[str, float]:
@@ -159,7 +171,6 @@ class HyperliquidClient:
         ctx = asset_ctxs[idx]
         return {
             "fundingRate": float(ctx["fundingRate"]),
-            "openInterest": float(ctx["openInterest"]),
             "prevDayPx": float(ctx["prevDayPx"]),
         }
 
@@ -173,6 +184,7 @@ class HyperliquidClient:
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         # NOTE: Hyperliquid has no public liquidation history endpoint.
         # recentTrades is used as a proxy; filtered to the requested time window.
+        # The returned entries are ALL recent trades, not exclusively liquidations.
         now_ms = int(time.time() * 1000)
         cutoff_ms = now_ms - hours * 3600 * 1000
         data = await self._post({"type": "recentTrades", "coin": asset})
@@ -182,6 +194,7 @@ class HyperliquidClient:
                 "price": float(t["px"]),
                 "size": float(t["sz"]),
                 "ts": t["time"],
+                "_proxy": "recentTrades",
             }
             for t in data
             if t["time"] >= cutoff_ms
@@ -206,13 +219,26 @@ class HyperliquidClient:
 
 
 def _interval_to_ms(interval: str) -> int:
+    if not interval or len(interval) < 2:
+        raise ValueError(
+            f"Invalid interval {interval!r}; expected format '<N>m', '<N>h', or '<N>d'"
+        )
     units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
     suffix = interval[-1]
     if suffix not in units:
         raise ValueError(
             f"Unknown interval suffix {suffix!r} in {interval!r}; valid: m, h, d"
         )
-    n = int(interval[:-1])
+    try:
+        n = int(interval[:-1])
+    except ValueError:
+        raise ValueError(
+            f"Invalid interval number in {interval!r}; expected '<N>m', '<N>h', or '<N>d'"
+        )
+    if n <= 0:
+        raise ValueError(
+            f"Interval number must be positive, got {n} in {interval!r}"
+        )
     return n * units[suffix]
 
 
