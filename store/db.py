@@ -33,16 +33,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
 # never committed), so any column added here must also be backfilled via
 # ALTER TABLE for users who already initialized a DB before this change.
 _TRADES_MIGRATION_COLUMNS = {
-    "ohlcv_15m_blob": "BLOB",
-    "ohlcv_1h_blob": "BLOB",
-    "ohlcv_4h_blob": "BLOB",
-    "funding_rate_current": "REAL",
-    "funding_rate_8h_history": "TEXT",
-    "open_interest_usd": "REAL",
-    "open_interest_24h_change_pct": "REAL",
-    "liquidation_volume_1h_usd": "REAL",
-    "liquidation_direction_dominant": "TEXT",
+    "ohlcv_15m_40_blob": "BLOB",
+    "ohlcv_1h_20_blob": "BLOB",
+    "ohlcv_4h_10_blob": "BLOB",
+    "funding_history_blob": "BLOB",
+    "oi_data_json": "TEXT",
+    "liquidation_data_json": "TEXT",
     "regime": "TEXT",
+    "expected_value_text": "TEXT",
+    "funding_rate_current": "REAL",
+    "open_interest_24h_change_pct": "REAL",
 }
 
 

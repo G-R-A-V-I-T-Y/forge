@@ -191,6 +191,29 @@ async def api_query(
     return JSONResponse(trades)
 
 
+@app.post("/api/query")
+async def api_query_post(request: Request):
+    """POST /api/query — accepts JSON filter params, returns filtered trades.
+    Used by the Head of Desk chat (future milestone) and for programmatic access.
+    """
+    conn = app.state.conn
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    trades = query_trades(
+        conn,
+        agent_id=body.get("agent"), asset=body.get("asset"),
+        direction=body.get("direction"), regime=body.get("regime"),
+        outcome=body.get("outcome"), status=body.get("status"),
+        date_from=body.get("date_from"), date_to=body.get("date_to"),
+        funding_rate_min=body.get("funding_rate_min"),
+        funding_rate_max=body.get("funding_rate_max"),
+        oi_change_min=body.get("oi_change_min"),
+        oi_change_max=body.get("oi_change_max"),
+        limit=body.get("limit", 200), offset=body.get("offset", 0),
+        decode_ohlcv=body.get("include_ohlcv", False),
+    )
+    return JSONResponse(trades)
+
+
 @app.post("/api/positions/{position_id}/close")
 async def api_close_position(position_id: str):
     """Manually close an open position (button on the overview page).

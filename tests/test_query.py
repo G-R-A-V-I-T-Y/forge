@@ -1,7 +1,10 @@
 """Tests for store/query.py."""
 from store.db import insert_agent, insert_trade
 from store.fingerprint import write_entry, write_outcome
-from store.query import query_trades, count_trades, get_trade, win_rate, summarize
+from store.query import (
+    query_trades, count_trades, get_trade, win_rate, summarize,
+    format_trades_summary,
+)
 
 AGENTS = ["jade_hawk", "iron_moth"]
 
@@ -91,7 +94,7 @@ def test_query_trades_decodes_ohlcv_by_default(conn):
     results = query_trades(conn, asset="SOL-PERP", limit=1)
     assert "ohlcv_15m" in results[0]
     assert results[0]["ohlcv_15m"] == [[1, 1.0, 2.0, 0.5, 1.5, 100.0]]
-    assert "ohlcv_15m_blob" not in results[0]
+    assert "ohlcv_15m_40_blob" not in results[0]
 
 
 def test_count_trades_matches_query_filters(conn):
@@ -121,3 +124,16 @@ def test_summarize_helper(conn):
     assert s["wins"] == 3
     assert s["losses"] == 1
     assert s["win_rate"] == 0.75
+
+
+def test_format_trades_summary_handles_closed_trade_with_no_result(conn):
+    # A trade can be closed (e.g. by a manual/stop-loss exit) before a
+    # win/loss classification is written, leaving result=None. This must
+    # not crash format_trades_summary's status-fallback formatting.
+    _seed_desk(conn)
+    _seed_trade(conn, "t08", "jade_hawk", "SOL-PERP", "long",
+                "range_high_vol", -0.002, -1.5, None, 0.0)
+    trades = query_trades(conn, agent_id="jade_hawk", decode_ohlcv=False)
+    text = format_trades_summary(trades)
+    assert "SOL-PERP" in text
+    assert "closed" in text  # falls back to status when result is None

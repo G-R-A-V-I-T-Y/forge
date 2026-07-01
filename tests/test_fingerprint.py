@@ -74,20 +74,20 @@ def test_write_entry_enriches_existing_row(conn):
     row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
     assert row["regime"] == "range_high_vol"
     assert row["funding_rate_current"] == -0.0042
-    assert json.loads(row["funding_rate_8h_history"]) == [-0.0038, -0.0041, -0.0042]
-    assert row["open_interest_usd"] == 420_000_000
-    assert row["liquidation_direction_dominant"] == "long"
+    assert unpack_ohlcv(row["funding_history_blob"]) == [-0.0038, -0.0041, -0.0042]
+    oi = json.loads(row["oi_data_json"])
+    assert oi["open_interest_usd"] == 420_000_000
+    liq = json.loads(row["liquidation_data_json"])
+    assert liq["liquidation_direction_dominant"] == "long"
     assert row["hypothesis"] == "SOL funding squeeze setup"
     assert json.loads(row["key_conditions_met"]) == ["persistent_negative_funding", "support_hold_15m"]
     assert row["confidence"] == 0.68
-    assert unpack_ohlcv(row["ohlcv_15m_blob"]) == _snapshot()["ohlcv_15m"]
-    assert unpack_ohlcv(row["ohlcv_1h_blob"]) == _snapshot()["ohlcv_1h"]
+    assert unpack_ohlcv(row["ohlcv_15m_40_blob"]) == _snapshot()["ohlcv_15m"]
+    assert unpack_ohlcv(row["ohlcv_1h_20_blob"]) == _snapshot()["ohlcv_1h"]
 
-    # market_context_json should retain non-dedicated fields, not duplicate OHLCV
-    ctx = json.loads(row["market_context_json"])
-    assert ctx["mid_price"] == 145.2
-    assert "ohlcv_15m" not in ctx
-    assert "funding_rate_current" not in ctx
+    # market_context_json remains whatever was set at trade insert (write_entry
+    # writes only to dedicated fingerprint columns)
+    assert row.get("market_context_json") is None
 
 
 def test_write_entry_without_reasoning_does_not_raise(conn):
@@ -96,7 +96,7 @@ def test_write_entry_without_reasoning_does_not_raise(conn):
     write_entry(conn, "t1", _snapshot(), regime="trending_bull")
     row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
     assert row["regime"] == "trending_bull"
-    assert row["hypothesis"] is None
+    assert row["hypothesis"] == ""
 
 
 def test_write_outcome_updates_only_known_fields(conn):

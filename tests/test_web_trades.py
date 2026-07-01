@@ -68,7 +68,7 @@ def test_api_query_returns_json_list(conn):
     data = r.json()
     assert len(data) == 1
     assert data[0]["id"] == "t1"
-    assert "ohlcv_15m_blob" not in data[0]
+    assert "ohlcv_15m_40_blob" not in data[0]
     assert "ohlcv_15m" not in data[0]  # omitted by default (include_ohlcv=false)
 
 
