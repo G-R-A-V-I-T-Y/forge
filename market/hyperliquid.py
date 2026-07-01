@@ -261,7 +261,7 @@ class HyperliquidClient:
         ]
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
-        data = await self._post({"type": "l2Book", "coin": asset})
+        data = await self._post({"type": "l2Book", "coin": self._normalize_asset(asset)})
         if data is None:
             logger.debug("l2Book returned None for %s", asset)
             return {"bids": [], "asks": []}

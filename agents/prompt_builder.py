@@ -343,6 +343,9 @@ def _build_full_asset_blocks(
         ar = _n(data.get("aggressor_ratio"), ".3f")
         ats = _n(data.get("avg_trade_size"), ".4f")
         lt = _n(data.get("largest_trade"), ".1f")
+        oi_dd = _pct(data.get("oi_drawdown_pct"))
+        lt_vol = _n(data.get("large_trade_volume_usd"), ".1f")
+        liq_flag = _n(data.get("liquidation_cascade_flag"), ".0f")
 
         blocks.append(
             f"  {asset:12s} price={price} ret5={ret5} ret30={ret30} "
@@ -350,9 +353,10 @@ def _build_full_asset_blocks(
             f"             fund={fund} fund_z={fund_z} oi_z={oi_z} vol_z={vol_z} "
             f"vwap={vwap} atr={atr} rsi={rsi} rv={rv}\n"
             f"             spread={spread} bid={bd} ask={ad} "
-            f"depth={di} slip={se}\n"
+            f"depth={di} slip={se} oi_dd={oi_dd}\n"
             f"             buy={bv} sell={sv} agg={ar} avg_trade={ats} "
-            f"largest={lt} candles_5m={_candle_summary(data.get('candles_5m'))}"
+            f"largest={lt} lt_vol={lt_vol} liq_flag={liq_flag} "
+            f"candles_5m={_candle_summary(data.get('candles_5m'))}"
         )
     return blocks
 

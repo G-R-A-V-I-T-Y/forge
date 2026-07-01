@@ -98,6 +98,7 @@ PER_ASSET_FIELDS = [
     "sell_volume", "aggressor_ratio",     "avg_trade_size", "largest_trade",
     "momentum_acceleration", "atr_percentile", "bb_width",
     "bb_width_percentile", "volume_percentile_14d", "funding_acceleration",
+    "oi_drawdown_pct", "large_trade_volume_usd", "liquidation_cascade_flag",
     "candles_5m", "candles_30m", "candles_4h",
 ]
 
@@ -411,6 +412,45 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
     avg_trade_size = statistics.mean([t["size"] for t in trades]) if trades else None
     largest_trade = max((t["size"] * t["price"] for t in trades), default=None)
 
+    # --- Liquidation proxy fields (derived from existing data, no new API) ---
+
+    # OI drawdown: percentage change from the prior OI sample. Negative means
+    # OI dropped between cycles, which is a hallmark of forced liquidations
+    # (positions removed mechanically). steel_crane uses this as its OI-drawdown
+    # pillar; copper_vane and violet_lion also reference OI change magnitude.
+    oi_prior = prior_oi_history[-1] if prior_oi_history else None
+    oi_drawdown_pct = (
+        (oi_val - oi_prior) / oi_prior
+        if oi_val is not None and oi_prior is not None and oi_prior != 0
+        else None
+    )
+
+    # Large-trade volume: sum of notional (size * price) for trades that are
+    # > 3x the average trade size. On Hyperliquid the trade tape includes all
+    # fills; outsized trades during volatile periods are statistically likely
+    # to be liquidations (forced market orders). This gives steel_crane its
+    # primary "$10M / $5M / $2M" magnitude proxy without a dedicated API.
+    large_trade_threshold = (avg_trade_size or 0) * 3
+    large_trade_volume_usd = (
+        sum(t["size"] * t["price"] for t in trades if t["size"] > large_trade_threshold)
+        if trades and avg_trade_size and large_trade_threshold > 0
+        else None
+    )
+
+    # Liquidation cascade flag: composite 0/1 signal that fires when OI drops
+    # sharply (>3%) while volume is elevated (z-score > 1.5) and price moves
+    # hard (>1.5% in 5m). All three conditions together are a strong proxy for
+    # a forced-liquidation cascade rather than organic selling.
+    liquidation_cascade_flag = (
+        1
+        if (oi_drawdown_pct is not None
+            and oi_drawdown_pct < -0.03
+            and volume_zscore is not None
+            and volume_zscore > 1.5
+            and abs(return_5m or 0) > 0.015)
+        else 0
+    )
+
     # Raw 5m series (already fetched for the indicators above — no new API
     # call) plus two longer-horizon resamples of that same series, carried
     # in the packet so a trade fingerprint recorded off this asset's fields
@@ -449,6 +489,9 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
         "aggressor_ratio": aggressor_ratio,
         "avg_trade_size": avg_trade_size,
         "largest_trade": largest_trade,
+        "oi_drawdown_pct": oi_drawdown_pct,
+        "large_trade_volume_usd": large_trade_volume_usd,
+        "liquidation_cascade_flag": liquidation_cascade_flag,
         "candles_5m": candles_5m,
         "candles_30m": candles_30m,
         "candles_4h": candles_4h,
