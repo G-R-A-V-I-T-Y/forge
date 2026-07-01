@@ -32,4 +32,5 @@ desk:
   heartbeat_path: "data/heartbeat.json"
 
 data_source: hyperliquid          # stub | hyperliquid
-llm_backend: stub                 # stub | ollama — set ollama when local Ollama is running
+llm_backend: ollama                # stub | ollama — ollama uses the local Ollama instance
+llm_model: "qwen3.6:35b_optimized" # model name passed to Ollama's /api/chat
