@@ -23,6 +23,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(tables_sql)
     conn.commit()
     _migrate_trades_columns(conn)
+    _migrate_agents_columns(conn)
     if indexes_sql:
         conn.executescript(indexes_sql)
         conn.commit()
@@ -43,6 +44,14 @@ _TRADES_MIGRATION_COLUMNS = {
     "expected_value_text": "TEXT",
     "funding_rate_current": "REAL",
     "open_interest_24h_change_pct": "REAL",
+    "model_used": "TEXT",
+}
+
+# Columns added by the model-fallback-chain feature. Same rationale as
+# _TRADES_MIGRATION_COLUMNS above: CREATE TABLE IF NOT EXISTS is a no-op
+# against a pre-existing agents table, so this must be backfilled too.
+_AGENTS_MIGRATION_COLUMNS = {
+    "last_model_used": "TEXT",
 }
 
 
@@ -52,6 +61,15 @@ def _migrate_trades_columns(conn: sqlite3.Connection) -> None:
     for col, sql_type in _TRADES_MIGRATION_COLUMNS.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}")
+    conn.commit()
+
+
+def _migrate_agents_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add model-fallback-chain columns to an existing agents table."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(agents)")}
+    for col, sql_type in _AGENTS_MIGRATION_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {sql_type}")
     conn.commit()
 
 
@@ -76,6 +94,18 @@ def insert_agent(
 def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
     return dict(row) if row else None
+
+
+def update_last_model_used(conn: sqlite3.Connection, agent_id: str, model_name: str | None) -> None:
+    """Record which model produced (or failed to produce) an agent's most
+    recent decision cycle — "most recently used model", not "model used for
+    the last trade": called after every wait/close/enter/error cycle, per
+    agents/decision_loop.py's run_decision()."""
+    conn.execute(
+        "UPDATE agents SET last_model_used = ? WHERE id = ?",
+        (model_name, agent_id),
+    )
+    conn.commit()
 
 
 def insert_trade(conn: sqlite3.Connection, trade: dict) -> None:

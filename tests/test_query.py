@@ -89,6 +89,38 @@ def test_query_trades_regime_filter(conn):
     assert results[0]["id"] == "t03"
 
 
+def test_query_trades_includes_model_used(conn):
+    """query_trades() does SELECT * FROM trades, so model_used flows
+    through automatically once the schema/migration adds the column — no
+    dedicated decode/filter logic needed, unlike the JSON/msgpack columns."""
+    insert_agent(conn, "jade_hawk", "jade_hawk", "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, {
+        "id": "t_model",
+        "agent_id": "jade_hawk",
+        "thesis_version": 1,
+        "account_balance_at_entry": 50000.0,
+        "mode": "paper",
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop_loss_price": 95.0,
+        "take_profit_price": 110.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "entry_timestamp": "2026-06-29T14:37:12Z",
+        "status": "open",
+    })
+    write_entry(conn, "t_model", {}, regime="range_high_vol", model_used="Claude Sonnet 5 (low)")
+
+    result = get_trade(conn, "t_model", decode_ohlcv=False)
+    assert result["model_used"] == "Claude Sonnet 5 (low)"
+
+    results = query_trades(conn, decode_ohlcv=False, limit=10)
+    match = next(t for t in results if t["id"] == "t_model")
+    assert match["model_used"] == "Claude Sonnet 5 (low)"
+
+
 def test_query_trades_decodes_ohlcv_by_default(conn):
     _seed_desk(conn)
     results = query_trades(conn, asset="SOL-PERP", limit=1)

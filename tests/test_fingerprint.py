@@ -135,6 +135,22 @@ def test_write_entry_without_reasoning_does_not_raise(conn):
     assert row["hypothesis"] == ""
 
 
+def test_write_entry_stores_model_used(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, _base_trade())
+    write_entry(conn, "t1", _snapshot(), regime="range_high_vol", model_used="Big Pickle")
+    row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
+    assert row["model_used"] == "Big Pickle"
+
+
+def test_write_entry_without_model_used_leaves_column_null(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, _base_trade())
+    write_entry(conn, "t1", _snapshot(), regime="range_high_vol")
+    row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
+    assert row["model_used"] is None
+
+
 def test_write_outcome_updates_only_known_fields(conn):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_trade(conn, _base_trade())
