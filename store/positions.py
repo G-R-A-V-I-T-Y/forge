@@ -14,6 +14,37 @@ def get_all_open_positions(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def update_position_pnl(conn, assets_data: dict) -> None:
+    rows = conn.execute(
+        "SELECT * FROM positions ORDER BY agent_id, opened_at"
+    ).fetchall()
+    for row in rows:
+        pos = dict(row)
+        asset = pos["asset"]
+        direction = pos["direction"]
+        entry = pos["entry_price"]
+        position_id = pos["id"]
+        leverage = pos.get("leverage", 1)
+
+        asset_data = assets_data.get(asset)
+        if asset_data is None:
+            continue
+        current_price = asset_data.get("price")
+        if current_price is None or entry is None or entry == 0:
+            continue
+
+        if direction == "long":
+            pnl = (current_price - entry) / entry * leverage
+        else:
+            pnl = (entry - current_price) / entry * leverage
+
+        conn.execute(
+            "UPDATE positions SET current_pnl_pct = ? WHERE id = ?",
+            (pnl, position_id),
+        )
+    conn.commit()
+
+
 def get_desk_positions_summary(conn, exclude_agent_id: str | None = None) -> str:
     """Return a formatted string for LLM prompt context.
 

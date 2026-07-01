@@ -77,7 +77,7 @@
 <h2>Open Positions</h2>
 <table id="positions-table">
   <tr>
-    <th>Agent</th><th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>Opened</th><th></th>
+    <th>Agent</th><th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>PnL%</th><th>Opened</th><th></th>
   </tr>
   {% for p in positions %}
   <tr>
@@ -88,6 +88,9 @@
     <td>{{ "{:.4f}".format(p.stop_loss_price) }}</td>
     <td>{{ "{:.4f}".format(p.take_profit_price) }}</td>
     <td>{{ "{:.0%}".format(p.position_size_pct) }}</td>
+    <td class="{{ 'win' if (p.current_pnl_pct or 0) > 0 else ('loss' if (p.current_pnl_pct or 0) < 0 else '') }}">
+      {{ "{:+.2%}".format(p.current_pnl_pct) if p.current_pnl_pct is not none else '&mdash;' }}
+    </td>
     <td>{{ p.opened_at[:19] if p.opened_at else '' }}</td>
     <td><button onclick="closePosition('{{ p.id }}', '{{ p.direction.upper() }}', '{{ p.asset }}', {{ p.entry_price }})">Close</button></td>
   </tr>
