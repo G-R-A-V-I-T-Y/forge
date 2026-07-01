@@ -1,8 +1,22 @@
-"""Forge — single entrypoint. Starts agent scheduler + web server in one process."""
+"""Forge — single entrypoint. Heartbeat + parallel agent fleet + web server.
+
+Architecture:
+  • Heartbeat runs as an independent APScheduler job — never blocked by agents.
+  • Agents run as standalone subprocesses (agents/agent_runner.py), all spawned
+    simultaneously every wake_interval_seconds via asyncio.gather.  Each agent
+    calls opencode in its own process — true OS-level parallelism.
+  • Web server runs alongside both.
+
+This replaces the old design where every agent shared the scheduler's event
+loop with synchronous model_chain.decide() calls, which blocked the loop and
+starved the heartbeat.
+"""
+from __future__ import annotations
+
 import asyncio
-import json
 import logging
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -10,13 +24,10 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from market import heartbeat
+from market.provider import MarketProvider
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
 from store.positions import get_all_open_positions
-from market.provider import MarketProvider
-from market import heartbeat
-from llm import model_chain
-from execution.paper_bridge import PaperBridge
-from agents.runtime import AgentRuntime
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -30,13 +41,12 @@ CONFIG_PATH = Path("config.yaml")
 
 
 def load_config() -> dict:
-    return yaml.safe_load(CONFIG_PATH.read_text())
+    return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
 async def run_heartbeat_cycle(provider, config: dict) -> None:
-    """One heartbeat generation cycle, wrapped for both the immediate
-    startup run and the recurring APScheduler job. Logs a clear INFO line
-    on completion (asset count, packet timestamp)."""
+    """One heartbeat generation cycle — wrapped for both the immediate
+    startup run and the recurring APScheduler job."""
     packet = await heartbeat.generate_heartbeat(provider, config)
     logger.info(
         "Heartbeat cycle complete: %d assets written at %s",
@@ -45,14 +55,106 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
     )
 
 
-def get_agent_wake_interval(agent_row: dict, desk_config: dict) -> int:
-    """Read per-agent wake interval from config_json, fall back to desk default."""
-    default = desk_config.get("wake_interval_seconds", 60)
+async def _spawn_agent_runner(
+    agent_id: str, db_path: str, config_path: str
+) -> dict:
+    """Run one agent as a standalone subprocess and return its result dict.
+
+    The agent process reads the shared heartbeat file, calls model_chain
+    (opencode subprocess), executes the decision via PaperBridge, and prints
+    a structured ``AGENT_RESULT`` line on stdout that we parse here.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "agents.agent_runner",
+        "--agent-id",
+        agent_id,
+        "--db-path",
+        db_path,
+        "--config-path",
+        config_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
     try:
-        overrides = json.loads(agent_row.get("config_json") or "{}")
-    except (json.JSONDecodeError, TypeError):
-        return default
-    return overrides.get("wake_interval", default)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=600
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        logger.warning("[%s] Agent runner timed out after 600s", agent_id)
+        return {"agent_id": agent_id, "action": "timeout", "detail": ""}
+
+    out_text = stdout.decode("utf-8", errors="replace")
+
+    if proc.returncode not in (0, None):
+        err_text = stderr.decode("utf-8", errors="replace")[:300]
+        logger.warning(
+            "[%s] Agent runner exited %d: %.300s",
+            agent_id, proc.returncode, err_text,
+        )
+
+    # Parse the structured result line (last AGENT_RESULT line wins)
+    result: dict | None = None
+    for line in out_text.splitlines():
+        if line.startswith("AGENT_RESULT"):
+            rest = line[len("AGENT_RESULT "):]
+            # rest format: [agent_id] action=... detail=...
+            try:
+                meta, action_part, detail_part = rest.split(None, 2)
+                agent = meta.strip("[]")
+                action = action_part.split("=", 1)[1] if "=" in action_part else "?"
+                detail = detail_part.split("=", 1)[1] if "=" in detail_part else ""
+                result = {"agent_id": agent, "action": action, "detail": detail}
+            except ValueError:
+                continue
+
+    if result is None:
+        result = {
+            "agent_id": agent_id,
+            "action": "unknown",
+            "detail": out_text[:200],
+        }
+    return result
+
+
+async def agent_fleet_cycle(config: dict) -> None:
+    """Spawn every active/rookie agent as a parallel subprocess.
+
+    All agent_runner subprocesses are launched simultaneously and run
+    concurrently — each gets its own opencode session in its own process.
+    """
+    db_path = str(DB_PATH)
+    config_path = str(CONFIG_PATH)
+
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM agents WHERE status IN ('rookie', 'active') ORDER BY name"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return
+
+    agent_ids = [r["id"] for r in rows]
+
+    logger.info(
+        "Fleet cycle: spawning %d agent(s) in parallel", len(agent_ids)
+    )
+
+    tasks = [_spawn_agent_runner(aid, db_path, config_path) for aid in agent_ids]
+    results = await asyncio.gather(*tasks)
+
+    for r in results:
+        detail = r.get("detail", "")
+        logger.info(
+            "[%s] Result: %s — %.200s",
+            r["agent_id"], r["action"], detail,
+        )
 
 
 async def main():
@@ -62,23 +164,13 @@ async def main():
     provider = MarketProvider(config)
     await provider.__aenter__()
 
-    # Run one heartbeat cycle synchronously before the scheduler starts so
-    # agents (staggered to wake almost immediately) never have to wait a
-    # full heartbeat_interval_seconds for the first packet to exist.
+    # Run one heartbeat before the loop starts so agents immediately have
+    # fresh data on their first wake.
     await run_heartbeat_cycle(provider, config)
-
-    def bridge_factory(agent_id: str, conn, provider) -> PaperBridge:
-        return PaperBridge(
-            agent_id=agent_id, conn=conn, provider=provider, config=config
-        )
-
-    def llm_fn(system_prompt: str, decision_prompt: str) -> tuple[dict, str | None]:
-        return model_chain.decide(system_prompt, decision_prompt, config=config)
 
     conn = get_connection(str(DB_PATH))
     init_schema(conn)
 
-    # Seed jade_hawk if the DB is empty (first run compatibility)
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     if agent_count == 0:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -91,61 +183,18 @@ async def main():
     web_app.state.provider = provider
     web_app.state.config = config
 
-    # Restore open positions from SQLite (position registry at startup)
     open_positions = get_all_open_positions(conn)
     logger.info("Restored %d open positions across the desk", len(open_positions))
 
-    # Read all active/rookie agents from SQLite
-    agent_rows = conn.execute(
-        "SELECT * FROM agents WHERE status IN ('rookie', 'active') ORDER BY name"
-    ).fetchall()
-
-    scheduler = AsyncIOScheduler()
-
-    for idx, row in enumerate(agent_rows):
-        agent = dict(row)
-        agent_id = agent["id"]
-        thesis_version = agent.get("current_thesis_version", 1)
-        thesis_path = Path("agents/theses") / f"{agent_id}_v{thesis_version}.md"
-
-        per_agent_interval = get_agent_wake_interval(agent, desk_config)
-
-        runtime = AgentRuntime(
-            agent_id=agent_id,
-            thesis_path=str(thesis_path),
-            config=config,
-            conn=conn,
-            provider=provider,
-            llm_fn=llm_fn,
-            bridge_factory=bridge_factory,
-            scheduler=scheduler,
-        )
-
-        # Stagger start: agent_index × 30s offset from the base interval
-        offset_seconds = idx * 30
-        start_date = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
-
-        trigger = IntervalTrigger(
-            seconds=per_agent_interval,
-            start_date=start_date,
-            timezone=timezone.utc,
-        )
-        scheduler.add_job(
-            runtime.tick,
-            trigger=trigger,
-            id=agent_id,
-            replace_existing=True,
-        )
-        logger.info(
-            "Scheduled %s — wakes every %ds (first wake in %ds)",
-            agent_id,
-            per_agent_interval,
-            offset_seconds,
-        )
-
+    # ------------------------------------------------------------------
+    # Heartbeat — independent APScheduler job.  No agent code runs on
+    # this scheduler, so the heartbeat can never be delayed.
+    # ------------------------------------------------------------------
     heartbeat_interval = desk_config.get(
-        "heartbeat_interval_seconds", heartbeat.DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+        "heartbeat_interval_seconds",
+        heartbeat.DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     )
+    scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_heartbeat_cycle,
         trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
@@ -153,21 +202,43 @@ async def main():
         id="heartbeat",
         replace_existing=True,
     )
-    logger.info("Scheduled heartbeat generator — runs every %ds", heartbeat_interval)
-
     scheduler.start()
-    logger.info("Scheduler started with %d agents", len(agent_rows))
+    logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
 
+    # ------------------------------------------------------------------
+    # Agent fleet — independent asyncio loop.  Every wake_interval all
+    # agents are spawned as parallel subprocesses.
+    # ------------------------------------------------------------------
+    wake_interval = desk_config.get("wake_interval_seconds", 300)
+
+    async def _fleet_loop():
+        while True:
+            await agent_fleet_cycle(config)
+            await asyncio.sleep(wake_interval)
+
+    fleet_task = asyncio.create_task(_fleet_loop())
+    logger.info(
+        "Agent fleet cycle started — %d agent(s) wake every %ds",
+        agent_count, wake_interval,
+    )
+
+    # ------------------------------------------------------------------
+    # Web server
+    # ------------------------------------------------------------------
     server_config = uvicorn.Config(
-        web_app, host="0.0.0.0", port=8000, log_level="warning"
+        web_app, host="0.0.0.0", port=8000, log_level="warning",
     )
     server = uvicorn.Server(server_config)
     logger.info("Web UI starting at http://localhost:8000")
 
     try:
-        await server.serve()
+        await asyncio.gather(server.serve(), fleet_task)
     finally:
         await provider.__aexit__(None, None, None)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
