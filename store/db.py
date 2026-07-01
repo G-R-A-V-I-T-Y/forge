@@ -29,8 +29,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 
 # Columns added after the initial M1-M3 schema. CREATE TABLE IF NOT EXISTS
-# above is a no-op against a pre-existing local data/forge.db (gitignored,
-# never committed), so any column added here must also be backfilled via
+# above is a no-op against a pre-existing data/forge.db (now committed to
+# git), so any column added here must also be backfilled via
 # ALTER TABLE for users who already initialized a DB before this change.
 _TRADES_MIGRATION_COLUMNS = {
     "ohlcv_15m_40_blob": "BLOB",
