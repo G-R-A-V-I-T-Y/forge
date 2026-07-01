@@ -59,8 +59,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def insert_agent(conn: sqlite3.Connection, agent_id: str, name: str,
-                 spawn_date: str, config_json: str) -> None:
+def insert_agent(
+    conn: sqlite3.Connection,
+    agent_id: str,
+    name: str,
+    spawn_date: str,
+    config_json: str,
+) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO agents (id, name, spawn_date, config_json) VALUES (?, ?, ?, ?)",
         (agent_id, name, spawn_date, config_json),
@@ -115,8 +120,9 @@ def delete_position(conn: sqlite3.Connection, position_id: str) -> None:
     conn.commit()
 
 
-def insert_account_snapshot(conn: sqlite3.Connection, agent_id: str,
-                             mode: str, balance: float, peak: float) -> None:
+def insert_account_snapshot(
+    conn: sqlite3.Connection, agent_id: str, mode: str, balance: float, peak: float
+) -> None:
     conn.execute(
         "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, ?, ?, ?, ?)",
         (agent_id, mode, balance, peak, _now()),
@@ -124,8 +130,9 @@ def insert_account_snapshot(conn: sqlite3.Connection, agent_id: str,
     conn.commit()
 
 
-def get_latest_account(conn: sqlite3.Connection, agent_id: str,
-                        mode: str) -> dict | None:
+def get_latest_account(
+    conn: sqlite3.Connection, agent_id: str, mode: str
+) -> dict | None:
     row = conn.execute(
         "SELECT * FROM accounts WHERE agent_id = ? AND mode = ? ORDER BY id DESC LIMIT 1",
         (agent_id, mode),
