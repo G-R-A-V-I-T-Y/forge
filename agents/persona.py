@@ -5,7 +5,7 @@ def build_system_prompt(agent_name: str, config: dict) -> str:
     """Builds the LLM system prompt for an agent.
 
     Args:
-        agent_name: The name of the trading agent (e.g., 'jade_hawk')
+        agent_name: The name of the trading agent (e.g., 'iron_moth')
         config: Configuration dict with structure {'desk': {'starting_balance': float}}
 
     Returns:

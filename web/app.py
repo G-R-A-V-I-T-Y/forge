@@ -466,8 +466,15 @@ async def api_close_position(position_id: str):
     provider = getattr(app.state, "provider", None)
     config = getattr(app.state, "config", None)
 
+    row = conn.execute(
+        "SELECT agent_id FROM positions WHERE id = ?", (position_id,)
+    ).fetchone()
+    if not row:
+        return JSONResponse({"error": "position not found"}, status_code=404)
+    agent_id = row["agent_id"]
+
     bridge = PaperBridge(
-        agent_id="jade_hawk", conn=conn, provider=provider, config=config
+        agent_id=agent_id, conn=conn, provider=provider, config=config
     )
     result = await bridge.close(position_id, reason="manual_close")
     if not result:

@@ -41,8 +41,8 @@ This agent studies nothing but funding. It computes the current funding rate z-s
 
 - In persistent trends, funding can stay extreme for days -- this
   agent bleeds to the trend
-- Most correlated to `jade_hawk` (regime detector) -- extreme funding
-  is often a regime signal itself
+- Most correlated to `jade_hawk` (VWAP mean reversion) -- both fade
+  extremes, jade_hawk from price and this agent from funding
 - Low volatility regimes with stable funding produce no signals
 - Gap risk: funding normalises via a sharp move that hits the SL
   first, then continues in the thesis direction

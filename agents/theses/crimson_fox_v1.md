@@ -1,83 +1,75 @@
-# crimson_fox -- Thesis v1: Meta Agent
+# crimson_fox -- Thesis v1: Session Pattern Arbitrage
 
 ## Edge Hypothesis
 
-The desk's collective historical performance contains latent patterns that no single strategy can see. Which agent performs best in which market regime? Which conditions produce the highest Sharpe for each strategy? How should confidence be allocated across the desk based on current market conditions? These questions define the meta-agent's domain -- it does not study markets, it studies the other nine agents.
+Crypto perpetuals trade 24/7 across global sessions, but participation, order flow, and directional bias follow predictable daily and weekly patterns. These time-based patterns exist because different sets of participants dominate at different hours: APAC retail and systematic flows in the Asian session, European institutions during London hours, US leveraged players at the NY open. Each transition between these participant cohorts creates exploitable directional drift.
 
-crimson_fox analyses the full historical trade bank to learn which strategies produce edge in which regimes. It builds and maintains a performance matrix: for each known regime tag (from jade_hawk), it computes the win rate, Sharpe ratio, profit factor, and average return of every other agent. It then identifies which strategies are currently working, which are not, and which conditions signal a likely regime transition. Its output is a set of confidence multipliers for each other agent -- a recommendation of how much to trust each strategy given the current market state.
+The edge is small per trade but highly reliable and available every single day. This is a compounding strategy, not a home-run strategy. The agent does not predict market direction from price action or volume -- it knows what time it is and what statistically tends to happen at that time.
 
-Over time, crimson_fox develops a meta-model: "In trending_bull regimes, iron_moth has a 68% win rate with 1.9 Sharpe. When funding is extreme, silver_basin's mean-reversion produces 72% win rates but only in the first 4 hours. In low_vol regimes, gray_finch and
-amber_wolf both underperform -- reduce allocation to 0.5x." This
-meta-knowledge may become the highest-Sharpe signal on the desk,
-as it compounds the edge of every other strategy through dynamic
-allocation.
+Trading is restricted to specific session windows where historical edge has been established. Outside these windows the agent waits.
+
+## Session Definitions (all times UTC)
+
+### US Open (12:00--13:30 UTC, Mon--Fri)
+The highest-volume 90 minutes of the day. BTC and alts frequently gap or break in the first 30 minutes of US cash equities opening. The edge: trade the direction of the first 15-minute candle with a tight stop. If the first 15m candle is green, go long; if red, go short. The US open directional bias has persistence for 60--90 minutes on ~60% of trading days.
+
+### US Afternoon Reversal (16:00--18:00 UTC, Mon--Fri)
+The 'puppet show' period where algo desks and institutional flow push into the close. Statistically significant reversal from the US morning trend. If price moved up during the US session (12:00--16:00), expect a mean-reverting pullback. If price moved down, expect a bounce. This is the highest-Sharpe session window.
+
+### Asian Session Drift (00:00--02:00 UTC, Mon--Fri)
+Lower liquidity, wider spreads, but consistent directional drift from systematic APAC flows. The edge: trade the direction of the first 30-minute candle of the Asian session. The drift tends to persist for 1--3 hours and is most reliable when it follows a quiet US session (low volatility carries through).
+
+### Weekly Patterns
+- **Monday open (00:00 UTC)**: Weekend gap fills are common in the first 4 hours. If BTC gapped up over the weekend, expect a fill-down; if gapped down, expect a fill-up.
+- **Friday afternoon (14:00--18:00 UTC)**: Position squaring before the weekend. Longs are closed, shorts are covered. Creates mean-reverting moves.
+- **Funding settlement windows (00:00, 08:00, 16:00 UTC)**: Positioning changes 30--60 minutes before settlement as traders adjust leveraged positions. Mild directional bias in the hour leading into settlement.
 
 ## Entry Conditions
 
-**crimson_fox does not enter trades directly.** It enters an analysis cycle:
-1. On every desk evaluation cycle (every 6h) or on demand via
-   meta-controller trigger
-2. When the trade bank has accumulated 10+ new closed trades since
-   the last analysis
-3. When the regime tag changes (jade_hawk posts a new classification)
+**Required (all must be met):**
+1. Current time falls within a defined session window (US Open, US Reversal, Asian Drift, or weekly pattern)
+2. The session has a direction signal based on its rule (first candle direction, session trend reversal, gap fill)
+3. Volume confirms participation is at expected session levels (not a holiday/thin session)
+4. No major scheduled event for BTC or any target asset in the next 2 hours (macro news, CPI, FOMC, major unlocks)
 
-**Required data for each analysis cycle:**
-- All closed trades across all agents (last 7 days window minimum,
-  expanding to full history when meaningful)
-- Current regime tag + confidence from jade_hawk
-- Per-agent performance slices by regime (historical)
-- Per-agent performance slices by funding rate environment
-- Per-agent performance slices by volatility regime (from violet_lion)
+**Supporting (raise confidence, not required):**
+- The session signal aligns with the market regime (e.g., trend regime + US Open direction = strong confluence)
+- The prior session showed low volatility (quiet carry-through increases pattern reliability)
+- Multiple session patterns align simultaneously (e.g., it's Monday US Open AND a weekend gap exists)
+- Funding is neutral or supports the session direction
 
-## Output
+## Position Parameters
 
-A structured confidence report written to the database and broadcast
-to all agents at decision time:
+- Direction: Per session rule. US Open: direction of first 15m candle. US Reversal: counter to session trend. Asian Drift: direction of first 30m candle. Weekly: gap fill direction.
+- Leverage: 2x (lower -- time-based edges are small but consistent)
+- Position size: 8% of account per trade
+- Stop loss: 1.0% from entry (tight -- time-based edge is invalidated quickly if wrong)
+- Take profit: Session exit condition (TP at 1.5% or session end, whichever comes first)
+- Max hold time: Until the session window closes (maximum 4 hours for Asian drift, 90 minutes for US Open)
 
-```json
-{
-  "as_of": "2026-06-30T12:00:00Z",
-  "regime": "trending_bull",
-  "regime_confidence": 0.82,
-  "multipliers": {
-    "iron_moth": 1.2,
-    "silver_basin": 0.6,
-    "copper_vane": 1.0,
-    "gray_finch": 1.1,
-    "amber_wolf": 1.0,
-    "steel_crane": 0.8,
-    "onyx_heron": 0.5,
-    "jade_hawk": 1.0,
-    "violet_lion": 1.0
-  },
-  "reasoning": "In trending_bull regimes (N=85 trades over 14
-    days), iron_moth shows 1.9 Sharpe and 68% WR -- momentum over-
-    performs. silver_basin has 0.8 Sharpe -- funding extremes are
-    less reliable in strong trends. onyx_heron is at 0.5x as mean-
-    reversion pairs underperform in directional markets.",
-  "analysis_version": 12
-}
-```
+## Entry Rules Summary
 
-## Output Integration
-
-- Every other agent receives its multiplier in the decision prompt:
-  "crimson_fox confidence multiplier for your strategy: 1.2x"
-- Agents are encouraged (not required) to scale their conviction by
-  this multiplier when sizing
-- The risk gate does not enforce multipliers -- they are advisory
-- The meta-controller can use the confidence report to prioritise
-  which agents to evaluate first or allocate more compute to
+| Session | When (UTC) | Entry Rule | Max Hold |
+|---------|-----------|------------|----------|
+| US Open | Mon--Fri 12:00 | Direction of first 15m candle | 90 min |
+| US Reversal | Mon--Fri 16:00 | Counter to US session trend (12:00--16:00) | 2h |
+| Asian Drift | Mon--Fri 00:00 | Direction of first 30m candle | 3h |
+| Monday Gap | Mon 00:00--04:00 | Counter to weekend gap direction | 4h |
+| Friday Squaring | Fri 14:00--18:00 | Counter to week's last 4h direction | 4h |
+| Pre-settlement | 07:00--08:00, 15:00--16:00, 23:00--00:00 | Direction of improving funding rate | 1h |
 
 ## Known Weaknesses
 
-- Needs a critical mass of trades before its outputs are meaningful
-  (100+ across the desk minimum)
-- In a regime shift, historical performance is a liability -- the
-  matrix takes time to re-calibrate
-- Over-optimisation risk: if the trade bank is small, multipliers
-  can overfit to noise
-- Most exposed to shared failure modes: if all agents are wrong
-  in the same way, the meta-agent compounds the error
-- The meta-agent is the most complex agent and the hardest to
-  validate -- wrong multipliers can damage the whole desk
+- Small edge per trade requires many repetitions -- statistical significance takes weeks of trading
+- Major macro news (FOMC, CPI, NFP) completely overrides session patterns -- must flat through known events
+- DST transitions and holiday weeks shift session boundaries -- reduced reliability during transitions
+- Weekend sessions (Saturday--Sunday) do not have reliable patterns -- agent skips them entirely
+- Most vulnerable to structural market changes that break historical patterns (e.g., ETF approval changing US open behaviour permanently)
+- Lowest Sharpe agent on the desk individually -- value is as a uncorrelated compounding machine alongside the other strategies
+- Session boundaries are approximate; exact timing shifts with market structure -- requires periodic re-calibration
+
+## Assets in Focus
+
+Primary: BTC, ETH (most consistent session behaviour across all time windows)
+Secondary: SOL (growing session consistency, particularly in US hours)
+Avoid: Small-cap perps -- session patterns are unreliable when the asset itself drives the flow rather than macro session dynamics
