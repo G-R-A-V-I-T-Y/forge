@@ -8,28 +8,41 @@ This agent fades price extremes relative to VWAP. It does not predict direction 
 
 The signal is strongest when multiple timeframe VWAPs (15m, 1h, 4h) all show deviation in the same direction, confirming that the move is extended on multiple execution horizons. Volume confirmation distinguishes a climax (reversion likely) from a genuine breakout (momentum likely).
 
-## Entry Conditions
+## Evidence Framework
 
-**Required (all must be met):**
+Each piece of evidence contributes a signed strength score (-1.0 to +1.0) to the overall conviction assessment. The entry decision weighs all available evidence continuously — no single missing or weak factor is a hard veto, but cumulative weak evidence reduces position size proportionally.
 
-**For short entries (price overextended above VWAP):**
-1. Current price > VWAP(1h) + 2.0 * ATR(14) on the 15-minute chart
-2. VWAP(4h) is also below current price (multi-timeframe confirmation)
-3. Volume on the move is > 1.5x the 14-period average volume on the 15m chart (climax volume, not quiet drift)
-4. The move has been sustained for at least 3 consecutive 15m candles (not a single wick)
+### Primary Evidence (highest weight)
 
-**For long entries (price compressed below VWAP):**
-1. Current price < VWAP(1h) - 2.0 * ATR(14) on the 15-minute chart
-2. VWAP(4h) is also above current price (multi-timeframe confirmation)
-3. Volume on the move is > 1.5x the 14-period average volume
-4. The move has been sustained for at least 3 consecutive 15m candles
+#### For short entries (price overextended above VWAP):
+- **VWAP deviation magnitude (1h)**: Distance of current price above VWAP(1h). > 2.0 ATR = strong +0.7, 1.5-2.0 ATR = moderate +0.5, 1.0-1.5 ATR = weak +0.2. Below 1.0 ATR the deviation is too small to fade — contribute 0.0.
+- **Multi-timeframe confirmation**: VWAP(4h) also below current price adds +0.4. VWAP(4h) above current price (conflicting) reduces confidence by -0.3. No VWAP(4h) data available: treat as neutral but apply -0.1 uncertainty penalty.
+- **Volume climax signal**: Volume > 1.5x the 14-period average on the 15m chart adds +0.5. Volume 1.0-1.5x average adds +0.2. Volume below average (quiet drift, not climax) reduces by -0.3 — the extension lacks a capitulation signature.
+- **Sustained extension**: Move sustained for 3+ consecutive 15m candles adds +0.3 (not a single wick). 1-2 candles adds +0.1. A single-candle wick with no follow-through contributes nothing.
 
-**Supporting (raise confidence, not required):**
-- RSI(14) on 1h chart > 70 (short) or < 30 (long) -- classic overbought/oversold
-- Funding rate supports the fade direction (extreme positive funding + price above VWAP = strong short signal)
-- The regime is range_low_vol or range_high_vol (mean-reversion environments)
-- No major scheduled event for the asset in the next 4 hours
-- The move is not driven by a liquidation cascade (would favour steel_crane for the fade, not this strategy)
+#### For long entries (price compressed below VWAP):
+- **VWAP deviation magnitude (1h)**: Distance of current price below VWAP(1h). > 2.0 ATR = strong +0.7, 1.5-2.0 ATR = moderate +0.5, 1.0-1.5 ATR = weak +0.2.
+- **Multi-timeframe confirmation**: VWAP(4h) also above current price adds +0.4. VWAP(4h) below current price reduces by -0.3.
+- **Volume climax signal**: Volume > 1.5x average adds +0.5; 1.0-1.5x adds +0.2; below average reduces by -0.3.
+- **Sustained compression**: Move compressed for 3+ consecutive 15m candles adds +0.3; 1-2 candles adds +0.1.
+
+### Secondary Evidence (moderate weight)
+
+- **RSI confirmation**: RSI(14) on 1h chart > 70 (short) or < 30 (long) adds +0.3. RSI 60-70 or 30-40 adds +0.1. RSI near 50 contributes nothing.
+- **Funding rate support**: Extreme positive funding + price above VWAP = strong short signal, add +0.3. Extreme negative funding + price below VWAP = strong long signal, add +0.3. Neutral or opposing funding reduces by -0.2.
+- **Regime compatibility**: Range_low_vol or range_high_vol regime adds +0.3 (mean-reversion friendly). Trending regime reduces by -0.5 (trend can keep price extended indefinitely).
+- **Event calendar clean**: No major scheduled event for the asset in the next 4 hours adds +0.1. Known event within 4 hours reduces by -0.4.
+- **Not liquidation-driven**: Confirmation that the move is not driven by a liquidation cascade adds +0.2. If a cascade is detected, reduce by -0.3 (the fade belongs to steel_crane's methodology, not this thesis).
+
+### When Data Is Missing
+
+If VWAP for a specific timeframe is unavailable, that timeframe's confirmation is skipped; max achievable confidence caps at the reduced pillar weight. If ATR(14) is unavailable, use ATR(7) as a fallback with -0.1 uncertainty penalty. If volume data is missing entirely, the volume climax signal defaults to neutral (0.0) and apply -0.1 uncertainty. Always check at least two timeframe VWAPs before entering — a single VWAP reference is insufficient.
+
+## Entry Decision
+
+- Confident entry (confidence >= 0.70): full position size at standard parameters
+- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
+- No entry (confidence < 0.50): firm rule — wait
 
 ## Position Parameters
 

@@ -93,3 +93,9 @@ def validate_order(
         raise RiskViolation(
             f"liquidation distance {liq_dist:.4%} must be >= 2x stop loss distance {sl_dist:.4%}"
         )
+
+    # Rule 7: confidence floor (optional key, but if present must be >= 0.50)
+    if "confidence" in order and order["confidence"] < 0.50:
+        raise RiskViolation(
+            f"confidence {order['confidence']} is below firm minimum 0.50"
+        )
