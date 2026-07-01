@@ -37,7 +37,7 @@ def _seed(conn):
         "key_conditions_missing": ["b"],
         "confidence": 0.68,
         "expected_value": "+0.9%",
-    })
+    }, model_used="Big Pickle")
     write_outcome(conn, "t1", {"exit_price": 149.6, "pnl_pct": 0.031, "result": "win"})
 
 
@@ -89,6 +89,7 @@ def test_api_trade_detail_includes_ohlcv(conn):
     data = r.json()
     assert data["ohlcv_15m"] == [[1, 1.0, 2.0, 0.5, 1.5, 100.0]] * 5
     assert data["regime"] == "range_high_vol"
+    assert data["model_used"] == "Big Pickle"
 
 
 def test_api_trade_detail_404(conn):

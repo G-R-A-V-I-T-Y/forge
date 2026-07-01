@@ -138,6 +138,7 @@ function renderFingerprint(id, t) {
       '<div><div style="color:#8b949e;font-size:11px;">Key Conditions Missing</div><div style="color:#f85149;font-size:13px;">' + (conditionsMissing || '&mdash;') + '</div></div>' +
       '<div><div style="color:#8b949e;font-size:11px;">Funding @ Entry</div><div style="color:#e6edf3;font-size:13px;">' + (t.funding_rate_current != null ? (t.funding_rate_current * 100).toFixed(3) + '%' : '&mdash;') + '</div></div>' +
       '<div><div style="color:#8b949e;font-size:11px;">OI 24h Change</div><div style="color:#e6edf3;font-size:13px;">' + (t.open_interest_24h_change_pct != null ? t.open_interest_24h_change_pct.toFixed(2) + '%' : '&mdash;') + '</div></div>' +
+      '<div><div style="color:#8b949e;font-size:11px;">Model</div><div style="font-size:13px;">' + modelBadge(t.model_used) + '</div></div>' +
     '</div>' +
     (t.agent_postmortem ? '<div style="margin-bottom:8px;"><div style="color:#8b949e;font-size:11px;">Postmortem</div><div style="color:#e6edf3;font-size:13px;">' + t.agent_postmortem + '</div></div>' : '') +
     '<div style="color:#8b949e;font-size:11px;margin-bottom:4px;">OHLCV (' + chartLabel(t) + ')</div>' +
@@ -158,6 +159,21 @@ function chartCandles(t) {
     return mc.asset.candles_5m;
   }
   return t.ohlcv_15m;
+}
+
+/**
+ * model_used: null/missing means legacy data (recorded before this column
+ * existed) — render a plain em-dash. The literal "no model available"
+ * sentinel means the model fallback chain (llm/model_chain.py) exhausted
+ * every tier for that decision — render a distinct red warning badge so
+ * it isn't confused with ordinary missing data.
+ */
+function modelBadge(modelUsed) {
+  if (!modelUsed) return '&mdash;';
+  if (modelUsed === 'no model available') {
+    return '<span style="background:#f85149;color:#fff;padding:1px 6px;border-radius:3px;">NO MODEL AVAILABLE</span>';
+  }
+  return '<span style="color:#e6edf3;">' + modelUsed + '</span>';
 }
 
 function chartLabel(t) {
