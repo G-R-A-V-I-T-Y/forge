@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from store.query import query_trades, count_trades, get_trade
+from execution.paper_bridge import PaperBridge
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -188,6 +189,25 @@ async def api_query(
         limit=limit, offset=offset, decode_ohlcv=include_ohlcv,
     )
     return JSONResponse(trades)
+
+
+@app.post("/api/positions/{position_id}/close")
+async def api_close_position(position_id: str):
+    """Manually close an open position (button on the overview page).
+
+    Races with SL/TP and agent-driven closes are possible — if the position
+    is already gone by the time this runs, PaperBridge.close() returns {}
+    and we surface that as a 404 rather than crashing.
+    """
+    conn = app.state.conn
+    provider = getattr(app.state, "provider", None)
+    config = getattr(app.state, "config", None)
+
+    bridge = PaperBridge(agent_id="jade_hawk", conn=conn, provider=provider, config=config)
+    result = await bridge.close(position_id, reason="manual_close")
+    if not result:
+        return JSONResponse({"error": "position not found"}, status_code=404)
+    return JSONResponse(result)
 
 
 @app.get("/api/trades/{trade_id}")
