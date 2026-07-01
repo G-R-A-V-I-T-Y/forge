@@ -13,6 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
 from store.positions import get_all_open_positions
 from market.provider import MarketProvider
+from market import heartbeat
 from llm import client as llm_client
 from execution.paper_bridge import PaperBridge
 from agents.runtime import AgentRuntime
@@ -32,6 +33,18 @@ def load_config() -> dict:
     return yaml.safe_load(CONFIG_PATH.read_text())
 
 
+async def run_heartbeat_cycle(provider, config: dict) -> None:
+    """One heartbeat generation cycle, wrapped for both the immediate
+    startup run and the recurring APScheduler job. Logs a clear INFO line
+    on completion (asset count, packet timestamp)."""
+    packet = await heartbeat.generate_heartbeat(provider, config)
+    logger.info(
+        "Heartbeat cycle complete: %d assets written at %s",
+        len(packet.get("assets", {})),
+        packet.get("timestamp"),
+    )
+
+
 def get_agent_wake_interval(agent_row: dict, desk_config: dict) -> int:
     """Read per-agent wake interval from config_json, fall back to desk default."""
     default = desk_config.get("wake_interval_seconds", 60)
@@ -48,6 +61,11 @@ async def main():
 
     provider = MarketProvider(config)
     await provider.__aenter__()
+
+    # Run one heartbeat cycle synchronously before the scheduler starts so
+    # agents (staggered to wake almost immediately) never have to wait a
+    # full heartbeat_interval_seconds for the first packet to exist.
+    await run_heartbeat_cycle(provider, config)
 
     def bridge_factory(agent_id: str, conn, provider) -> PaperBridge:
         return PaperBridge(
@@ -124,6 +142,18 @@ async def main():
             per_agent_interval,
             offset_seconds,
         )
+
+    heartbeat_interval = desk_config.get(
+        "heartbeat_interval_seconds", heartbeat.DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    )
+    scheduler.add_job(
+        run_heartbeat_cycle,
+        trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
+        args=[provider, config],
+        id="heartbeat",
+        replace_existing=True,
+    )
+    logger.info("Scheduled heartbeat generator — runs every %ds", heartbeat_interval)
 
     scheduler.start()
     logger.info("Scheduler started with %d agents", len(agent_rows))
