@@ -764,7 +764,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 **Goal:** All 8 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
 
-**You can verify:** Watch the leaderboard update live. Trigger two agents to want the same asset — confirm one is blocked. Click into any agent to see their individual detail page.
+**You can verify:** Watch the leaderboard update live. Trigger two agents to want the same asset — confirm both can enter (same or opposing direction) and the desk position registry records both. Click into any agent to see their individual detail page.
 
 **Tasks:**
 1. Implement `store/positions.py`: `get_all_open_positions()` returns all open positions across all agents for desk-wide visibility
