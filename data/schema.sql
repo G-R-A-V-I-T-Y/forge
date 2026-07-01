@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS trades (
     liquidation_data_json TEXT,
     regime TEXT,
     expected_value_text TEXT,
+    funding_rate_current REAL,
+    open_interest_24h_change_pct REAL,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 

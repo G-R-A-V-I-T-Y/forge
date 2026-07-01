@@ -25,12 +25,22 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
     liq_json = json.dumps(liq_data)
 
     ev_text = (reasoning or {}).get("expected_value", "")
+    hypothesis = (reasoning or {}).get("hypothesis", "")
+    kcm = json.dumps((reasoning or {}).get("key_conditions_met", []))
+    kcmiss = json.dumps((reasoning or {}).get("key_conditions_missing", []))
+    confidence = (reasoning or {}).get("confidence", None)
+
+    funding_rate_current = asset_snapshot.get("funding_rate_current", 0)
+    oi_change_pct = asset_snapshot.get("open_interest_24h_change_pct", 0)
 
     conn.execute(
         """UPDATE trades SET ohlcv_15m_40_blob=?, ohlcv_1h_20_blob=?,
            ohlcv_4h_10_blob=?, funding_history_blob=?,
            oi_data_json=?, liquidation_data_json=?,
-           regime=?, expected_value_text=? WHERE id=?""",
+           regime=?, expected_value_text=?,
+           funding_rate_current=?, open_interest_24h_change_pct=?,
+           hypothesis=?, key_conditions_met=?, key_conditions_missing=?,
+           confidence=? WHERE id=?""",
         (
             ohlcv_15m,
             ohlcv_1h,
@@ -40,10 +50,29 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
             liq_json,
             regime,
             ev_text,
+            funding_rate_current,
+            oi_change_pct,
+            hypothesis,
+            kcm,
+            kcmiss,
+            confidence,
             trade_id,
         ),
     )
     conn.commit()
+
+
+def pack_ohlcv(candles: list) -> bytes:
+    return msgpack.packb(candles, use_bin_type=True)
+
+
+def unpack_ohlcv(blob: bytes | None) -> list:
+    if not blob:
+        return []
+    try:
+        return msgpack.unpackb(blob, raw=False)
+    except Exception:
+        return []
 
 
 def write_outcome(conn, trade_id: str, outcome_dict: dict) -> None:

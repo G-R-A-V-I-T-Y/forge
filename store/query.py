@@ -7,12 +7,16 @@ web endpoint. agent_id=None (the default) queries across every agent —
 this is what makes it a *cross-agent* query, per the M4 spec.
 """
 import json
+import logging
 
 from store.fingerprint import unpack_ohlcv
 
+logger = logging.getLogger(__name__)
+
 # Columns that hold JSON-encoded lists/dicts and should be decoded on read.
 _JSON_COLUMNS = ("key_conditions_met", "key_conditions_missing",
-                  "funding_rate_8h_history", "market_context_json", "agent_reasoning_json")
+                  "market_context_json", "agent_reasoning_json",
+                  "oi_data_json", "liquidation_data_json")
 
 
 def query_trades(
@@ -124,14 +128,23 @@ def _decode_row(row: dict, decode_ohlcv: bool) -> dict:
 
     if decode_ohlcv:
         for blob_col, out_key in (
-            ("ohlcv_15m_blob", "ohlcv_15m"),
-            ("ohlcv_1h_blob", "ohlcv_1h"),
-            ("ohlcv_4h_blob", "ohlcv_4h"),
+            ("ohlcv_15m_40_blob", "ohlcv_15m"),
+            ("ohlcv_1h_20_blob", "ohlcv_1h"),
+            ("ohlcv_4h_10_blob", "ohlcv_4h"),
         ):
             row[out_key] = unpack_ohlcv(row.get(blob_col))
             row.pop(blob_col, None)
+        # Also decode funding blob
+        fb = row.get("funding_history_blob")
+        if fb:
+            try:
+                row["funding_rate_8h_history"] = unpack_ohlcv(fb)
+            except Exception:
+                row["funding_rate_8h_history"] = []
+        row.pop("funding_history_blob", None)
     else:
-        for blob_col in ("ohlcv_15m_blob", "ohlcv_1h_blob", "ohlcv_4h_blob"):
+        for blob_col in ("ohlcv_15m_40_blob", "ohlcv_1h_20_blob",
+                          "ohlcv_4h_10_blob", "funding_history_blob"):
             row.pop(blob_col, None)
 
     return row
@@ -170,3 +183,61 @@ def summarize(trades: list[dict]) -> dict:
         "losses": len(closed) - len(wins),
         "avg_pnl_pct": avg_pnl,
     }
+
+
+def query_win_rate(conn, filters: dict | None = None) -> dict:
+    """Compute win rate, total trades, and profit factor for a filtered trade set.
+
+    `filters` is an optional dict of filter params passed to query_trades.
+    Returns a dict with keys: win_rate, total_trades, profit_factor.
+    """
+    filters = dict(filters or {})
+    trades = query_trades(conn, decode_ohlcv=False, **filters)
+    closed = [t for t in trades if t.get("result") in ("win", "loss")]
+    total = len(closed)
+    if total == 0:
+        return {"win_rate": 0.0, "total_trades": 0, "profit_factor": 0.0}
+    wins = [t for t in closed if t.get("result") == "win"]
+    losses = [t for t in closed if t.get("result") == "loss"]
+    wr = len(wins) / total
+    gross_wins = sum(t.get("pnl_pct", 0) or 0 for t in wins)
+    gross_losses = abs(sum(t.get("pnl_pct", 0) or 0 for t in losses))
+    pf = gross_wins / gross_losses if gross_losses else (float("inf") if gross_wins else 0.0)
+    return {
+        "win_rate": round(wr, 4),
+        "total_trades": total,
+        "profit_factor": round(pf, 4) if pf != float("inf") else 0.0,
+    }
+
+
+def query_all_agents(conn, filters: dict | None = None) -> list[dict]:
+    """Cross-agent query — returns trades across all agents.
+
+    Same as query_trades() but without the agent_id filter.
+    Used in reflection and head-of-desk prompts.
+    """
+    return query_trades(conn, decode_ohlcv=False, **(filters or {}))
+
+
+def format_trades_summary(trades: list[dict], max_rows: int = 5) -> str:
+    """Format a list of trade dicts into a readable text block for LLM prompts."""
+    if not trades:
+        return "  No trades available."
+    lines = [f"  Recent {len(trades)} trades (showing up to {max_rows}):"]
+    lines.append("  " + "-" * 70)
+    for t in trades[:max_rows]:
+        pnl = t.get("pnl_pct", 0) or 0
+        pnl_str = f"{pnl:+.2%}"
+        lines.append(
+            f"  {t.get('asset', '?'):12s} {t.get('direction', '?'):6s} "
+            f"| entry={t.get('entry_price', 0):>.4f} "
+            f"| exit={t.get('exit_price', 0):>.4f} "
+            f"| PnL={pnl_str:>8s} "
+            f"| {t.get('result', t.get('status', '?')):6s}"
+        )
+        hypo = t.get("hypothesis", "")
+        if hypo:
+            lines.append(f"  {'':18s} thesis: {hypo[:120]}")
+    if len(trades) > max_rows:
+        lines.append(f"  ... and {len(trades) - max_rows} more")
+    return "\n".join(lines)

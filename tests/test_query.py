@@ -91,7 +91,7 @@ def test_query_trades_decodes_ohlcv_by_default(conn):
     results = query_trades(conn, asset="SOL-PERP", limit=1)
     assert "ohlcv_15m" in results[0]
     assert results[0]["ohlcv_15m"] == [[1, 1.0, 2.0, 0.5, 1.5, 100.0]]
-    assert "ohlcv_15m_blob" not in results[0]
+    assert "ohlcv_15m_40_blob" not in results[0]
 
 
 def test_count_trades_matches_query_filters(conn):
