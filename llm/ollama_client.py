@@ -7,7 +7,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-TIMEOUT_SECS = 30.0
+# qwen3.6:35b_optimized is a "thinking" model; real trading-decision prompts on this
+# hardware measured 121-194s end to end (see PR description for the manual verification
+# run). 30s made every real decision time out and silently degrade to
+# {"action": "wait", "reason": "LLM unavailable or timed out"}. 300s gives headroom.
+TIMEOUT_SECS = 300.0
 MODEL = "qwen3.6:35b_optimized"
 
 
