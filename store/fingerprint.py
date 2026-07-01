@@ -79,7 +79,7 @@ def write_outcome(conn, trade_id: str, outcome_dict: dict) -> None:
     conn.execute(
         """UPDATE trades SET exit_price=?, exit_timestamp=?,
            exit_reason=?, duration_minutes=?, pnl_pct=?,
-           pnl_usd=?, result=?, status=?, postmortem=?,
+           pnl_usd=?, result=?, status=IFNULL(?, status), postmortem=?,
            agent_postmortem=? WHERE id=?""",
         (
             outcome_dict.get("exit_price"),
@@ -89,7 +89,7 @@ def write_outcome(conn, trade_id: str, outcome_dict: dict) -> None:
             outcome_dict.get("pnl_pct"),
             outcome_dict.get("pnl_usd"),
             outcome_dict.get("result"),
-            outcome_dict.get("status", "closed"),
+            outcome_dict.get("status"),
             outcome_dict.get("postmortem"),
             outcome_dict.get("agent_postmortem"),
             trade_id,
