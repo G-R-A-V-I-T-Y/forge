@@ -223,7 +223,18 @@ class HyperliquidClient:
                 "startTime": start_time_ms,
             }
         )
-        return data or []
+        if not data:
+            return []
+        # Hyperliquid API returns fundingRate/premium as strings, not numbers.
+        result = []
+        for entry in data:
+            fixed = dict(entry)
+            if "fundingRate" in fixed:
+                fixed["fundingRate"] = float(fixed["fundingRate"])
+            if "premium" in fixed:
+                fixed["premium"] = float(fixed["premium"])
+            result.append(fixed)
+        return result
 
     async def get_recent_trades(self, asset: str, hours: int = 1) -> list[dict]:
         """Raw recentTrades, filtered to the requested window.

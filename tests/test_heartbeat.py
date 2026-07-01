@@ -11,6 +11,7 @@ from market.heartbeat import (
     PER_ASSET_FIELDS,
     SECTORS,
     _atr,
+    _compute_asset_fields,
     _ema,
     _log_returns,
     _realized_vol,
@@ -27,7 +28,10 @@ from market.heartbeat import (
     sector_strength,
     write_heartbeat,
 )
+from market.hyperliquid import HyperliquidClient
 from market.provider import MarketProvider
+
+HYPERLIQUID_BASE = "https://api.hyperliquid.xyz/info"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +99,50 @@ def test_zscore_hand_computed():
 def test_zscore_none_with_insufficient_baseline():
     assert _zscore(5.0, [1.0]) is None
     assert _zscore(None, [1.0, 2.0, 3.0]) is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_compute_asset_fields_handles_real_hyperliquid_funding_history():
+    """Regression test for the real (non-stub) Hyperliquid failure path.
+
+    Hyperliquid's fundingHistory endpoint returns fundingRate/premium as JSON
+    strings. Before the fix, HyperliquidClient.get_funding_history() passed
+    those strings straight through into raw["funding_history"], and
+    _compute_asset_fields() fed them into _zscore() -> statistics.mean(),
+    raising: TypeError: can't convert type 'str' to numerator/denominator.
+
+    This exercises the real client + heartbeat computation together (not
+    just the HTTP-client boundary covered in tests/test_hyperliquid.py), so
+    it would also catch the same string-typing quirk from any future
+    data source.
+    """
+    respx.post(HYPERLIQUID_BASE).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"coin": "BTC", "fundingRate": "0.0001", "premium": "0.00005", "time": 1000},
+                {"coin": "BTC", "fundingRate": "0.0002", "premium": "0.00006", "time": 2000},
+                {"coin": "BTC", "fundingRate": "0.00015", "premium": "0.00007", "time": 3000},
+            ],
+        )
+    )
+    async with HyperliquidClient() as client:
+        funding_history = await client.get_funding_history("BTC-PERP", 0)
+
+    candles = [[i, 100.0, 101.0, 99.0, 100.0 + i, 10.0] for i in range(5)]
+    raw = {
+        "candles": candles,
+        "funding_history": funding_history,
+        "oi": {"openInterest": 1000.0},
+        "funding": {"fundingRate": 0.00018, "prevDayPx": 100.0},
+        "book": {"bids": [[99.0, 1.0]], "asks": [[101.0, 1.0]]},
+        "trades": [],
+    }
+
+    fields = _compute_asset_fields(raw, prior_oi_history=[900.0, 950.0])
+
+    assert isinstance(fields["funding_zscore"], float)
 
 
 def test_zscore_zero_stdev_returns_zero():
