@@ -151,12 +151,18 @@ def main():
         print("Cancelled.")
         return
 
-    # Wipe existing DB
+    # Wipe existing DB (including WAL/SHM sidecar files from journal_mode=WAL)
     if DB_PATH.exists():
         DB_PATH.unlink()
         print(f"Deleted existing database: {DB_PATH}")
     else:
         print("No existing database found.")
+
+    for suffix in ("-wal", "-shm"):
+        sidecar = DB_PATH.with_name(DB_PATH.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+            print(f"Deleted stale sidecar file: {sidecar}")
 
     # Initialize fresh schema
     conn = get_connection(str(DB_PATH))

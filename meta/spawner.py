@@ -82,12 +82,16 @@ def spawn_agent(
 
     thesis_version = 1  # new agents always start at v1
 
-    conn.execute(
+    cursor = conn.execute(
         "INSERT OR IGNORE INTO agents (id, name, status, spawn_date, config_json, current_thesis_version) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (name, name, status, now, config_json, thesis_version),
     )
     conn.commit()
+
+    if cursor.rowcount == 0:
+        row = conn.execute("SELECT * FROM agents WHERE id = ?", (name,)).fetchone()
+        return dict(row) if row else {"id": name, "name": name, "status": status}
 
     # Write thesis file
     _THESES_DIR.mkdir(parents=True, exist_ok=True)

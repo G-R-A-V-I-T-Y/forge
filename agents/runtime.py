@@ -28,7 +28,7 @@ class AgentRuntime:
         self.llm_fn = llm_fn
         self.bridge_factory = bridge_factory
         self.scheduler = scheduler
-        self._last_wake_interval = None
+        self._last_wake_interval = config.get("desk", {}).get("wake_interval_seconds")
 
     def _load_thesis(self) -> str:
         try:

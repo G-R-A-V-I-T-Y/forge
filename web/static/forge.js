@@ -124,6 +124,9 @@ function connectDeskWs() {
           tbody.insertAdjacentHTML('beforeend', html);
         }
       }
+      if (typeof window.sortTable === 'function' && typeof window.currentSort !== 'undefined') {
+        window.sortTable(window.currentSort);
+      }
     };
     ws.onclose = function() { setTimeout(connect, 5000); };
     ws.onerror = function() { ws.close(); };
