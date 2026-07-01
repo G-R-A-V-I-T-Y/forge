@@ -215,6 +215,40 @@ class HyperliquidClient:
             if t["time"] >= cutoff_ms
         ]
 
+    async def get_funding_history(self, asset: str, start_time_ms: int) -> list[dict]:
+        data = await self._post(
+            {
+                "type": "fundingHistory",
+                "coin": self._normalize_asset(asset),
+                "startTime": start_time_ms,
+            }
+        )
+        return data or []
+
+    async def get_recent_trades(self, asset: str, hours: int = 1) -> list[dict]:
+        """Raw recentTrades, filtered to the requested window.
+
+        Unlike get_liquidations (which reuses this same endpoint as a
+        liquidation proxy and renames fields accordingly), this returns the
+        plain trade shape {side, price, size, ts} for trade-tape aggregates
+        (buy/sell volume, aggressor ratio, avg/largest trade size).
+        """
+        now_ms = int(time.time() * 1000)
+        cutoff_ms = now_ms - hours * 3600 * 1000
+        data = await self._post(
+            {"type": "recentTrades", "coin": self._normalize_asset(asset)}
+        )
+        return [
+            {
+                "side": t["side"],
+                "price": float(t["px"]),
+                "size": float(t["sz"]),
+                "ts": t["time"],
+            }
+            for t in data
+            if t["time"] >= cutoff_ms
+        ]
+
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         data = await self._post({"type": "l2Book", "coin": asset})
         if data is None:
