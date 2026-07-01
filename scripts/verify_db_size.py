@@ -5,8 +5,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from store.db import get_connection, init_schema, insert_agent, insert_trade
-from store.fingerprint import write_entry, write_outcome
+from store.db import get_connection, init_schema, insert_agent, insert_trade  # noqa: E402
+from store.fingerprint import write_entry, write_outcome  # noqa: E402
 
 N_TRADES = 500
 BUDGET_MB = 50.0
