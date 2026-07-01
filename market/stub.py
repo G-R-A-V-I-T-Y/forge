@@ -18,6 +18,16 @@ _PRICES = {
     "PEPE-PERP": 0.0000142,
     "WIF-PERP": 2.10,
     "TRUMP-PERP": 12.50,
+    "AAVE-PERP": 165.0,
+    "TAO-PERP": 420.0,
+    "FET-PERP": 1.10,
+    "RENDER-PERP": 6.50,
+    "XLM-PERP": 0.32,
+    "TIA-PERP": 5.80,
+    "HYPE-PERP": 24.0,
+    "LTC-PERP": 92.0,
+    "BCH-PERP": 480.0,
+    "ADA-PERP": 0.68,
 }
 
 _FUNDING = {
@@ -36,6 +46,16 @@ _FUNDING = {
     "PEPE-PERP": 0.0010,
     "WIF-PERP": 0.0015,
     "TRUMP-PERP": -0.0020,
+    "AAVE-PERP": 0.0002,
+    "TAO-PERP": 0.0003,
+    "FET-PERP": 0.0004,
+    "RENDER-PERP": 0.0002,
+    "XLM-PERP": -0.0005,
+    "TIA-PERP": 0.0006,
+    "HYPE-PERP": 0.0009,
+    "LTC-PERP": 0.0001,
+    "BCH-PERP": 0.0001,
+    "ADA-PERP": -0.0003,
 }
 
 
@@ -124,6 +144,36 @@ class StubMarket:
                 },
             ]
         return []
+
+    async def get_funding_history(self, asset: str, start_time_ms: int) -> list[dict]:
+        """Deterministic fake funding history: small oscillation around the
+        asset's current funding rate, one sample per hour back to start_time_ms."""
+        rate = _FUNDING.get(asset, 0.0001)
+        now_ms = int(time.time() * 1000)
+        hour_ms = 3_600_000
+        n = max(1, (now_ms - start_time_ms) // hour_ms)
+        history = []
+        for i in range(n - 1, -1, -1):
+            ts = now_ms - i * hour_ms
+            wobble = rate * 0.1 * ((i % 5) - 2)
+            history.append(
+                {"coin": asset.replace("-PERP", ""), "fundingRate": rate + wobble, "premium": 0.0, "time": ts}
+            )
+        return history
+
+    async def get_recent_trades(self, asset: str, hours: int = 1) -> list[dict]:
+        """Deterministic fake trade tape: alternating buy/sell trades."""
+        price = _PRICES.get(asset, 100.0)
+        now_ms = int(time.time() * 1000)
+        trades = []
+        for i in range(20):
+            ts = now_ms - i * 180_000  # one trade every 3 minutes
+            if ts < now_ms - hours * 3600 * 1000:
+                break
+            side = "B" if i % 2 == 0 else "A"
+            size = 10.0 + (i % 4) * 2.5
+            trades.append({"side": side, "price": price, "size": size, "ts": ts})
+        return trades
 
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         price = _PRICES.get(asset, 100.0)

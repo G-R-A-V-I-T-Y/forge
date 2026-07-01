@@ -44,6 +44,12 @@ class MarketProvider:
     async def get_liquidations(self, asset: str, hours: int = 4) -> list[dict]:
         return await self._backend.get_liquidations(asset, hours)
 
+    async def get_funding_history(self, asset: str, start_time_ms: int) -> list[dict]:
+        return await self._backend.get_funding_history(asset, start_time_ms)
+
+    async def get_recent_trades(self, asset: str, hours: int = 1) -> list[dict]:
+        return await self._backend.get_recent_trades(asset, hours)
+
     async def get_orderbook(self, asset: str, depth: int = 5) -> dict:
         return await self._backend.get_orderbook(asset, depth)
 

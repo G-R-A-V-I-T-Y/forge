@@ -2,27 +2,34 @@ universe:
   - BTC-PERP
   - ETH-PERP
   - SOL-PERP
-  - BNB-PERP
-  - XRP-PERP
-  - DOGE-PERP
+  - SUI-PERP
   - AVAX-PERP
   - LINK-PERP
+  - AAVE-PERP
+  - BNB-PERP
   - ARB-PERP
   - OP-PERP
-  - SUI-PERP
-  - TON-PERP
-  - PEPE-PERP
-  - WIF-PERP
-  - TRUMP-PERP
+  - TAO-PERP
+  - FET-PERP
+  - RENDER-PERP
+  - XRP-PERP
+  - XLM-PERP
+  - TIA-PERP
+  - HYPE-PERP
+  - LTC-PERP
+  - BCH-PERP
+  - ADA-PERP
 
 desk:
   max_leverage: 10
   max_position_size_pct: 0.20
   max_concurrent_positions: 3
-  wake_interval_seconds: 60
+  wake_interval_seconds: 300
   starting_balance: 50000.0
   target_agent_count: 10
   drawdown_kill_pct: 0.15
+  heartbeat_interval_seconds: 300
+  heartbeat_path: "data/heartbeat.json"
 
 data_source: hyperliquid          # stub | hyperliquid
 llm_backend: stub                 # stub | ollama — set ollama when local Ollama is running
