@@ -14,6 +14,7 @@ from market.heartbeat import (
     _ema,
     _log_returns,
     _realized_vol,
+    _resample_candles,
     _rsi,
     _vwap,
     _zscore,
@@ -121,6 +122,49 @@ def test_log_returns_basic():
     returns = _log_returns(closes)
     assert returns[0] == pytest.approx(math.log(1.1))
     assert returns[1] == pytest.approx(math.log(1.1))
+
+
+# ---------------------------------------------------------------------------
+# Candle resampling
+# ---------------------------------------------------------------------------
+
+def test_resample_candles_hand_computed():
+    # 6 x 5m candles [ts, o, h, l, c, v] aggregated into 1 x 30m candle.
+    candles = [
+        [0, 10.0, 12.0, 9.0, 11.0, 100.0],
+        [1, 11.0, 13.0, 10.5, 12.0, 110.0],
+        [2, 12.0, 12.5, 11.0, 11.5, 90.0],
+        [3, 11.5, 14.0, 11.0, 13.5, 120.0],
+        [4, 13.5, 13.8, 12.0, 12.5, 80.0],
+        [5, 12.5, 13.0, 8.0, 9.5, 150.0],
+    ]
+    result = _resample_candles(candles, 6)
+    assert result == [[0, 10.0, 14.0, 8.0, 9.5, 650.0]]
+
+
+def test_resample_candles_multiple_groups():
+    # 12 candles, factor 6 -> 2 output candles.
+    candles = [[i, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(12)]
+    result = _resample_candles(candles, 6)
+    assert len(result) == 2
+    assert result[0][0] == 0
+    assert result[1][0] == 6
+    for c in result:
+        assert c[1] == 1.0  # open
+        assert c[2] == 2.0  # high
+        assert c[3] == 0.5  # low
+        assert c[4] == 1.5  # close
+        assert c[5] == 60.0  # volume sum of 6 candles
+
+
+def test_resample_candles_drops_partial_trailing_group():
+    candles = [[i, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(8)]
+    result = _resample_candles(candles, 6)
+    assert len(result) == 1  # only 8 candles -> one full group of 6, 2 dropped
+
+
+def test_resample_candles_empty_input_returns_empty():
+    assert _resample_candles([], 6) == []
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +307,16 @@ async def test_generate_heartbeat_end_to_end_structure(stub_config):
         fields = packet["assets"][asset]
         for field in PER_ASSET_FIELDS:
             assert field in fields, f"{field} missing for {asset}"
+
+    # OHLCV candle series ride along in each asset's packet entry: the raw
+    # 5m series plus two longer-horizon resamples of it (no new fetches).
+    for asset in stub_config["universe"]:
+        fields = packet["assets"][asset]
+        assert isinstance(fields["candles_5m"], list) and len(fields["candles_5m"]) > 0
+        assert len(fields["candles_30m"]) == len(fields["candles_5m"]) // heartbeat.RESAMPLE_FACTOR_30M
+        assert len(fields["candles_4h"]) == len(fields["candles_5m"]) // heartbeat.RESAMPLE_FACTOR_4H
+        for candle in fields["candles_5m"][:1]:
+            assert len(candle) == 6  # [ts, o, h, l, c, v]
 
     cross_asset = packet["cross_asset"]
     for key in (

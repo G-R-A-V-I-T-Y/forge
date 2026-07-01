@@ -95,7 +95,14 @@ PER_ASSET_FIELDS = [
     "funding_zscore", "oi_zscore", "bid_depth", "ask_depth",
     "depth_imbalance", "top5_imbalance", "slippage_estimate", "buy_volume",
     "sell_volume", "aggressor_ratio", "avg_trade_size", "largest_trade",
+    "candles_5m", "candles_30m", "candles_4h",
 ]
+
+# Resampling factors (in units of 5m candles) for the longer-horizon
+# aggregates carried alongside the raw 5m series in each asset's packet
+# entry — see _resample_candles().
+RESAMPLE_FACTOR_30M = 6
+RESAMPLE_FACTOR_4H = 48
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +210,30 @@ def _vwap(candles: list[list]) -> float | None:
     if den == 0:
         return None
     return num / den
+
+
+def _resample_candles(candles_5m: list[list], factor: int) -> list[list]:
+    """Aggregate consecutive, non-overlapping groups of `factor` 5m candles
+    into fewer, longer-horizon OHLCV candles: open = the group's first
+    candle's open, high = max high in the group, low = min low in the
+    group, close = the group's last candle's close, volume = sum of the
+    group's volumes. Each input candle is `[ts, open, high, low, close,
+    volume]`. A trailing partial group (fewer than `factor` candles left)
+    is dropped rather than emitted as an incomplete candle."""
+    if not candles_5m or factor <= 0:
+        return []
+    out = []
+    n = len(candles_5m)
+    for start in range(0, n - factor + 1, factor):
+        group = candles_5m[start:start + factor]
+        ts = group[0][0]
+        o = group[0][1]
+        h = max(c[2] for c in group)
+        lo = min(c[3] for c in group)
+        close = group[-1][4]
+        vol = sum(c[5] for c in group)
+        out.append([ts, o, h, lo, close, vol])
+    return out
 
 
 def _pct_return(closes: list[float], periods_back: int) -> float | None:
@@ -359,6 +390,14 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
     avg_trade_size = statistics.mean([t["size"] for t in trades]) if trades else None
     largest_trade = max((t["size"] * t["price"] for t in trades), default=None)
 
+    # Raw 5m series (already fetched for the indicators above — no new API
+    # call) plus two longer-horizon resamples of that same series, carried
+    # in the packet so a trade fingerprint recorded off this asset's fields
+    # can capture real OHLCV context, not just derived indicators.
+    candles_5m = candles
+    candles_30m = _resample_candles(candles, RESAMPLE_FACTOR_30M)
+    candles_4h = _resample_candles(candles, RESAMPLE_FACTOR_4H)
+
     return {
         "price": price,
         "return_5m": return_5m,
@@ -389,6 +428,9 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
         "aggressor_ratio": aggressor_ratio,
         "avg_trade_size": avg_trade_size,
         "largest_trade": largest_trade,
+        "candles_5m": candles_5m,
+        "candles_30m": candles_30m,
+        "candles_4h": candles_4h,
     }
 
 
