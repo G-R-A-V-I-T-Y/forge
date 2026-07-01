@@ -17,23 +17,82 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import NamedTuple
 
 from llm.ollama_client import _extract_json
 
 logger = logging.getLogger(__name__)
 
-# On Windows, `opencode` on PATH is a `opencode.cmd` shim (npm global bin).
-# subprocess.run(["opencode", ...]) without shell=True fails with
-# WinError 2 ("cannot find the file") because Windows CreateProcess
-# doesn't consult PATHEXT the way cmd.exe does. shutil.which() *does*
-# resolve PATHEXT, giving the real `opencode.CMD` path — resolved once and
-# reused rather than shelling out via shell=True (which would require
-# re-quoting the message argument for cmd.exe). Falls back to the literal
-# "opencode" on PATH resolution failure or non-Windows, unchanged.
-_OPENCODE_EXECUTABLE = shutil.which("opencode") or "opencode"
+
+def _resolve_opencode_executable() -> str:
+    """Resolve the real opencode executable to invoke directly, bypassing
+    Windows' cmd.exe entirely.
+
+    On Windows, `opencode` on PATH is an `opencode.cmd` batch shim (npm
+    global bin). Two problems, both found via live verification against
+    the real binary:
+
+    1. subprocess.run(["opencode", ...]) without shell=True fails with
+       WinError 2 ("cannot find the file") because Windows CreateProcess
+       doesn't consult PATHEXT the way cmd.exe does. shutil.which() *does*
+       resolve PATHEXT, giving the real `opencode.CMD` path.
+
+    2. Critically, invoking a .cmd/.bat file at all — even via
+       shutil.which()'s resolved path — routes the call through cmd.exe,
+       whose command-line parser cannot contain a raw newline: any
+       argument containing "\n" (i.e. every real multi-paragraph decision
+       prompt) gets silently truncated at the first newline. This was
+       diagnosed by feeding a deliberately newline-containing test string
+       through the .cmd path and observing corruption, then confirming a
+       clean round-trip when calling the batch shim's own wrapped .exe
+       directly instead. This is the actual reason production-shaped
+       prompts got "no market data provided" responses in live
+       verification — models were receiving only the prompt's first line.
+
+    Fix: parse the .cmd shim's own script (it's a fixed two-line
+    "CALL :find_dp0" + a quoted path to a bundled .exe, per npm's standard
+    .cmd shim template) to find the real .exe it wraps, and invoke that
+    .exe directly — a real Windows executable's CreateProcess argv
+    marshaling has no such newline restriction. Falls back to the
+    shutil.which() result (or the literal "opencode") if parsing fails,
+    preserving the old (newline-unsafe, but at least invocable) behavior
+    rather than crashing.
+    """
+    resolved = shutil.which("opencode") or "opencode"
+    if not resolved.lower().endswith((".cmd", ".bat")):
+        return resolved  # non-Windows, or already resolves straight to an exe/script
+
+    try:
+        shim_text = Path(resolved).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return resolved
+
+    # npm's standard .cmd shim ends with: "%dp0%\node_modules\...\opencode.exe" %*
+    match = re.search(r'"([^"]+\.exe)"', shim_text)
+    if not match:
+        logger.warning(
+            "Could not find a wrapped .exe inside opencode shim %s; "
+            "falling back to the .cmd shim (newline-containing prompts "
+            "will be truncated by cmd.exe)", resolved,
+        )
+        return resolved
+
+    exe_path = match.group(1).replace("%dp0%", str(Path(resolved).parent) + "\\")
+    if not Path(exe_path).exists():
+        logger.warning(
+            "Resolved opencode .exe path %s does not exist; falling back "
+            "to the .cmd shim", exe_path,
+        )
+        return resolved
+
+    return exe_path
+
+
+_OPENCODE_EXECUTABLE = _resolve_opencode_executable()
 
 # Free-tier/rate-limited remote models can be slow or occasionally down.
 # 60s per tier is generous enough to absorb normal latency (all 6 real

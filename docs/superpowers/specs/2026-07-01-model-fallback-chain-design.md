@@ -266,5 +266,79 @@ the open question the captain should know about is real-world schema
 compliance of the specific free-tier models routed through opencode,
 which this PR surfaces honestly rather than paper over.
 
-Full per-tier latency table from the final (simplest-prompt) run is in
-the PR description.
+Full per-tier latency table from the final (simplest-prompt) round-1 run
+is in the PR description.
+
+## Round 2: the real root cause, found by testing with the actual production prompt
+
+The captain asked for a second round using the real prompt an agent
+actually sees — built via the real code path (`agents/persona.py`'s
+`build_system_prompt()` + `agents/prompt_builder.py`'s
+`build_decision_prompt()`, fed a real agent's thesis (`silver_basin`),
+a freshly-generated real heartbeat snapshot, and real portfolio data from
+`data/forge.db`) instead of the round-1 synthetic prompt, to rule out
+"the synthetic prompt was too sparse" as the explanation for round 1's
+uniform "no market data provided" responses.
+
+**The production prompt reproduced the identical symptom** — Claude
+Sonnet 5 again responded "No market data, symbol, price feed, or
+opportunity set was provided in this prompt," even though the real
+7,867-character prompt plainly contained a full market-state section.
+That ruled out "prompt too sparse" and pointed at something structural in
+how the message was reaching opencode.
+
+**Root cause, confirmed by direct reproduction outside opencode
+entirely**: `_OPENCODE_EXECUTABLE` (resolved via `shutil.which("opencode")`)
+resolved to `opencode.cmd` on this Windows machine — an npm-installed
+batch-file shim. Invoking a `.cmd` file via `subprocess.run()` always
+routes through `cmd.exe`, and `cmd.exe`'s command-line parser cannot
+contain a raw newline character. A minimal reproduction nailed it:
+
+```python
+subprocess.run([r"...\echo_len.cmd", "FIRSTLINE\nSECONDLINE\nTHIRDLINE..."])
+# → the .cmd-invoked process saw only "FIRSTLINE" (9 chars) — everything
+#   after the first embedded "\n" was silently dropped.
+```
+
+Every real decision prompt is multi-paragraph (persona + thesis + market
+state + instructions, joined with `\n\n`), so **every single opencode
+call in both round 1 and the first round-2 attempt was silently
+truncated at its first newline** — the models genuinely were only ever
+seeing something like the first sentence of the system prompt. Round 1's
+manual ad hoc *successes* (e.g. Claude Sonnet 5 answering correctly) all
+happened via the `Bash` tool's Git-Bash/MSYS2 shell, which resolves and
+invokes `opencode` differently and doesn't hit this cmd.exe path — so
+those successes were real, but not representative of what `forge.py`'s
+Python `subprocess.run()` call path was actually doing on Windows.
+
+**Fix**: `_resolve_opencode_executable()` in `llm/model_chain.py` now
+detects when `shutil.which()` resolves to a `.cmd`/`.bat` shim, parses
+that shim's own script (a fixed npm-generated two-liner that `CALL
+:find_dp0` then invokes a quoted path to a bundled `.exe`) to find the
+real wrapped executable, and invokes that `.exe` directly — bypassing
+cmd.exe, and with it the newline-truncation bug. Falls back to the
+original `.cmd` path (with a warning) if parsing fails, rather than
+crashing. Verified directly: the same embedded-newline reproduction above
+returns the full string intact when pointed at the resolved `.exe`.
+
+## Round 3: live verification against the real production prompt, with the fix in place
+
+Same real `silver_basin` production prompt as round 2, same 6 tiers, same
+`trading-responder` agent — now via the fixed executable resolution:
+
+**5 of 6 tiers now return correct, schema-compliant `{"action": "wait",
+"reason": "..."}` JSON, with reasoning that genuinely engages the real
+market data** (e.g. "All funding rates are within ±0.008% (range: -0.0078%
+to +0.0013%), far below the ±2.0 z-score threshold required by thesis" —
+DeepSeek V4 Flash Free, correctly reading the real per-asset funding
+values out of the real heartbeat and applying the real thesis's entry
+criteria to reach a correct "no dislocation, wait" conclusion). Only
+Nemotron 3 Ultra Free timed out (60s) in this run. Full per-tier
+latency/response table is in the PR description.
+
+This is the headline finding for the captain: the chain's model
+reachability and JSON-extraction logic were correct all along; the
+apparent "models won't follow the schema" problem in rounds 1-2 was
+actually a Windows subprocess bug silently truncating every prompt to its
+first line, now fixed and verified against a real production-shaped
+prompt with 5/6 tiers succeeding.
