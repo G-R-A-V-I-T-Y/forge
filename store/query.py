@@ -230,8 +230,8 @@ def format_trades_summary(trades: list[dict], max_rows: int = 5) -> str:
         pnl_str = f"{pnl:+.2%}"
         lines.append(
             f"  {t.get('asset', '?'):12s} {t.get('direction', '?'):6s} "
-            f"| entry={t.get('entry_price', 0):>.4f} "
-            f"| exit={t.get('exit_price', 0):>.4f} "
+            f"| entry={t.get('entry_price') or 0:>.4f} "
+            f"| exit={t.get('exit_price') or 0:>.4f} "
             f"| PnL={pnl_str:>8s} "
             f"| {t.get('result', t.get('status', '?')):6s}"
         )
