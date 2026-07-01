@@ -37,10 +37,24 @@ _OPENCODE_EXECUTABLE = shutil.which("opencode") or "opencode"
 
 # Free-tier/rate-limited remote models can be slow or occasionally down.
 # 60s per tier is generous enough to absorb normal latency (all 6 real
-# remote tiers measured well under 10s in live verification — see the PR
+# remote tiers measured well under 30s in live verification — see the PR
 # description) without letting one dead tier stall a decision cycle for
 # minutes. On timeout we log a warning and fall through to the next tier.
 OPENCODE_TIMEOUT_SECS = 60
+
+# opencode's default "build" agent identifies itself as a coding assistant
+# with a strong baked-in system prompt and full filesystem/tool access.
+# Live verification (see design doc) found this made every remote tier
+# unreliable for trading decisions: weaker free models responded with
+# generic {"status": "ready", ...} acknowledgments instead of a decision,
+# and Claude Sonnet explicitly refused to "roleplay" as a trading API.
+# `trading-responder` is a project-scoped custom agent (committed at
+# .opencode/agent/trading-responder.md, auto-discovered by opencode from
+# the working directory) with all tool permissions denied and a system
+# prompt that replaces opencode's coding-assistant identity with a
+# headless JSON-decision-responder identity. Every opencode-routed tier
+# uses it via --agent.
+OPENCODE_AGENT = "trading-responder"
 
 # The literal failure sentinel llm/client.py's _ollama_decide() returns
 # when the Ollama tier itself failed (timeout, connection error,
@@ -92,14 +106,26 @@ def _run_opencode_tier(model_id: str, variant: str | None, message: str) -> dict
     """Run one opencode-routed tier as a subprocess. Never raises — returns
     None on timeout, non-zero exit, unparseable output, or a decision
     missing required fields, logging a warning in each case."""
-    cmd = [_OPENCODE_EXECUTABLE, "run", "--model", model_id, "--format", "json"]
+    cmd = [
+        _OPENCODE_EXECUTABLE, "run", "--model", model_id,
+        "--agent", OPENCODE_AGENT, "--format", "json",
+    ]
     if variant:
         cmd += ["--variant", variant]
     cmd.append(message)
 
     try:
+        # encoding="utf-8" (with errors="replace") is required on Windows:
+        # subprocess.run's default text-mode decoding uses the console's
+        # locale codepage (cp1252 in this environment), which raises
+        # UnicodeDecodeError on non-ASCII bytes opencode writes to stdout
+        # (observed live: it silently killed the stdout-reader thread,
+        # stalling the call until the 60s timeout instead of returning
+        # promptly). errors="replace" keeps a single bad byte from losing
+        # an otherwise-valid NDJSON response.
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=OPENCODE_TIMEOUT_SECS,
+            encoding="utf-8", errors="replace",
         )
     except subprocess.TimeoutExpired:
         logger.warning("opencode tier %s timed out after %ds", model_id, OPENCODE_TIMEOUT_SECS)

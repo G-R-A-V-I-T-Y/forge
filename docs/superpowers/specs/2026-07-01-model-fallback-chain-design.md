@@ -182,11 +182,89 @@ change needed there beyond the schema/migration.
   next to the existing hypothesis/expected-value/confidence fields, with
   the same null/error-sentinel rendering rules.
 
-## Live verification summary
+## Adaptation found during live testing: opencode's default agent is unusable for this purpose
 
-All 6 remote `opencode` tiers were called for real (not mocked) with a
-short trading-decision-shaped test prompt, one call each, via a one-off
-script (not part of the pytest suite — network-dependent, rate-limit-prone,
-unsuitable for CI). Full latency/response details are in the PR
-description. Outcome: see PR description for the per-tier table; report
-here is the summary the captain asked for kept close to the design record.
+Initial live-verification calls (`opencode run --model <id> --format json
+"<system+decision message>"`, no `--agent` flag) were unreliable in a way
+not anticipated by the brief: opencode's default **"build"** agent has a
+strong baked-in system prompt identifying itself as *"OpenCode, a coding
+assistant CLI tool"* with full read/bash/edit tool access into the current
+working directory (the forge repo itself, since that's `forge.py`'s cwd).
+Given our system+decision message as a single user turn:
+
+- Weaker free models frequently responded with generic
+  `{"status": "ready", ...}` or `{"message": "Awaiting instructions..."}`
+  acknowledgments, apparently expecting a follow-up dev task rather than
+  answering in-character as a trader.
+- Claude Sonnet 5, being more safety-aligned, explicitly **refused**:
+  *"I'm OpenCode, a coding assistant CLI tool — not a trading-decision
+  API, and I don't have live market data or the ability to make trading
+  decisions. I won't roleplay as one..."*
+- Non-deterministically, a model would instead attempt a `read` tool call
+  on the project directory; since `_run_opencode_tier()`'s subprocess has
+  no TTY, opencode auto-rejects the permission request and the turn ends
+  with no text output — `model_chain.py` correctly treats this as tier
+  failure and falls through, but it's a real, observed failure mode.
+
+**Fix**: a project-scoped custom opencode agent, committed at
+`.opencode/agent/trading-responder.md` (opencode auto-discovers
+`.opencode/agent/*.md` from the working directory — verified directly,
+no external/global config needed). It denies every tool permission
+(`write`/`edit`/`bash`/`read`/`grep`/`glob`/`list`/`webfetch`/`todowrite`
+all `false`) and replaces the "OpenCode coding assistant" system prompt
+with a headless JSON-decision-responder identity that explicitly won't
+explore files, ask questions, or refuse to answer in-character. Every
+`_run_opencode_tier()` call passes `--agent trading-responder`. This
+eliminated the tool-call-permission-denial failure mode and Claude's
+identity-based refusal in manual single-call testing.
+
+A second real Windows-specific bug found and fixed during verification:
+`subprocess.run(..., text=True)` without an explicit `encoding=` defaults
+to the console's locale codepage (`cp1252` in this environment), which
+raises `UnicodeDecodeError` in the stdout-reader thread on non-ASCII bytes
+opencode writes — observed live as a silent ~60s stall (the reader thread
+died, so `subprocess.run` blocked until the timeout) instead of a prompt
+response. Fixed by passing `encoding="utf-8", errors="replace"`.
+
+## Live verification summary — the honest result
+
+All 6 remote `opencode` tiers were called for real (not mocked, no
+network mocking) via `scripts/verify_model_chain_live.py`, one call each,
+with the `trading-responder` agent wired in. This was run three times
+with progressively simpler/more explicit prompts (full results and every
+raw response are in the PR description) to rule out a prompt-wording
+artifact before concluding.
+
+**Result: all 6 tiers are reachable — no auth failures, no "model not
+found" errors, no rate-limit rejections — but under this synthetic,
+minimal single-shot test prompt, none of the 6 consistently returned a
+schema-compliant `{"action": "wait"/"enter"/"close", ...}` decision.**
+Even with an explicit literal example schema in the prompt and the
+custom no-tools agent, most models hedged with a "no market data
+provided" or "awaiting input" response instead of using the given
+price/funding/OI numbers, despite those numbers being present in the
+prompt. Two tiers occasionally timed out (60s) rather than answering at
+all. Manual single-shot ad hoc tests with an even simpler one-schema
+prompt did succeed intermittently for some tiers (e.g. Claude Sonnet 5
+and Big Pickle both returned exactly the requested JSON in isolated
+manual runs) — so this is not a hard "these models can never produce
+valid JSON" finding, but a real reliability/consistency gap: schema
+adherence via headless single-shot `opencode run` calls is inconsistent
+across tiers with a minimal test prompt, in a way full production
+decision prompts (rich with 40 OHLCV candles, correlation matrices,
+desk-wide position context, an explicit "Output JSON only" instruction
+already present in `agents/persona.py`/`agents/prompt_builder.py`) may or
+may not fully avoid — this needs to be monitored once live in production,
+not assumed fixed by this PR.
+
+Every one of these failures was correctly detected and rejected by
+`_is_valid_decision()` / `_run_opencode_tier()`'s parsing, and the chain's
+fallthrough logic worked exactly as designed in every single case
+(confirmed both by the mocked unit tests and by watching the real run
+correctly move tier-to-tier). The system's resilience mechanism is sound;
+the open question the captain should know about is real-world schema
+compliance of the specific free-tier models routed through opencode,
+which this PR surfaces honestly rather than paper over.
+
+Full per-tier latency table from the final (simplest-prompt) run is in
+the PR description.
