@@ -5,7 +5,8 @@ CREATE TABLE IF NOT EXISTS agents (
     spawn_date TEXT NOT NULL,
     cull_date TEXT,
     config_json TEXT NOT NULL DEFAULT '{}',
-    current_thesis_version INTEGER NOT NULL DEFAULT 1
+    current_thesis_version INTEGER NOT NULL DEFAULT 1,
+    last_model_used TEXT
 );
 
 CREATE TABLE IF NOT EXISTS theses (
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS trades (
     expected_value_text TEXT,
     funding_rate_current REAL,
     open_interest_24h_change_pct REAL,
+    model_used TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 

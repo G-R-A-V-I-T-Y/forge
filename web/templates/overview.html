@@ -36,6 +36,7 @@
       <th class="sortable" data-sort="weekly_return" onclick="sortTable('weekly_return')">Wkly Ret <span class="sort-arrow"></span></th>
       <th class="sortable" data-sort="max_drawdown" onclick="sortTable('max_drawdown')">Max DD <span class="sort-arrow"></span></th>
       <th class="sortable" data-sort="open_positions" onclick="sortTable('open_positions')">Open <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="model" onclick="sortTable('model')">Model <span class="sort-arrow"></span></th>
     </tr>
   </thead>
   <tbody id="leaderboard-body">
@@ -58,6 +59,15 @@
       </td>
       <td class="loss">{{ "{:.1%}".format(a.max_drawdown) }}</td>
       <td>{{ a.open_positions_count }}</td>
+      <td>
+        {% if a.last_model_used == 'no model available' %}
+        <span class="badge" style="background:#f85149;color:#fff;">NO MODEL AVAILABLE</span>
+        {% elif a.last_model_used %}
+        {{ a.last_model_used }}
+        {% else %}
+        &mdash;
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
@@ -196,7 +206,7 @@ function sortTable(col) {
   }
   var tbody = document.getElementById('leaderboard-body');
   var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
-  var colIdx = {name:0, status:1, trades:2, win_rate:3, profit_factor:4, sharpe:5, weekly_return:6, max_drawdown:7, open_positions:8};
+  var colIdx = {name:0, status:1, trades:2, win_rate:3, profit_factor:4, sharpe:5, weekly_return:6, max_drawdown:7, open_positions:8, model:9};
   var idx = colIdx[col] || 0;
   rows.sort(function(a, b) {
     var va = a.cells[idx] ? a.cells[idx].innerText.trim() : '';

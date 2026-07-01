@@ -72,6 +72,7 @@ async def overview(request: Request):
                 "weekly_return": metrics.get("last_7d_return", 0.0),
                 "max_drawdown": (peak - bal) / peak if peak > 0 else 0.0,
                 "open_positions_count": pos_count,
+                "last_model_used": agent.get("last_model_used"),
             }
         )
 
@@ -350,6 +351,7 @@ async def api_desk():
                 "weekly_return": round(weekly_return, 4),
                 "max_drawdown": round((peak - balance) / peak, 4) if peak > 0 else 0.0,
                 "open_positions_count": pos_count,
+                "last_model_used": agent.get("last_model_used"),
             }
         )
     return agents
@@ -448,6 +450,7 @@ async def api_agent_detail(name: str):
         },
         "balance": account["balance"] if account else 50000.0,
         "open_positions_count": pos_count,
+        "last_model_used": agent["last_model_used"] if "last_model_used" in agent.keys() else None,
     }
 
 
@@ -521,6 +524,7 @@ async def ws_desk(websocket: WebSocket):
                         if peak > 0
                         else 0.0,
                         "open_positions_count": pos_count,
+                        "last_model_used": agent.get("last_model_used"),
                     }
                 )
             await websocket.send_json(agents)

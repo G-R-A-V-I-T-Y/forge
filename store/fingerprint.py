@@ -4,7 +4,8 @@ import msgpack
 
 
 def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
-                reasoning: dict | None = None, market_context: dict | None = None) -> None:
+                reasoning: dict | None = None, market_context: dict | None = None,
+                model_used: str | None = None) -> None:
     """Enrich an existing trade row with fingerprint fields.
 
     `market_context`, if given, is the consolidated trade-thumbprint dict
@@ -16,6 +17,13 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
     funding_history_blob) rather than stored as raw JSON text, to keep DB
     size in check. `None` (the default) leaves `market_context_json` NULL,
     preserving the old behavior for callers that don't pass it.
+
+    `model_used`, if given, is the display name of whichever tier in
+    llm/model_chain.py's ordered fallback chain produced the decision that
+    led to this trade (see agents/decision_loop.py's run_decision()).
+    `None` (the default) leaves the `model_used` column NULL, preserving
+    the old behavior for callers that don't pass it (e.g. older tests,
+    trades recorded before this column existed).
     """
     ohlcv_15m = msgpack.packb(asset_snapshot.get("ohlcv_15m", []), use_bin_type=True)
     ohlcv_1h = msgpack.packb(asset_snapshot.get("ohlcv_1h", []), use_bin_type=True)
@@ -58,7 +66,7 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
            regime=?, expected_value_text=?,
            funding_rate_current=?, open_interest_24h_change_pct=?,
            hypothesis=?, key_conditions_met=?, key_conditions_missing=?,
-           confidence=?, market_context_json=? WHERE id=?""",
+           confidence=?, market_context_json=?, model_used=? WHERE id=?""",
         (
             ohlcv_15m,
             ohlcv_1h,
@@ -75,6 +83,7 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
             kcmiss,
             confidence,
             market_context_blob,
+            model_used,
             trade_id,
         ),
     )
