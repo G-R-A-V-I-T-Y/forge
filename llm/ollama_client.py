@@ -8,20 +8,27 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 TIMEOUT_SECS = 30.0
-MODEL = "qwen3:35b"
+MODEL = "qwen3.6:35b_optimized"
 
 
-async def decide(system_prompt: str, decision_prompt: str) -> dict | None:
+async def decide(system_prompt: str, decision_prompt: str, config: dict | None = None) -> dict | None:
     """Call Ollama's /api/chat and extract a JSON trading decision.
+
+    Args:
+        system_prompt: The system prompt.
+        decision_prompt: The decision prompt.
+        config: Optional config dict; if it contains "llm_model", that value
+            is used as the Ollama model name instead of the module default.
 
     Returns parsed JSON dict on success, None on timeout or parse failure.
     """
+    model = (config or {}).get("llm_model") or MODEL
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": decision_prompt},
     ]
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": messages,
         "stream": False,
         "options": {"temperature": 0.7},

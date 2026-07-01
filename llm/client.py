@@ -19,20 +19,20 @@ def decide(system_prompt: str, decision_prompt: str, config: dict | None = None)
         return stub_decide(system_prompt, decision_prompt)
 
     if backend == "ollama":
-        return _ollama_decide(system_prompt, decision_prompt)
+        return _ollama_decide(system_prompt, decision_prompt, config)
 
     logger.warning("Unknown llm_backend %r, falling back to stub", backend)
     from llm.stub import decide as stub_decide
     return stub_decide(system_prompt, decision_prompt)
 
 
-def _ollama_decide(system_prompt: str, decision_prompt: str) -> dict:
+def _ollama_decide(system_prompt: str, decision_prompt: str, config: dict | None = None) -> dict:
     """Sync wrapper around async Ollama client."""
     import asyncio
     from llm.ollama_client import decide as ollama_decide
 
     try:
-        result = asyncio.run(ollama_decide(system_prompt, decision_prompt))
+        result = asyncio.run(ollama_decide(system_prompt, decision_prompt, config))
         if result is not None:
             return result
     except Exception as exc:
