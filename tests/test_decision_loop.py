@@ -59,8 +59,10 @@ def _fresh_heartbeat_packet(timestamp: str | None = None) -> dict:
     }
 
 
-def bridge_factory(agent_id, conn, provider):
-    return PaperBridge(agent_id=agent_id, conn=conn, provider=provider)
+def _bridge_factory(config):
+    def bridge_factory(agent_id, conn, provider):
+        return PaperBridge(agent_id=agent_id, conn=conn, provider=provider, config=config)
+    return bridge_factory
 
 
 @pytest.mark.asyncio
@@ -81,7 +83,7 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
             conn=conn,
             provider=provider,
             llm_fn=decide,
-            bridge_factory=bridge_factory,
+            bridge_factory=_bridge_factory(config),
         )
 
     assert result["action"] == "enter"
@@ -128,7 +130,7 @@ async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
             conn=conn,
             provider=provider,
             llm_fn=bad_llm,
-            bridge_factory=bridge_factory,
+            bridge_factory=_bridge_factory(config),
         )
 
     assert result["action"] == "risk_blocked"
@@ -157,7 +159,7 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
             conn=conn,
             provider=provider,
             llm_fn=wait_llm,
-            bridge_factory=bridge_factory,
+            bridge_factory=_bridge_factory(config),
         )
 
     assert result["action"] == "wait"
@@ -183,7 +185,7 @@ async def test_decision_loop_missing_heartbeat_returns_wait(conn, tmp_path):
             conn=conn,
             provider=provider,
             llm_fn=decide,
-            bridge_factory=bridge_factory,
+            bridge_factory=_bridge_factory(config),
         )
 
     assert result == {"action": "wait", "detail": "heartbeat unavailable or stale"}
@@ -211,7 +213,7 @@ async def test_decision_loop_stale_heartbeat_returns_wait(conn, tmp_path):
             conn=conn,
             provider=provider,
             llm_fn=decide,
-            bridge_factory=bridge_factory,
+            bridge_factory=_bridge_factory(config),
         )
 
     assert result == {"action": "wait", "detail": "heartbeat unavailable or stale"}

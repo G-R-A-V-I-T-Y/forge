@@ -1,12 +1,19 @@
 import asyncio
 import logging
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
+from market.heartbeat import (
+    DEFAULT_HEARTBEAT_PATH,
+    heartbeat_max_age_seconds,
+    read_heartbeat,
+    read_heartbeat_or_none,
+)
 from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from execution.paper_bridge import PaperBridge
@@ -106,6 +113,20 @@ async def health():
         round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0.0
     )
 
+    heartbeat_path = (config or {}).get("desk", {}).get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+    heartbeat_age_seconds = None
+    packet = read_heartbeat(heartbeat_path)
+    if packet and packet.get("timestamp"):
+        try:
+            written_at = datetime.strptime(
+                packet["timestamp"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+            heartbeat_age_seconds = round(
+                (datetime.now(timezone.utc) - written_at).total_seconds(), 1
+            )
+        except (ValueError, TypeError):
+            heartbeat_age_seconds = None
+
     return {
         "status": "ok" if exchange_available else "degraded",
         "agents": agent_count,
@@ -113,27 +134,32 @@ async def health():
         "data_source": data_source,
         "exchange_available": exchange_available,
         "db_size_mb": db_size_mb,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
     }
 
 
 @app.get("/api/prices")
 async def get_prices():
-    provider = getattr(app.state, "provider", None)
+    """Reads asset prices from the shared heartbeat file instead of calling
+    provider.get_all_mids() live on every client poll — see
+    docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md. Returns {}
+    (unchanged failure-mode contract) if the heartbeat is missing/stale."""
     config = getattr(app.state, "config", None)
-    if provider is None:
+    if config is None:
         return {}
-    universe = config.get("universe", []) if config else []
-    try:
-        mids = await provider.get_all_mids()
-        result = {}
-        for asset in universe:
-            coin = asset.replace("-PERP", "")
-            mid = mids.get(coin)
-            if mid is not None:
-                result[asset] = mid
-        return result
-    except Exception:
+    desk_config = config.get("desk", {})
+    heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+    universe = config.get("universe", [])
+    heartbeat = read_heartbeat_or_none(heartbeat_path, heartbeat_max_age_seconds(config))
+    if heartbeat is None:
         return {}
+    assets_data = heartbeat.get("assets", {})
+    result = {}
+    for asset in universe:
+        price = assets_data.get(asset, {}).get("price")
+        if price is not None:
+            result[asset] = price
+    return result
 
 
 PAGE_SIZE = 25
