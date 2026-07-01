@@ -15,7 +15,7 @@ from market.heartbeat import (
     read_heartbeat_or_none,
 )
 from risk.gate import validate_order, RiskViolation
-from store.db import get_positions, get_trades, insert_trade
+from store.db import get_positions, get_trades, insert_trade, update_last_model_used
 from store.fingerprint import write_entry, write_outcome
 
 logger = logging.getLogger(__name__)
@@ -76,11 +76,30 @@ async def run_decision(
             universe=assets,
         )
 
-        response = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt)
+        response, model_used = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt)
+
+        # Record which model produced (or failed to produce) this cycle's
+        # decision — "most recently used model", not "model used for the
+        # last trade": every cycle updates this, including wait/error
+        # cycles, per the captain's requirement. The literal
+        # "no model available" sentinel (distinct from NULL, which means
+        # "no decision cycle has recorded a model yet" e.g. legacy rows)
+        # covers the case where model_chain.decide() exhausted every tier.
+        model_label = model_used
+        if model_label is None and response is not None and response.get("action") == "error":
+            model_label = "no model available"
+        if model_label is not None:
+            update_last_model_used(conn, agent_id, model_label)
+
         if response is None:
             return {"action": "wait", "detail": "LLM returned invalid response after retries"}
 
         action = response.get("action", "wait")
+
+        if action == "error":
+            reason = response.get("reason", "no model available")
+            logger.error("[%s] No model available for decision: %s", agent_id, reason)
+            return {"action": "error", "detail": reason}
 
         if action == "wait":
             reason = response.get("reason", "")
@@ -139,6 +158,7 @@ async def run_decision(
                     regime=(heartbeat.get("regime") or {}).get("regime_tag"),
                     reasoning=response,
                     market_context=market_context,
+                    model_used=model_used,
                 )
 
             logger.info("[%s] Entered trade: %s", agent_id, fill)
@@ -152,8 +172,25 @@ async def run_decision(
         return {"action": "error", "detail": str(exc)}
 
 
-def _call_llm_with_retry(llm_fn, system_prompt: str, decision_prompt: str, max_retries: int = 2) -> dict | None:
-    """Call LLM and validate JSON response. Retry up to max_retries on bad output."""
+def _call_llm_with_retry(
+    llm_fn, system_prompt: str, decision_prompt: str, max_retries: int = 2
+) -> tuple[dict | None, str | None]:
+    """Call LLM and validate JSON response. Retry up to max_retries on bad output.
+
+    `llm_fn` returns `(decision_dict, model_display_name_or_None)` — see
+    llm/model_chain.py's `decide()`. Returns the same shape: on success,
+    `(decision, model_used)` for the accepted decision; on exhaustion,
+    `(None, last_model_used)` where `last_model_used` is whichever model
+    (if any) answered on the final attempt, so callers can still record
+    which model was involved even when every attempt was ultimately
+    rejected as malformed.
+
+    A decision with `action == "error"` (the model chain's own explicit
+    "no model available" signal) is returned immediately without
+    retry-reprompting — reprompting only makes sense for malformed/
+    incomplete JSON that a clarifying follow-up message could fix.
+    """
+    last_model_used = None
     for attempt in range(max_retries + 1):
         try:
             result = llm_fn(system_prompt, decision_prompt)
@@ -161,36 +198,44 @@ def _call_llm_with_retry(llm_fn, system_prompt: str, decision_prompt: str, max_r
             logger.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
             if attempt < max_retries:
                 continue
-            return None
+            return None, last_model_used
 
-        if not isinstance(result, dict):
+        decision, model_used = result if isinstance(result, tuple) else (result, None)
+        if model_used:
+            last_model_used = model_used
+
+        if not isinstance(decision, dict):
             logger.warning("LLM returned non-dict (attempt %d/%d)", attempt + 1, max_retries)
             if attempt < max_retries:
                 decision_prompt += "\n\nYour previous response was not valid JSON. Output a valid JSON object only."
                 continue
-            return None
+            return None, last_model_used
 
-        action = result.get("action")
+        action = decision.get("action")
+
+        if action == "error":
+            return decision, model_used
+
         if action not in ("enter", "wait", "close"):
             logger.warning("LLM returned unknown action %r (attempt %d/%d)", action, attempt + 1, max_retries)
             if attempt < max_retries:
                 decision_prompt += f"\n\nAction '{action}' is not valid. Use 'enter', 'wait', or 'close'."
                 continue
-            return None
+            return None, last_model_used
 
         if action == "enter":
             required = ("asset", "direction", "entry_price", "stop_loss_price", "leverage", "position_size_pct")
-            missing = [k for k in required if k not in result]
+            missing = [k for k in required if k not in decision]
             if missing:
                 logger.warning("LLM enter missing fields %s (attempt %d/%d)", missing, attempt + 1, max_retries)
                 if attempt < max_retries:
                     decision_prompt += f"\n\nMissing required fields: {missing}. Include all trade parameters."
                     continue
-                return None
+                return None, last_model_used
 
-        return result
+        return decision, model_used
 
-    return None
+    return None, last_model_used
 
 
 async def run_postmortem(conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str) -> None:
@@ -208,6 +253,11 @@ async def run_postmortem(conn, agent_id: str, trade_id: str, llm_fn, system_prom
     )
     try:
         result = llm_fn(system_prompt, prompt)
+        # llm_fn now returns (decision_dict, model_used) — see
+        # llm/model_chain.py's decide(). The model label isn't tracked
+        # per-postmortem (out of scope), only the decision dict matters here.
+        if isinstance(result, tuple):
+            result, _ = result
         if isinstance(result, dict) and result.get("action") == "wait":
             postmortem = result.get("reason", "")
         elif isinstance(result, str):

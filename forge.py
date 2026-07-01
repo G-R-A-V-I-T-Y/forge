@@ -14,7 +14,7 @@ from store.db import get_connection, init_schema, insert_agent, insert_account_s
 from store.positions import get_all_open_positions
 from market.provider import MarketProvider
 from market import heartbeat
-from llm import client as llm_client
+from llm import model_chain
 from execution.paper_bridge import PaperBridge
 from agents.runtime import AgentRuntime
 from web.app import app as web_app
@@ -72,8 +72,8 @@ async def main():
             agent_id=agent_id, conn=conn, provider=provider, config=config
         )
 
-    def llm_fn(system_prompt: str, decision_prompt: str) -> dict:
-        return llm_client.decide(system_prompt, decision_prompt, config=config)
+    def llm_fn(system_prompt: str, decision_prompt: str) -> tuple[dict, str | None]:
+        return model_chain.decide(system_prompt, decision_prompt, config=config)
 
     conn = get_connection(str(DB_PATH))
     init_schema(conn)

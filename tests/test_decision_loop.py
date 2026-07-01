@@ -65,6 +65,16 @@ def _bridge_factory(config):
     return bridge_factory
 
 
+STUB_MODEL_LABEL = "Test Stub Model"
+
+
+def _stub_llm_fn(system_prompt, decision_prompt):
+    """llm_fn now returns (decision_dict, model_display_name) — see
+    llm/model_chain.py's decide(). Wraps llm.stub.decide() for tests that
+    only care about the decision shape, not the fallback chain itself."""
+    return decide(system_prompt, decision_prompt), STUB_MODEL_LABEL
+
+
 @pytest.mark.asyncio
 async def test_decision_loop_enter_creates_trade(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
@@ -82,7 +92,7 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
             config=config,
             conn=conn,
             provider=provider,
-            llm_fn=decide,
+            llm_fn=_stub_llm_fn,
             bridge_factory=_bridge_factory(config),
         )
 
@@ -107,6 +117,12 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
     assert mc["asset"]["price"] == 145.20
     assert mc["asset"]["funding"] == -0.0042
 
+    # model_used was recorded on the trade row and last_model_used on the
+    # agent row from the (decision, model_used) tuple returned by llm_fn.
+    assert full["model_used"] == STUB_MODEL_LABEL
+    from store.db import get_agent
+    assert get_agent(conn, AGENT_ID)["last_model_used"] == STUB_MODEL_LABEL
+
 
 @pytest.mark.asyncio
 async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
@@ -128,7 +144,7 @@ async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
             "key_conditions_missing": [],
             "confidence": 0.5,
             "expected_value": "test",
-        }
+        }, "Test Bad Model"
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
     write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
@@ -157,7 +173,7 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
     def wait_llm(sys, prompt):
-        return {"action": "wait", "reason": "no setup fits thesis today"}
+        return {"action": "wait", "reason": "no setup fits thesis today"}, "Test Wait Model"
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
     write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
@@ -179,6 +195,46 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
     from store.db import get_trades
     assert get_trades(conn, AGENT_ID) == []
 
+    # "wait" cycles still update last_model_used — the captain wants "most
+    # recently used model", not "model used for the last trade".
+    from store.db import get_agent
+    assert get_agent(conn, AGENT_ID)["last_model_used"] == "Test Wait Model"
+
+
+@pytest.mark.asyncio
+async def test_decision_loop_error_action_propagates_and_records_no_model_available(conn, tmp_path):
+    """When llm_fn (llm/model_chain.py's decide()) exhausts every tier, it
+    returns ({"action": "error", "reason": "no model available"}, None).
+    run_decision() must surface that as an explicit error result (not a
+    generic "wait") and record the literal "no model available" sentinel
+    on the agent row, distinct from NULL (no cycle run yet)."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def no_model_llm(sys, prompt):
+        return {"action": "error", "reason": "no model available"}, None
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=no_model_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result == {"action": "error", "detail": "no model available"}
+    from store.db import get_agent, get_trades
+    assert get_agent(conn, AGENT_ID)["last_model_used"] == "no model available"
+    assert get_trades(conn, AGENT_ID) == []
+
 
 @pytest.mark.asyncio
 async def test_decision_loop_missing_heartbeat_returns_wait(conn, tmp_path):
@@ -197,7 +253,7 @@ async def test_decision_loop_missing_heartbeat_returns_wait(conn, tmp_path):
             config=config,
             conn=conn,
             provider=provider,
-            llm_fn=decide,
+            llm_fn=_stub_llm_fn,
             bridge_factory=_bridge_factory(config),
         )
 
@@ -225,7 +281,7 @@ async def test_decision_loop_stale_heartbeat_returns_wait(conn, tmp_path):
             config=config,
             conn=conn,
             provider=provider,
-            llm_fn=decide,
+            llm_fn=_stub_llm_fn,
             bridge_factory=_bridge_factory(config),
         )
 
