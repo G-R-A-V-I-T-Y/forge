@@ -17,7 +17,7 @@ python forge.py
 
 Open http://localhost:8000 to see jade_hawk making stub trades every 60 seconds.
 On a fresh database `forge.py` seeds just `jade_hawk`; run
-`python scripts/fresh_start.py` first to reset and launch the full 8-agent
+`python scripts/fresh_start.py` first to reset and launch the full 10-agent
 desk instead (see [Multi-Agent Desk](#multi-agent-desk)).
 
 ## Requirements
@@ -109,9 +109,13 @@ writes the seed thesis file, and creates the starting paper account;
 `check_against_graveyard()` is a stub that always reports the thesis as
 unique (a real similarity check lands in a later milestone).
 
-To reset the desk and seed all 8 initial agents (`iron_moth`, `jade_hawk`,
-`silver_basin`, `copper_vane`, `gray_finch`, `amber_wolf`, `steel_crane`,
-`onyx_heron`) with their seed theses:
+To reset the desk and seed all 10 initial agents (`iron_moth`, `silver_basin`,
+`copper_vane`, `gray_finch`, `amber_wolf`, `steel_crane`, `onyx_heron`,
+`jade_hawk`, `violet_lion`, `crimson_fox`), each with a distinct specialized
+strategy (cross-sectional momentum, funding dislocation, OI intelligence,
+order book microstructure, trade flow, liquidation hunting, relative value,
+regime detection, volatility trading, and a meta agent that weights the other
+nine), with their seed theses:
 
 ```bash
 python scripts/fresh_start.py
@@ -120,7 +124,7 @@ python scripts/fresh_start.py
 This deletes the existing `data/forge.db` (and any WAL/SHM sidecar files),
 re-initializes the schema, and seeds each agent via `spawn_agent()`. Pass
 `--yes` to skip the confirmation prompt. `python forge.py` will then launch
-all 8 agents concurrently.
+all 10 agents concurrently.
 
 The `/` overview page shows a sortable leaderboard (click any column header)
 across all agents, and `/agents/{name}` shows a full detail page per agent.
@@ -134,5 +138,5 @@ every 30 seconds so the leaderboard updates live without a page reload.
 - **M2** (complete): Real Hyperliquid market data — `HyperliquidClient`, `MarketProvider`, `StubMarket`
 - **M3** (complete): Real LLM decisions (Qwen3.6-35B via Ollama) + performance metrics
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
-- **M5** (complete): Multi-agent desk — 8 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard + agent detail pages, `/api/desk`, `WS /api/ws/desk`
+- **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard + agent detail pages, `/api/desk`, `WS /api/ws/desk`
 - **M6-M10**: Full system
