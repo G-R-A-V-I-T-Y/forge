@@ -3,9 +3,6 @@
 /**
  * Render a simple OHLCV candlestick chart as inline SVG into the element
  * with id `containerId`.
- *
- * candles: array of [ts, open, high, low, close, volume] (the same format
- * used throughout Forge's market layer and trade fingerprints).
  */
 function renderCandleChart(containerId, candles, opts) {
   var el = document.getElementById(containerId);
@@ -47,13 +44,11 @@ function renderCandleChart(containerId, candles, opts) {
     var up = close >= o;
     var color = up ? '#3fb950' : '#f85149';
 
-    // wick
     parts.push(
       '<line x1="' + cx + '" y1="' + y(h) + '" x2="' + cx + '" y2="' + y(l) +
       '" stroke="' + color + '" stroke-width="1" />'
     );
 
-    // body
     var bodyTop = y(Math.max(o, close));
     var bodyBottom = y(Math.min(o, close));
     var bodyHeight = Math.max(1, bodyBottom - bodyTop);
@@ -68,8 +63,7 @@ function renderCandleChart(containerId, candles, opts) {
 }
 
 /**
- * Fetch the trade bank via /api/query with the given filter params and
- * invoke `cb(tradesArray)`. Used by the /trades page filter controls.
+ * Fetch the trade bank via /api/query with the given filter params.
  */
 function fetchTrades(filters, cb) {
   var params = new URLSearchParams();
@@ -83,6 +77,65 @@ function fetchTrades(filters, cb) {
     .catch(function () { cb([]); });
 }
 
+/**
+ * Connect to the desk WebSocket and update the leaderboard in-place.
+ * Attaches to the leaderboard table if present on the page.
+ */
+function connectDeskWs() {
+  var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws;
+  function connect() {
+    ws = new WebSocket(protocol + '//' + location.host + '/api/ws/desk');
+    ws.onmessage = function(evt) {
+      var agents = JSON.parse(evt.data);
+      if (!agents) return;
+      var tbody = document.getElementById('leaderboard-body');
+      if (!tbody) return;
+      var existing = {};
+      var rows = tbody.querySelectorAll('tr');
+      for (var i = 0; i < rows.length; i++) {
+        var nameCell = rows[i].cells[0];
+        if (nameCell) existing[nameCell.innerText.trim()] = rows[i];
+      }
+      for (var j = 0; j < agents.length; j++) {
+        var a = agents[j];
+        var oldRow = existing[a.name];
+        var statusBadge = '<span class="badge badge-' + a.status + '">' + a.status.toUpperCase() + '</span>';
+        var wrClass = a.win_rate >= 0.55 ? 'win' : (a.win_rate > 0 ? 'loss' : '');
+        var pfClass = a.profit_factor >= 1.4 ? 'win' : (a.profit_factor > 0 ? 'loss' : '');
+        var spClass = a.sharpe >= 1.5 ? 'win' : (a.sharpe > 0 ? 'loss' : '');
+        var wrVal = a.win_rate > 0 ? (a.win_rate * 100).toFixed(1) + '%' : '\u2014';
+        var pfVal = a.profit_factor > 0 ? a.profit_factor.toFixed(2) : '\u2014';
+        var spVal = a.sharpe > 0 ? a.sharpe.toFixed(2) : '\u2014';
+        var wrRet = a.weekly_return !== 0 ? (a.weekly_return * 100).toFixed(2) + '%' : '0.0%';
+        var wrRetClass = a.weekly_return > 0 ? 'win' : (a.weekly_return < 0 ? 'loss' : '');
+        var html = '<tr><td><a href="/agents/' + a.name + '">' + a.name + '</a></td>' +
+          '<td>' + statusBadge + '</td>' +
+          '<td>' + a.trades_count + '</td>' +
+          '<td class="' + wrClass + '">' + wrVal + '</td>' +
+          '<td class="' + pfClass + '">' + pfVal + '</td>' +
+          '<td class="' + spClass + '">' + spVal + '</td>' +
+          '<td class="' + wrRetClass + '">' + wrRet + '</td>' +
+          '<td class="loss">' + (a.max_drawdown * 100).toFixed(1) + '%</td>' +
+          '<td>' + a.open_positions_count + '</td></tr>';
+        if (oldRow) {
+          oldRow.outerHTML = html;
+        } else {
+          tbody.insertAdjacentHTML('beforeend', html);
+        }
+      }
+    };
+    ws.onclose = function() { setTimeout(connect, 5000); };
+    ws.onerror = function() { ws.close(); };
+  }
+  connect();
+}
+
+/* Auto-connect desk WS on page load if leaderboard table exists */
+if (document.getElementById('leaderboard-body')) {
+  connectDeskWs();
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { renderCandleChart: renderCandleChart, fetchTrades: fetchTrades };
+  module.exports = { renderCandleChart: renderCandleChart, fetchTrades: fetchTrades, connectDeskWs: connectDeskWs };
 }

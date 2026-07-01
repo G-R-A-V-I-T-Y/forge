@@ -2,10 +2,7 @@
 {% block title %}Forge &mdash; Desk Overview{% endblock %}
 {% block content %}
 
-<h2>Agent: {{ agent.get('name', 'jade_hawk') }}
-  <span class="badge badge-{{ agent.get('status', 'rookie') }}">
-    {{ agent.get('status', 'ROOKIE').upper() }}
-  </span>
+<h2>Desk Overview
   <span class="badge badge-{{ 'live-data' if exchange_ok else 'stub' }}">
     {{ data_source }}
   </span>
@@ -13,31 +10,68 @@
 
 <div>
   <div class="stat-card">
-    <div class="stat-label">Paper Balance</div>
-    <div class="stat-value">${{ "{:,.2f}".format(account.get('balance', 50000)) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Peak Balance</div>
-    <div class="stat-value">${{ "{:,.2f}".format(account.get('peak_balance', 50000)) }}</div>
+    <div class="stat-label">Active Agents</div>
+    <div class="stat-value" id="stat-agents">{{ agents|length }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Open Positions</div>
-    <div class="stat-value">{{ positions | length }}</div>
+    <div class="stat-value" id="stat-positions">{{ positions|length }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Total Trades</div>
-    <div class="stat-value">{{ trades | length }}</div>
+    <div class="stat-value" id="stat-trades">{{ total_trades }}</div>
   </div>
 </div>
 
+<h2>Leaderboard</h2>
+<table id="leaderboard">
+  <thead>
+    <tr>
+      <th class="sortable" data-sort="name" onclick="sortTable('name')">Name <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="status" onclick="sortTable('status')">Status <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="trades" onclick="sortTable('trades')">Trades <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="win_rate" onclick="sortTable('win_rate')">Win% <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="profit_factor" onclick="sortTable('profit_factor')">PF <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="sharpe" onclick="sortTable('sharpe')" style="color:#f0883e;">Sharpe <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="weekly_return" onclick="sortTable('weekly_return')">Wkly Ret <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="max_drawdown" onclick="sortTable('max_drawdown')">Max DD <span class="sort-arrow"></span></th>
+      <th class="sortable" data-sort="open_positions" onclick="sortTable('open_positions')">Open <span class="sort-arrow"></span></th>
+    </tr>
+  </thead>
+  <tbody id="leaderboard-body">
+    {% for a in agents %}
+    <tr>
+      <td><a href="/agents/{{ a.name }}">{{ a.name }}</a></td>
+      <td><span class="badge badge-{{ a.status }}">{{ a.status.upper() }}</span></td>
+      <td>{{ a.trades_count }}</td>
+      <td class="{{ 'win' if a.win_rate >= 0.55 else ('loss' if a.win_rate > 0 else '') }}">
+        {{ "{:.1%}".format(a.win_rate) if a.win_rate > 0 else '&mdash;' }}
+      </td>
+      <td class="{{ 'win' if a.profit_factor >= 1.4 else ('loss' if a.profit_factor > 0 else '') }}">
+        {{ "{:.2f}".format(a.profit_factor) if a.profit_factor > 0 else '&mdash;' }}
+      </td>
+      <td class="{{ 'win' if a.sharpe >= 1.5 else ('loss' if a.sharpe > 0 else '') }}">
+        {{ "{:.2f}".format(a.sharpe) if a.sharpe > 0 else '&mdash;' }}
+      </td>
+      <td class="{{ 'win' if a.weekly_return > 0 else ('loss' if a.weekly_return < 0 else '') }}">
+        {{ "{:+.2%}".format(a.weekly_return) if a.weekly_return != 0 else '0.0%' }}
+      </td>
+      <td class="loss">{{ "{:.1%}".format(a.max_drawdown) }}</td>
+      <td>{{ a.open_positions_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
 {% if positions %}
 <h2>Open Positions</h2>
-<table>
+<table id="positions-table">
   <tr>
-    <th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>Opened</th><th></th>
+    <th>Agent</th><th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>Opened</th><th></th>
   </tr>
   {% for p in positions %}
   <tr>
+    <td><a href="/agents/{{ p.agent_id }}">{{ p.agent_id }}</a></td>
     <td>{{ p.asset }}</td>
     <td class="{{ 'win' if p.direction == 'long' else 'loss' }}">{{ p.direction.upper() }}</td>
     <td>{{ "{:.4f}".format(p.entry_price) }}</td>
@@ -76,11 +110,12 @@ function closePosition(id, direction, asset, entryPrice) {
 {% if trades %}
 <table id="trades-table">
   <tr>
-    <th></th><th>ID</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Conf</th><th>Status</th><th>Time</th>
+    <th></th><th>Agent</th><th>ID</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Conf</th><th>Status</th><th>Time</th>
   </tr>
   {% for t in trades %}
   <tr class="trade-row" data-trade="{{ t.id }}" onclick="toggleReasoning('{{ t.id }}')" style="cursor:pointer;">
     <td style="color:#8b949e;font-size:11px;">&#9654;</td>
+    <td>{{ t.agent_id }}</td>
     <td style="font-size:11px;color:#8b949e">{{ t.id[-20:] if t.id else '' }}</td>
     <td>{{ t.asset }}</td>
     <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
@@ -96,7 +131,7 @@ function closePosition(id, direction, asset, entryPrice) {
     <td style="font-size:11px">{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
   </tr>
   <tr id="reasoning-{{ t.id }}" class="reasoning-row" style="display:none;">
-    <td colspan="10" style="padding:12px 20px;background:#0d1117;border:1px solid #21262d;border-radius:4px;">
+    <td colspan="11" style="padding:12px 20px;background:#0d1117;border:1px solid #21262d;border-radius:4px;">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
         <div>
           <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Hypothesis</div>
@@ -142,7 +177,96 @@ function toggleReasoning(id) {
 }
 </script>
 {% else %}
-<p style="color:#8b949e; margin-top: 12px;">No trades yet. Agent wakes every 60 seconds.</p>
+<p style="color:#8b949e; margin-top: 12px;">No trades yet. Agents wake every 60 seconds.</p>
 {% endif %}
 
+<script src="/static/forge.js"></script>
+<script>
+/* WebSocket desk state — leaderboard live updates */
+(function() {
+  var ws;
+  function connectWs() {
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/api/ws/desk');
+    ws.onmessage = function(evt) {
+      var agents = JSON.parse(evt.data);
+      if (!agents) return;
+      updateLeaderboard(agents);
+    };
+    ws.onclose = function() {
+      setTimeout(connectWs, 5000);
+    };
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+  connectWs();
+})();
+
+var sortDir = {};
+var currentSort = 'sharpe';
+var currentDir = 'desc';
+
+function sortTable(col) {
+  if (currentSort === col) {
+    currentDir = currentDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    currentSort = col;
+    currentDir = 'desc';
+  }
+  var tbody = document.getElementById('leaderboard-body');
+  var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+  var colIdx = {name:0, status:1, trades:2, win_rate:3, profit_factor:4, sharpe:5, weekly_return:6, max_drawdown:7, open_positions:8};
+  var idx = colIdx[col] || 0;
+  rows.sort(function(a, b) {
+    var va = a.cells[idx] ? a.cells[idx].innerText.trim() : '';
+    var vb = b.cells[idx] ? b.cells[idx].innerText.trim() : '';
+    var na = parseFloat(va.replace(/[^0-9.-]/g, ''));
+    var nb = parseFloat(vb.replace(/[^0-9.-]/g, ''));
+    if (!isNaN(na) && !isNaN(nb)) {
+      return currentDir === 'asc' ? na - nb : nb - na;
+    }
+    return currentDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+}
+
+function updateLeaderboard(agents) {
+  var tbody = document.getElementById('leaderboard-body');
+  var existing = {};
+  var rows = tbody.querySelectorAll('tr');
+  for (var i = 0; i < rows.length; i++) {
+    var nameCell = rows[i].cells[0];
+    if (nameCell) existing[nameCell.innerText.trim()] = rows[i];
+  }
+  for (var j = 0; j < agents.length; j++) {
+    var a = agents[j];
+    var oldRow = existing[a.name];
+    var statusBadge = '<span class="badge badge-' + a.status + '">' + a.status.toUpperCase() + '</span>';
+    var wrClass = a.win_rate >= 0.55 ? 'win' : (a.win_rate > 0 ? 'loss' : '');
+    var pfClass = a.profit_factor >= 1.4 ? 'win' : (a.profit_factor > 0 ? 'loss' : '');
+    var spClass = a.sharpe >= 1.5 ? 'win' : (a.sharpe > 0 ? 'loss' : '');
+    var wrVal = a.win_rate > 0 ? (a.win_rate * 100).toFixed(1) + '%' : '—';
+    var pfVal = a.profit_factor > 0 ? a.profit_factor.toFixed(2) : '—';
+    var spVal = a.sharpe > 0 ? a.sharpe.toFixed(2) : '—';
+    var wrRet = a.weekly_return !== 0 ? (a.weekly_return * 100).toFixed(2) + '%' : '0.0%';
+    var wrRetClass = a.weekly_return > 0 ? 'win' : (a.weekly_return < 0 ? 'loss' : '');
+    var html = '<tr><td><a href="/agents/' + a.name + '">' + a.name + '</a></td>' +
+      '<td>' + statusBadge + '</td>' +
+      '<td>' + a.trades_count + '</td>' +
+      '<td class="' + wrClass + '">' + wrVal + '</td>' +
+      '<td class="' + pfClass + '">' + pfVal + '</td>' +
+      '<td class="' + spClass + '">' + spVal + '</td>' +
+      '<td class="' + wrRetClass + '">' + wrRet + '</td>' +
+      '<td class="loss">' + (a.max_drawdown * 100).toFixed(1) + '%</td>' +
+      '<td>' + a.open_positions_count + '</td></tr>';
+    if (oldRow) {
+      oldRow.outerHTML = html;
+    } else {
+      tbody.insertAdjacentHTML('beforeend', html);
+    }
+  }
+  // Re-sort if current sort is active
+  sortTable(currentSort);
+}
+</script>
 {% endblock %}
