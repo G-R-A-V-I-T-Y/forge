@@ -35,6 +35,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
+from market.features import FEATURE_REGISTRY
 from market.regime import classify_regime
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,9 @@ PER_ASSET_FIELDS = [
     "ema20", "ema50", "ema200", "vwap_distance", "volume_zscore",
     "funding_zscore", "oi_zscore", "bid_depth", "ask_depth",
     "depth_imbalance", "top5_imbalance", "slippage_estimate", "buy_volume",
-    "sell_volume", "aggressor_ratio", "avg_trade_size", "largest_trade",
+    "sell_volume", "aggressor_ratio",     "avg_trade_size", "largest_trade",
+    "momentum_acceleration", "atr_percentile", "bb_width",
+    "bb_width_percentile", "volume_percentile_14d", "funding_acceleration",
     "candles_5m", "candles_30m", "candles_4h",
 ]
 
@@ -285,12 +288,30 @@ def _slippage_estimate(levels: list[list[float]], mid: float | None, notional: f
 # Per-asset fetch + compute
 # ---------------------------------------------------------------------------
 
-async def _safe(coro, default):
-    try:
-        return await coro
-    except Exception:
-        logger.warning("heartbeat: fetch failed, using default", exc_info=True)
-        return default
+async def _safe(factory, default, retries=2, delay=1.0):
+    """Await the coroutine from factory(), retrying up to `retries` times
+    with `delay` seconds between attempts before falling back to default.
+
+    Retries are additive on top of the HTTP-level retries inside the
+    HyperliquidClient, so a transient blip lasting a few seconds gets
+    absorbed rather than silently producing null fields in the packet.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return await factory()
+        except Exception:
+            if attempt < retries:
+                logger.debug(
+                    "heartbeat: fetch failed (attempt %d/%d), retrying in %.1fs",
+                    attempt + 1, retries, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.warning(
+                    "heartbeat: fetch failed after %d retries, using default",
+                    retries, exc_info=True,
+                )
+                return default
 
 
 async def _fetch_asset_snapshot(provider, asset: str) -> dict:
@@ -301,12 +322,12 @@ async def _fetch_asset_snapshot(provider, asset: str) -> dict:
     start_lookback_ms = now_ms - LOOKBACK_HOURS * 3600 * 1000
 
     candles, funding_history, oi, funding, book, trades = await asyncio.gather(
-        _safe(provider.get_ohlcv(asset, "5m", LOOKBACK_CANDLES), []),
-        _safe(provider.get_funding_history(asset, start_lookback_ms), []),
-        _safe(provider.get_open_interest(asset), {}),
-        _safe(provider.get_funding_rate(asset), {}),
-        _safe(provider.get_orderbook(asset, depth=5), {"bids": [], "asks": []}),
-        _safe(provider.get_recent_trades(asset, hours=TRADE_TAPE_HOURS), []),
+        _safe(lambda: provider.get_ohlcv(asset, "5m", LOOKBACK_CANDLES), []),
+        _safe(lambda: provider.get_funding_history(asset, start_lookback_ms), []),
+        _safe(lambda: provider.get_open_interest(asset), {}),
+        _safe(lambda: provider.get_funding_rate(asset), {}),
+        _safe(lambda: provider.get_orderbook(asset, depth=5), {"bids": [], "asks": []}),
+        _safe(lambda: provider.get_recent_trades(asset, hours=TRADE_TAPE_HOURS), []),
     )
     return {
         "candles": candles or [],
@@ -398,7 +419,7 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
     candles_30m = _resample_candles(candles, RESAMPLE_FACTOR_30M)
     candles_4h = _resample_candles(candles, RESAMPLE_FACTOR_4H)
 
-    return {
+    result = {
         "price": price,
         "return_5m": return_5m,
         "return_30m": return_30m,
@@ -432,6 +453,18 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
         "candles_30m": candles_30m,
         "candles_4h": candles_4h,
     }
+
+    # Compute approved derived features from the feature library
+    for feature_name, feature_fn in FEATURE_REGISTRY.items():
+        try:
+            result[feature_name] = feature_fn(
+                candles=candles, closes=closes, highs=highs,
+                lows=lows, volumes=volumes, fields=result, raw_data=raw,
+            )
+        except Exception:
+            result[feature_name] = None
+
+    return result
 
 
 # ---------------------------------------------------------------------------
