@@ -14,13 +14,16 @@ from market.heartbeat import (
     _ema,
     _log_returns,
     _realized_vol,
+    _resample_candles,
     _rsi,
     _vwap,
     _zscore,
     compute_pca,
     correlation_matrix,
     generate_heartbeat,
+    heartbeat_max_age_seconds,
     read_heartbeat,
+    read_heartbeat_or_none,
     sector_strength,
     write_heartbeat,
 )
@@ -119,6 +122,49 @@ def test_log_returns_basic():
     returns = _log_returns(closes)
     assert returns[0] == pytest.approx(math.log(1.1))
     assert returns[1] == pytest.approx(math.log(1.1))
+
+
+# ---------------------------------------------------------------------------
+# Candle resampling
+# ---------------------------------------------------------------------------
+
+def test_resample_candles_hand_computed():
+    # 6 x 5m candles [ts, o, h, l, c, v] aggregated into 1 x 30m candle.
+    candles = [
+        [0, 10.0, 12.0, 9.0, 11.0, 100.0],
+        [1, 11.0, 13.0, 10.5, 12.0, 110.0],
+        [2, 12.0, 12.5, 11.0, 11.5, 90.0],
+        [3, 11.5, 14.0, 11.0, 13.5, 120.0],
+        [4, 13.5, 13.8, 12.0, 12.5, 80.0],
+        [5, 12.5, 13.0, 8.0, 9.5, 150.0],
+    ]
+    result = _resample_candles(candles, 6)
+    assert result == [[0, 10.0, 14.0, 8.0, 9.5, 650.0]]
+
+
+def test_resample_candles_multiple_groups():
+    # 12 candles, factor 6 -> 2 output candles.
+    candles = [[i, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(12)]
+    result = _resample_candles(candles, 6)
+    assert len(result) == 2
+    assert result[0][0] == 0
+    assert result[1][0] == 6
+    for c in result:
+        assert c[1] == 1.0  # open
+        assert c[2] == 2.0  # high
+        assert c[3] == 0.5  # low
+        assert c[4] == 1.5  # close
+        assert c[5] == 60.0  # volume sum of 6 candles
+
+
+def test_resample_candles_drops_partial_trailing_group():
+    candles = [[i, 1.0, 2.0, 0.5, 1.5, 10.0] for i in range(8)]
+    result = _resample_candles(candles, 6)
+    assert len(result) == 1  # only 8 candles -> one full group of 6, 2 dropped
+
+
+def test_resample_candles_empty_input_returns_empty():
+    assert _resample_candles([], 6) == []
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +308,16 @@ async def test_generate_heartbeat_end_to_end_structure(stub_config):
         for field in PER_ASSET_FIELDS:
             assert field in fields, f"{field} missing for {asset}"
 
+    # OHLCV candle series ride along in each asset's packet entry: the raw
+    # 5m series plus two longer-horizon resamples of it (no new fetches).
+    for asset in stub_config["universe"]:
+        fields = packet["assets"][asset]
+        assert isinstance(fields["candles_5m"], list) and len(fields["candles_5m"]) > 0
+        assert len(fields["candles_30m"]) == len(fields["candles_5m"]) // heartbeat.RESAMPLE_FACTOR_30M
+        assert len(fields["candles_4h"]) == len(fields["candles_5m"]) // heartbeat.RESAMPLE_FACTOR_4H
+        for candle in fields["candles_5m"][:1]:
+            assert len(candle) == 6  # [ts, o, h, l, c, v]
+
     cross_asset = packet["cross_asset"]
     for key in (
         "market_breadth", "average_return", "median_return", "leader", "laggard",
@@ -274,9 +330,11 @@ async def test_generate_heartbeat_end_to_end_structure(stub_config):
     for key in (
         "crypto_fear_index", "btc_dominance", "average_volatility", "average_funding",
         "average_oi_growth", "market_breadth", "risk_on_score", "trend_score",
+        "regime_tag",
     ):
         assert key in regime
     assert regime["crypto_fear_index"] == 42
+    assert isinstance(regime["regime_tag"], str) and regime["regime_tag"]
 
     # Atomic file was written and is readable back
     on_disk = read_heartbeat(stub_config["desk"]["heartbeat_path"])
@@ -296,3 +354,51 @@ async def test_generate_heartbeat_fear_greed_failure_is_graceful(stub_config):
     assert packet["regime"]["crypto_fear_index"] is None
     # Cycle still completed fully despite the third-party failure
     assert len(packet["assets"]) == len(stub_config["universe"])
+
+
+# ---------------------------------------------------------------------------
+# Staleness-aware reader
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_max_age_seconds_uses_config_interval():
+    assert heartbeat_max_age_seconds({"desk": {"heartbeat_interval_seconds": 300}}) == 600
+    assert heartbeat_max_age_seconds({}) == 600  # default 300s interval
+
+
+def test_read_heartbeat_or_none_missing_file_returns_none(tmp_path):
+    path = str(tmp_path / "does_not_exist.json")
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_malformed_json_returns_none(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not valid json")
+    assert read_heartbeat_or_none(str(path), max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_missing_timestamp_returns_none(tmp_path):
+    path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(path, {"assets": {}, "cross_asset": {}, "regime": {}})
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_fresh_packet_returned(tmp_path):
+    from datetime import datetime, timezone
+    path = str(tmp_path / "heartbeat.json")
+    packet = {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "assets": {"BTC-PERP": {"price": 65000.0}},
+        "cross_asset": {},
+        "regime": {},
+    }
+    write_heartbeat(path, packet)
+    result = read_heartbeat_or_none(path, max_age_seconds=600)
+    assert result == packet
+
+
+def test_read_heartbeat_or_none_stale_packet_returns_none(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    path = str(tmp_path / "heartbeat.json")
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_heartbeat(path, {"timestamp": old_ts, "assets": {}, "cross_asset": {}, "regime": {}})
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None

@@ -97,6 +97,32 @@ def test_query_trades_decodes_ohlcv_by_default(conn):
     assert "ohlcv_15m_40_blob" not in results[0]
 
 
+def test_query_trades_decodes_market_context_json(conn):
+    insert_agent(conn, "jade_hawk", "jade_hawk", "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, {
+        "id": "tmc", "agent_id": "jade_hawk", "thesis_version": 1,
+        "account_balance_at_entry": 50000.0, "mode": "paper", "asset": "SOL-PERP",
+        "direction": "long", "entry_price": 100.0, "stop_loss_price": 95.0,
+        "take_profit_price": 110.0, "leverage": 3, "position_size_pct": 0.10,
+        "notional_usd": 5000.0, "entry_timestamp": "2026-06-29T12:00:00Z",
+        "status": "open",
+    })
+    market_context = {
+        "portfolio": {"cash": 50000.0, "open_position_count": 1},
+        "cross_asset": {"leader": "SOL-PERP"},
+        "regime": {"regime_tag": "range_high_vol"},
+        "asset": {"price": 145.2, "candles_5m": [[1, 1.0, 2.0, 0.5, 1.5, 100.0]]},
+    }
+    write_entry(conn, "tmc", {}, regime="range_high_vol", market_context=market_context)
+
+    decoded = get_trade(conn, "tmc", decode_ohlcv=True)
+    assert decoded["market_context_json"] == market_context
+
+    lightweight = query_trades(conn, asset="SOL-PERP", decode_ohlcv=False, limit=100)
+    tmc = next(t for t in lightweight if t["id"] == "tmc")
+    assert "market_context_json" not in tmc
+
+
 def test_count_trades_matches_query_filters(conn):
     _seed_desk(conn)
     n = count_trades(conn, asset="SOL-PERP", direction="long", status="closed", funding_rate_max=0)

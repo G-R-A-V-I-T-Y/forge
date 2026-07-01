@@ -1,20 +1,13 @@
 """Tests for POST /api/positions/{id}/close."""
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
+from market.heartbeat import write_heartbeat
 from store.db import insert_agent, insert_account_snapshot, insert_trade, insert_position
 from web.app import app
 
 AGENT_ID = "jade_hawk"
-
-
-class FakeProvider:
-    """Minimal async market provider returning a fixed price for testing."""
-
-    async def get_orderbook(self, asset, depth=1):
-        return {"bids": [[149.00, 1.0]], "asks": [[149.02, 1.0]]}
-
-    async def get_mid_price(self, asset):
-        return 149.01
 
 
 def _seed_open_position(conn):
@@ -54,16 +47,28 @@ def _seed_open_position(conn):
     })
 
 
-def _client(conn) -> TestClient:
+def _client(conn, config=None) -> TestClient:
     app.state.conn = conn
-    app.state.provider = FakeProvider()
-    app.state.config = None
+    app.state.provider = None
+    app.state.config = config
     return TestClient(app)
 
 
-def test_close_position_success(conn):
+def _heartbeat_config(tmp_path, price: float = 149.01) -> dict:
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "assets": {"SOL-PERP": {"price": price}},
+        "cross_asset": {},
+        "regime": {},
+    })
+    return {"desk": {"heartbeat_path": heartbeat_path, "heartbeat_interval_seconds": 300}}
+
+
+def test_close_position_success(conn, tmp_path):
     _seed_open_position(conn)
-    r = _client(conn).post("/api/positions/pos_t1/close")
+    config = _heartbeat_config(tmp_path)
+    r = _client(conn, config).post("/api/positions/pos_t1/close")
     assert r.status_code == 200
     data = r.json()
     assert data["trade_id"] == "t1"

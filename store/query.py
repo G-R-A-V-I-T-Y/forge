@@ -14,9 +14,12 @@ from store.fingerprint import unpack_ohlcv
 logger = logging.getLogger(__name__)
 
 # Columns that hold JSON-encoded lists/dicts and should be decoded on read.
+# NOTE: market_context_json is NOT here — it's msgpack-encoded (like the
+# OHLCV blob columns below), not plain JSON text, so it's decoded
+# alongside them under the decode_ohlcv gate instead.
 _JSON_COLUMNS = ("key_conditions_met", "key_conditions_missing",
-                  "market_context_json", "agent_reasoning_json",
-                  "oi_data_json", "liquidation_data_json")
+                  "agent_reasoning_json", "oi_data_json",
+                  "liquidation_data_json")
 
 
 def query_trades(
@@ -142,9 +145,19 @@ def _decode_row(row: dict, decode_ohlcv: bool) -> dict:
             except Exception:
                 row["funding_rate_8h_history"] = []
         row.pop("funding_history_blob", None)
+
+        # market_context_json is msgpack-encoded (see store/fingerprint.py's
+        # write_entry()), not plain JSON text — decode it in place so
+        # callers (cross-agent queries, the web UI) get the full
+        # portfolio/cross_asset/regime/asset dict back, or None for rows
+        # recorded before this column was populated (or where the trade
+        # was written without a market_context, e.g. some older tests).
+        mc = row.get("market_context_json")
+        row["market_context_json"] = unpack_ohlcv(mc) if mc else None
     else:
         for blob_col in ("ohlcv_15m_40_blob", "ohlcv_1h_20_blob",
-                          "ohlcv_4h_10_blob", "funding_history_blob"):
+                          "ohlcv_4h_10_blob", "funding_history_blob",
+                          "market_context_json"):
             row.pop(blob_col, None)
 
     return row

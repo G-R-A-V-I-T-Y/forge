@@ -140,9 +140,32 @@ function renderFingerprint(id, t) {
       '<div><div style="color:#8b949e;font-size:11px;">OI 24h Change</div><div style="color:#e6edf3;font-size:13px;">' + (t.open_interest_24h_change_pct != null ? t.open_interest_24h_change_pct.toFixed(2) + '%' : '&mdash;') + '</div></div>' +
     '</div>' +
     (t.agent_postmortem ? '<div style="margin-bottom:8px;"><div style="color:#8b949e;font-size:11px;">Postmortem</div><div style="color:#e6edf3;font-size:13px;">' + t.agent_postmortem + '</div></div>' : '') +
-    '<div style="color:#8b949e;font-size:11px;margin-bottom:4px;">OHLCV (15m)</div>' +
+    '<div style="color:#8b949e;font-size:11px;margin-bottom:4px;">OHLCV (' + chartLabel(t) + ')</div>' +
     '<div id="chart-' + id + '"></div>';
-  renderCandleChart('chart-' + id, t.ohlcv_15m, { height: 160 });
+  renderCandleChart('chart-' + id, chartCandles(t), { height: 160 });
+}
+
+/**
+ * Prefer the richer market_context_json.asset.candles_5m captured at entry
+ * (Task B's trade-thumbprint — see agents/decision_loop.py) for any trade
+ * that has it; fall back to the legacy ohlcv_15m column for older trades
+ * recorded before market_context_json existed, so existing rows in a local
+ * data/forge.db don't show broken/empty charts.
+ */
+function chartCandles(t) {
+  var mc = t.market_context_json;
+  if (mc && mc.asset && Array.isArray(mc.asset.candles_5m) && mc.asset.candles_5m.length) {
+    return mc.asset.candles_5m;
+  }
+  return t.ohlcv_15m;
+}
+
+function chartLabel(t) {
+  var mc = t.market_context_json;
+  if (mc && mc.asset && Array.isArray(mc.asset.candles_5m) && mc.asset.candles_5m.length) {
+    return '5m';
+  }
+  return '15m (legacy)';
 }
 </script>
 

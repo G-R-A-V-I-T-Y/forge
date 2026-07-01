@@ -1,6 +1,9 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from store.db import init_schema, insert_agent, insert_account_snapshot
 from execution.paper_bridge import PaperBridge
+from market.heartbeat import write_heartbeat
 
 AGENT_ID = "jade_hawk"
 
@@ -15,27 +18,35 @@ ORDER = {
 }
 
 
-class FakeProvider:
-    """Minimal async market provider returning fixed prices for testing."""
+def _heartbeat_packet(price: float, timestamp: str | None = None) -> dict:
+    ts = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "timestamp": ts,
+        "assets": {"SOL-PERP": {"price": price}},
+        "cross_asset": {},
+        "regime": {},
+    }
 
-    async def get_orderbook(self, asset, depth=1):
-        return {"bids": [[145.18, 1.0]], "asks": [[145.22, 1.0]]}
 
-    async def get_mid_price(self, asset):
-        return 145.20
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
+def _config(heartbeat_path: str) -> dict:
+    return {
+        "desk": {
+            "starting_balance": 50000.0,
+            "heartbeat_path": heartbeat_path,
+            "heartbeat_interval_seconds": 300,
+        }
+    }
 
 
 @pytest.fixture
-def bridge(conn):
+def bridge(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
-    return PaperBridge(agent_id=AGENT_ID, conn=conn, provider=FakeProvider())
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _heartbeat_packet(145.20))
+    return PaperBridge(
+        agent_id=AGENT_ID, conn=conn, provider=None, config=_config(heartbeat_path)
+    )
 
 
 @pytest.mark.asyncio
@@ -88,20 +99,12 @@ async def test_close_marks_trade_closed(bridge, conn):
 
 
 @pytest.mark.asyncio
-async def test_close_updates_account_balance(bridge, conn):
+async def test_close_updates_account_balance(bridge, conn, tmp_path):
     await bridge.enter(ORDER)
 
-    class ProfitProvider:
-        async def get_orderbook(self, asset, depth=1):
-            return {"bids": [[149.00, 1.0]], "asks": [[149.02, 1.0]]}
-        async def get_mid_price(self, asset):
-            return 149.01
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *args):
-            pass
-
-    bridge.provider = ProfitProvider()
+    # Rewrite the heartbeat with a higher price before closing.
+    heartbeat_path = bridge.config["desk"]["heartbeat_path"]
+    write_heartbeat(heartbeat_path, _heartbeat_packet(149.01))
 
     pos_id = bridge.get_positions()[0]["id"]
     result = await bridge.close(pos_id, "take_profit")
@@ -112,3 +115,44 @@ async def test_close_updates_account_balance(bridge, conn):
     account = await bridge.get_account()
     assert account["balance"] > 50000.0
     assert account["peak"] >= account["balance"]
+
+
+@pytest.mark.asyncio
+async def test_fill_price_raises_when_heartbeat_missing(conn, tmp_path):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+    missing_path = str(tmp_path / "does_not_exist.json")
+    b = PaperBridge(agent_id=AGENT_ID, conn=conn, provider=None, config=_config(missing_path))
+
+    with pytest.raises(RuntimeError, match="heartbeat data unavailable or stale"):
+        await b.enter(ORDER)
+
+
+@pytest.mark.asyncio
+async def test_fill_price_raises_when_heartbeat_stale(conn, tmp_path):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    stale_ts = (datetime.now(timezone.utc) - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_heartbeat(heartbeat_path, _heartbeat_packet(145.20, timestamp=stale_ts))
+    b = PaperBridge(agent_id=AGENT_ID, conn=conn, provider=None, config=_config(heartbeat_path))
+
+    with pytest.raises(RuntimeError, match="heartbeat data unavailable or stale"):
+        await b.enter(ORDER)
+
+
+@pytest.mark.asyncio
+async def test_fill_price_raises_when_asset_missing_from_heartbeat(conn, tmp_path):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "assets": {},
+        "cross_asset": {},
+        "regime": {},
+    })
+    b = PaperBridge(agent_id=AGENT_ID, conn=conn, provider=None, config=_config(heartbeat_path))
+
+    with pytest.raises(RuntimeError, match="heartbeat data unavailable or stale"):
+        await b.enter(ORDER)

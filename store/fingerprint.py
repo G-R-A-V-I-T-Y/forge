@@ -4,7 +4,19 @@ import msgpack
 
 
 def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
-                reasoning: dict | None = None) -> None:
+                reasoning: dict | None = None, market_context: dict | None = None) -> None:
+    """Enrich an existing trade row with fingerprint fields.
+
+    `market_context`, if given, is the consolidated trade-thumbprint dict
+    (`{"portfolio": ..., "cross_asset": ..., "regime": ..., "asset": ...}`
+    — see agents/decision_loop.py's build_trade_market_context()). It can
+    contain OHLCV candle arrays (candles_5m/candles_30m/candles_4h) nested
+    under `asset`, so the whole dict is msgpack-encoded (the same
+    compression convention already used below for ohlcv_15m/1h/4h and
+    funding_history_blob) rather than stored as raw JSON text, to keep DB
+    size in check. `None` (the default) leaves `market_context_json` NULL,
+    preserving the old behavior for callers that don't pass it.
+    """
     ohlcv_15m = msgpack.packb(asset_snapshot.get("ohlcv_15m", []), use_bin_type=True)
     ohlcv_1h = msgpack.packb(asset_snapshot.get("ohlcv_1h", []), use_bin_type=True)
     ohlcv_4h = msgpack.packb(asset_snapshot.get("ohlcv_4h", []), use_bin_type=True)
@@ -33,6 +45,12 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
     funding_rate_current = asset_snapshot.get("funding_rate_current", 0)
     oi_change_pct = asset_snapshot.get("open_interest_24h_change_pct", 0)
 
+    market_context_blob = (
+        msgpack.packb(market_context, use_bin_type=True)
+        if market_context is not None
+        else None
+    )
+
     conn.execute(
         """UPDATE trades SET ohlcv_15m_40_blob=?, ohlcv_1h_20_blob=?,
            ohlcv_4h_10_blob=?, funding_history_blob=?,
@@ -40,7 +58,7 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
            regime=?, expected_value_text=?,
            funding_rate_current=?, open_interest_24h_change_pct=?,
            hypothesis=?, key_conditions_met=?, key_conditions_missing=?,
-           confidence=? WHERE id=?""",
+           confidence=?, market_context_json=? WHERE id=?""",
         (
             ohlcv_15m,
             ohlcv_1h,
@@ -56,6 +74,7 @@ def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
             kcm,
             kcmiss,
             confidence,
+            market_context_blob,
             trade_id,
         ),
     )

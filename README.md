@@ -15,7 +15,7 @@ pip install -r requirements.txt
 python forge.py
 ```
 
-Open http://localhost:8000 to see jade_hawk making stub trades every 60 seconds.
+Open http://localhost:8000 to see jade_hawk making stub trades every 5 minutes (the shared heartbeat market-data cadence).
 On a fresh database `forge.py` seeds just `jade_hawk`; run
 `python scripts/fresh_start.py` first to reset and launch the full 10-agent
 desk instead (see [Multi-Agent Desk](#multi-agent-desk)).

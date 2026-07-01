@@ -1,5 +1,10 @@
 from datetime import datetime, timezone
 
+from market.heartbeat import (
+    DEFAULT_HEARTBEAT_PATH,
+    heartbeat_max_age_seconds,
+    read_heartbeat_or_none,
+)
 from store.db import (
     insert_trade,
     insert_position,
@@ -27,19 +32,29 @@ class PaperBridge(TradingBridge):
         self.config = config
 
     async def _fill_price(self, asset: str) -> float:
-        try:
-            book = await self.provider.get_orderbook(asset, depth=1)
-            if book.get("bids") and book.get("asks"):
-                return (book["bids"][0][0] + book["asks"][0][0]) / 2.0
-        except Exception:
-            pass
-        try:
-            mid = await self.provider.get_mid_price(asset)
-            if mid > 0:
-                return mid
-        except Exception:
-            pass
-        raise RuntimeError(f"Cannot determine fill price for {asset} — exchange may be unavailable")
+        """Read the asset's current price from the shared heartbeat file
+        (data/heartbeat.json by default) rather than calling the provider
+        live — see docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md.
+        A fill can't proceed without a price, so a missing/stale heartbeat or
+        an asset absent from it is a hard failure: raises RuntimeError, which
+        propagates up through enter()/close() to run_decision()'s outer
+        except Exception, surfacing as {"action": "error", ...} rather than
+        crashing the agent's tick.
+        """
+        desk_config = (self.config or {}).get("desk", {})
+        heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+        max_age = heartbeat_max_age_seconds(self.config or {})
+        heartbeat = read_heartbeat_or_none(heartbeat_path, max_age)
+        if heartbeat is None:
+            raise RuntimeError("heartbeat data unavailable or stale; cannot simulate fill")
+
+        asset_fields = (heartbeat.get("assets") or {}).get(asset)
+        price = asset_fields.get("price") if asset_fields else None
+        if price is None or price <= 0:
+            raise RuntimeError(
+                f"heartbeat data unavailable or stale; cannot simulate fill for {asset}"
+            )
+        return price
 
     async def enter(self, order: dict) -> dict:
         asset = order["asset"]
