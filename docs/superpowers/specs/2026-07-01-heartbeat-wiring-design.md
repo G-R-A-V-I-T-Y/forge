@@ -171,3 +171,127 @@ stale cadence claim found outside historical milestone narrative in
 `docs/FORGE_PROPOSAL.md`, which documents completed work as originally
 specified and is left as a historical record) was updated to "every 5
 minutes".
+
+## Addendum: consolidated trade-thumbprint capture (captain review, PR #11)
+
+The captain's review of this PR drew a distinction the "Fingerprint
+snapshot shape" section above under-delivered on: heartbeat packets are a
+*shared, overwritten* market snapshot, but the moment an agent trades on
+that snapshot, the portfolio-level state + the heartbeat's non-asset and
+asset-specific fields *at that instant* become part of the trade's
+permanent record — queryable later by other agents and by the web UI. This
+addendum documents the follow-up work implementing that.
+
+### A. OHLCV candles now ride along in the heartbeat packet
+
+`market/heartbeat.py`'s `_compute_asset_fields()` already fetched 300 x 5m
+candles (`raw["candles"]`, ~25h lookback) per asset per cycle to compute
+EMA/ATR/RSI/etc., but the raw series itself never reached the written
+packet. Each asset's packet entry now also carries:
+
+- `candles_5m`: the full fetched 300-candle series, as-is (no new fetch).
+- `candles_30m`: a resample of that same series, 6 consecutive 5m candles
+  aggregated per output candle (open = first candle's open, high = max
+  high, low = min low, close = last candle's close, volume = sum).
+- `candles_4h`: the same resampling with a 48-candle factor.
+
+Both resamples are produced by a new pure, independently-tested helper,
+`_resample_candles(candles_5m, factor)` (drops a trailing partial group
+rather than emitting an incomplete candle). All three fields were added to
+`PER_ASSET_FIELDS` so the existing end-to-end structure test
+(`test_generate_heartbeat_end_to_end_structure`) verifies their presence
+for every universe asset automatically; new tests in `tests/test_heartbeat.py`
+hand-verify the resampling arithmetic and the packet shape.
+
+This does increase `data/heartbeat.json`'s size (300 + 50 + 6 ≈ 356
+candles/asset x 20 assets) but the file is overwritten every cycle, not
+accumulated, so per the captain's explicit call this needed no compression
+or size mitigation — only the persisted trade fingerprints (below) needed
+that discipline.
+
+### B. Trade fingerprint: the full context at entry, not just funding/OI
+
+The old `_asset_fingerprint_snapshot()` adapter (which fed `write_entry()`
+only `funding_rate_current` and `open_interest_24h_change_pct`) is deleted.
+`agents/decision_loop.py` now has `build_trade_market_context(heartbeat,
+asset, conn, agent_id, config)`, which assembles one consolidated dict:
+
+```python
+{
+    "portfolio": {...},    # this agent's cash/equity/exposure/open positions/PnL/risk utilization
+    "cross_asset": {...},  # heartbeat's cross_asset block, as-is
+    "regime": {...},       # heartbeat's regime block, as-is
+    "asset": {...},        # the FULL per-asset heartbeat field dict for the traded asset (~29 fields + candles_5m/30m/4h)
+}
+```
+
+`portfolio` comes from a new `agents/prompt_builder.build_portfolio_snapshot(conn,
+agent_id, config) -> dict` — factored out of the same account/positions/
+performance logic the decision prompt's Portfolio section already used, so
+both call sites share one implementation (independently unit-tested in
+`tests/test_prompt_builder.py`) rather than recomputing portfolio state two
+different ways. `cross_asset`/`regime` are passed through unchanged from
+the heartbeat already read in `run_decision()`. `asset` is the full
+per-asset dict — not the narrow 2-field adapter — pulled straight from
+`heartbeat["assets"][traded_asset]`.
+
+`store/fingerprint.py::write_entry()` gained a new `market_context: dict |
+None = None` parameter. When provided, the whole dict is msgpack-encoded
+(the same compression convention already used for `ohlcv_15m`/`1h`/`4h` and
+`funding_history_blob` in this same function) and stored in the existing
+`market_context_json` column — chosen over storing it as raw JSON text
+specifically because it now carries OHLCV candle arrays. `None` (the
+default) leaves the column `NULL`, so existing callers/tests are
+unaffected. The legacy `ohlcv_15m`/`ohlcv_1h`/`ohlcv_4h`/
+`funding_history_blob`/`oi_data_json`/`liquidation_data_json` columns and
+the narrow `funding_rate_current`/`open_interest_24h_change_pct` columns
+are still populated exactly as before (via `asset_snapshot`, computed
+inline in `run_decision()` from `market_context["asset"]`) — nothing was
+removed, only added.
+
+`store/query.py`'s `_decode_row()` now decodes `market_context_json` with
+msgpack (moved out of `_JSON_COLUMNS`, which assumes plain JSON text) under
+the same `decode_ohlcv` gate as the other OHLCV blobs, so `query_trades()`
+and `get_trade()` return it as a plain nested dict for any trade that has
+one, and `None` for older rows or lightweight (`decode_ohlcv=False`) list
+views. This is what makes the richer capture actually reachable by other
+agents' cross-agent queries and by the web UI, not just sitting unused in
+the column.
+
+### C. Web UI: candlestick chart backward compatibility
+
+`web/templates/trade_bank.html`'s fingerprint-row chart now prefers
+`market_context_json.asset.candles_5m` (via a small `chartCandles(t)`
+helper) for any trade that has it, falling back to the legacy `t.ohlcv_15m`
+column for trades recorded before this change — so existing rows in
+someone's local `data/forge.db` keep rendering instead of showing an empty
+chart. The chart label reflects which source was used (`"5m"` vs. `"15m
+(legacy)"`). No API changes were needed on the FastAPI side:
+`/api/trades/{id}` already calls `get_trade(conn, trade_id,
+decode_ohlcv=True)`, which now includes the decoded `market_context_json`
+automatically per section B. A single default timeframe (5m) is used; a
+30m/4h toggle was considered but skipped as unnecessary frontend scope for
+this task — the raw candle data for both is already present in the API
+response if a future task wants to add one.
+
+### D. DB size re-verification (Milestone 4 budget)
+
+`tests/test_db_size.py` was updated to build a **realistic**,
+heartbeat-shaped `market_context` fixture (not an empty dict) — a full
+`asset` dict with real field counts and real candle series (300 x 5m, 50 x
+30m, 6 x 4h), a `portfolio` dict with an open position and performance
+metrics, and a `cross_asset` block with a 20x20 correlation matrix,
+momentum rankings, and relative-strength maps — and passes it via the new
+`market_context=` param on every one of the 50 simulated trades.
+
+**Measured result:** 50 trades with this realistic `market_context_json`
+payload (plus the pre-existing legacy blob columns) produced a **1.664MB**
+database (**~34.1KB/trade**), extrapolating to **~16.6MB at 500 trades** —
+comfortably under the existing 50MB budget (vs. the previous ~2.6MB/500
+measurement without `market_context_json`). The budget assertion
+(`BUDGET_MB_PER_500 = 50.0`) did not need to change; msgpack compression on
+the candle-heavy blob keeps the richer capture well within the original
+budget. If per-trade size becomes a concern at much larger scale (e.g.
+thousands of trades/agent), a follow-up could truncate `candles_4h`/
+`candles_30m` before storage (they're the least information-dense of the
+three series) — not needed today.
