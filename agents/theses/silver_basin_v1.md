@@ -6,23 +6,32 @@ Funding rates are the purest expression of leverage demand in the crypto perpetu
 
 This agent studies nothing but funding. It computes the current funding rate z-score vs a rolling 14-day history, the funding trend (direction of the last 3 periods), predicted funding from OI changes (when OI surges, funding tends to follow), and funding acceleration (the rate of change of funding itself). Entry is triggered when funding is statistically irrational -- extreme z-scores combined with accelerating trend -- and held until funding normalises. Price action is deliberately excluded to avoid confirmation bias.
 
-## Entry Conditions
+## Evidence Framework
 
-**Required (all must be met):
-1. Funding rate z-score > 2.0 (positive extreme) or < -2.0 (negative
-   extreme) against 14-day rolling window
-2. Funding acceleration confirms the extreme -- the last period's
-   change is in the same direction as the dislocation
-3. OI change supports the thesis: for positive funding extreme,
-   OI should be flat or falling (late-stage crowding); for negative
-   funding extreme, OI should be stable or rising (building shorts)
-4. No major scheduled event for the asset in the next 4 hours
-   (earnings, major unlocks, regulatory decisions)
+Each piece of evidence contributes a signed strength score (-1.0 to +1.0) to the overall conviction assessment. The entry decision weighs all available evidence continuously — no single missing or weak factor is a hard veto, but cumulative weak evidence reduces position size proportionally.
 
-**Supporting (raise confidence, not required):**
-- Funding has been extreme for 2+ consecutive periods (persistence)
-- Predicted funding from OI model agrees with current extreme
-- Other assets in same sector show normal funding (idiosyncratic)
+### Primary Evidence (highest weight)
+
+- **Funding rate extremity (z-score)**: The distance of the current funding rate from its 14-day mean, measured in standard deviations. z-score > 2.0 or < -2.0 = strong +0.7, 1.5-2.0 = moderate +0.5, 1.0-1.5 = weak +0.2. Below 1.0 the funding rate is within normal range — contribute 0.0 for dislocation signals. The sign of the z-score determines direction: positive extreme = short signal, negative extreme = long signal.
+- **Funding acceleration**: The rate of change of funding in the direction of the dislocation. Acceleration in the last period matching the dislocation direction adds +0.5. Flat acceleration (last period funding is similar to prior) adds +0.2. Deceleration (funding starting to revert) reduces confidence by -0.4 — the best entry may have passed.
+- **OI-funding alignment**: OI change supporting the funding thesis. For positive funding extreme: OI flat or falling (late-stage crowding) adds +0.3; OI still rising (still building) adds +0.1 but warns the dislocation may have further to run. For negative funding extreme: OI stable or rising (building shorts) adds +0.3; OI falling adds +0.1. OI data unavailable: treat as neutral but apply -0.1 uncertainty penalty.
+
+### Secondary Evidence (moderate weight)
+
+- **Persistence of extreme**: Funding has been extreme for 2+ consecutive funding periods adds +0.3 (confirms the dislocation is structural, not a one-period anomaly). Single-period extreme contributes nothing.
+- **Predicted funding agreement**: The predicted funding from the OI model agreeing with the current extreme adds +0.2. Disagreement reduces by -0.2 (the OI model suggests the extreme may not persist).
+- **Idiosyncratic check**: Other assets in the same sector showing normal funding adds +0.2 (idiosyncratic dislocation is more likely to revert quickly). Sector-wide funding dislocation reduces by -0.2 (systematic positioning, slower to revert).
+- **Event calendar check**: No major scheduled event for the asset in the next 4 hours adds +0.1. A known event within 4 hours reduces by -0.4 (events override funding dynamics).
+
+### When Data Is Missing
+
+If funding rate data is unavailable for the current period, do not enter — funding is the sole signal for this thesis. If fewer than 14 days of funding history are available, use whatever history exists with a -0.1 uncertainty penalty per missing day below 14 (maximum -0.5). If OI data is unavailable, skip the OI-funding alignment check entirely (treat as 0.0) and apply the uncertainty penalty noted above. Predicted funding is a derived signal: if it cannot be computed, skip it with no penalty.
+
+## Entry Decision
+
+- Confident entry (confidence >= 0.70): full position size at standard parameters
+- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
+- No entry (confidence < 0.50): firm rule — wait
 
 ## Position Parameters
 

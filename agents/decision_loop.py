@@ -132,6 +132,8 @@ async def run_decision(
                 logger.warning("[%s] Risk gate blocked order: %s", agent_id, e.reason)
                 return {"action": "risk_blocked", "detail": e.reason}
 
+            response["position_size_pct"] = response["position_size_pct"] * response["confidence"]
+
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
 
@@ -224,7 +226,7 @@ def _call_llm_with_retry(
             return None, last_model_used
 
         if action == "enter":
-            required = ("asset", "direction", "entry_price", "stop_loss_price", "leverage", "position_size_pct")
+            required = ("asset", "direction", "entry_price", "stop_loss_price", "leverage", "position_size_pct", "confidence")
             missing = [k for k in required if k not in decision]
             if missing:
                 logger.warning("LLM enter missing fields %s (attempt %d/%d)", missing, attempt + 1, max_retries)

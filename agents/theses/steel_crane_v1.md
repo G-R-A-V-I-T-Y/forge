@@ -6,27 +6,33 @@ Crypto perpetual markets generate a unique and exploitable signal: forced liquid
 
 This agent monitors liquidation clusters (concentrated volumes at specific price levels), cascade history (chain liquidations that snowball as each liquidation pushes price further), leverage estimates from OI/price ratios (when estimated leverage is extreme, liquidations become more likely), funding rates (trapped longs paying high funding while underwater are prime cascade targets), and OI changes in the wake of liquidation events. The core question: is a squeeze likely? Has one already happened? If the cascade is in progress, the agent fades it -- enters against the cascade direction expecting reversion as the book rebalances.
 
-## Entry Conditions
+## Evidence Framework
 
-**Required (all must be met):**
-1. Single-asset liquidation volume > $5M USD in the last 15 minutes
-   (meaningful cascade, not routine liquidations)
-2. Price has moved > 2% in the direction of the dominant liquidation
-   type (longs getting liquidated → price down; shorts getting
-   liquidated → price up)
-3. Estimated leverage (OI / notional value) > 15x for the asset
-   (extreme leverage = more fuel for the cascade)
-4. OI has dropped > 3% during the cascade (positions are being
-   removed from the book, reducing selling/buying pressure)
+Each piece of evidence contributes a signed strength score (-1.0 to +1.0) to the overall conviction assessment. The entry decision weighs all available evidence continuously — no single missing or weak factor is a hard veto, but cumulative weak evidence reduces position size proportionally.
 
-**Supporting (raise confidence, not required):**
-- Funding rate was extreme before the cascade (funding + cascade
-  confluences -- trapped positions are paying to stay in)
-- Multiple liquidation clusters visible on the book (cascades tend
-  to propagate through clustered liquidity)
-- Other assets in the same sector are not experiencing cascades
-  (idiosyncratic event, not systemic)
-- Regime tag is not crisis (systemic cascades are different)
+### Primary Evidence (highest weight)
+
+- **Liquidation volume magnitude**: Single-asset liquidation volume in the last 15 minutes. > $10M = strong +0.8, $5-10M = moderate +0.6, $2-5M = weak +0.3. Below $2M the cascade signal is too small to reliably fade — contribute 0.0. Volume direction determines sign: long liquidations = short-term downside, then fade long.
+- **Price move magnitude**: Price movement in the direction of the dominant liquidation type. > 3% = strong +0.6, 2-3% = moderate +0.4, 1-2% = weak +0.2. Below 1% the price hasn't reacted to the liquidations — contributes 0.0.
+- **Estimated leverage**: Current estimated leverage (OI / notional value) for the asset. > 20x = strong +0.5, 15-20x = moderate +0.3, 10-15x = weak +0.1. Below 10x contributes nothing. Higher leverage means more fuel remains for the cascade.
+- **OI drawdown during cascade**: OI drop during the cascade event. > 5% drop = strong +0.6 (significant positions removed), 3-5% drop = moderate +0.4, 1-3% drop = weak +0.1. Below 1% OI change suggests the cascade is not materially reducing open positions — reduce by -0.2.
+
+### Secondary Evidence (moderate weight)
+
+- **Pre-cascade funding extremity**: Funding rate was extreme (z-score > 1.5 or < -1.5) before the cascade adds +0.3. Trapped positions paying to stay in are prime cascade fuel. Neutral pre-cascade funding contributes nothing.
+- **Liquidation cluster concentration**: Multiple liquidation clusters visible on the book adds +0.3 (cascades propagate through clustered levels). A single liquidation level adds +0.1. No visible clusters reduce by -0.2.
+- **Idiosyncratic check**: Other assets in the same sector are not experiencing cascades adds +0.2 (idiosyncratic event, safer to fade). Sector-wide cascades reduce by -0.3 (systemic risk overwhelms the fade thesis).
+- **Regime compatibility**: Regime tag is not crisis adds +0.2. Crisis regime reduces by -0.5 — systemic cascades behave differently and the fade is much riskier.
+
+### When Data Is Missing
+
+If liquidation volume data is unavailable, this thesis has no edge — do not enter. If OI data is unavailable, the OI drawdown and estimated leverage pillars are removed: maximum achievable confidence drops to ~50%. If funding rate data is unavailable, skip the pre-cascade funding check with no penalty. If liquidation cluster data is unavailable (book data missing), skip with no penalty. If regime tag is unavailable, assume non-crisis (most conservative assumption) with no penalty.
+
+## Entry Decision
+
+- Confident entry (confidence >= 0.70): full position size at standard parameters
+- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
+- No entry (confidence < 0.50): firm rule — wait
 
 ## Position Parameters
 

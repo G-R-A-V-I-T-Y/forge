@@ -157,6 +157,7 @@ async def build_decision_prompt(
     heartbeat_ts = heartbeat.get("timestamp", "unknown")
     top_asset = sorted_assets[0][0] if sorted_assets else None
     trade_bank_section = _build_trade_bank_section(conn, agent_id, regime, top_asset)
+    derived_section = _build_derived_features_section(sorted_assets)
 
     return f"""=== YOUR THESIS ===
 {thesis_text}
@@ -186,12 +187,21 @@ Account: ${balance:,.2f} | Peak: ${peak:,.2f} | Current DD: {dd_pct:.1%}
 === MARKET STATE (your {len(sorted_assets)} tracked assets) ===
 {market_section}
 
+{derived_section}
+
 {trade_bank_section}
 
 === DECISION ===
 Based on your thesis, your performance record, and current market conditions, make a decision.
+
+IMPORTANT: You reason in probabilities, not checklists. Every signal has strength, not just presence.
+- confidence (0.0-1.0): Your overall conviction in this trade. Below 0.50 is a firm veto — wait.
+- evidence_strength: Per-signal factor scores from -1.0 to +1.0 (sign = direction, magnitude = strength).
+  Missing data reduces confidence but does not veto a trade automatically.
+- uncertainty_factors: List specific factors increasing uncertainty (e.g. "orderbook unavailable reduces conviction").
+
 You may:
-  - Enter a new trade: {{"action": "enter", "asset": "...", "direction": "long|short", "entry_price": 0.0, "stop_loss_price": 0.0, "take_profit_price": 0.0, "leverage": 1, "position_size_pct": 0.10, "hypothesis": "...", "key_conditions_met": [], "key_conditions_missing": [], "confidence": 0.0, "expected_value": "..."}}
+  - Enter a new trade: {{"action": "enter", "asset": "...", "direction": "long|short", "entry_price": 0.0, "stop_loss_price": 0.0, "take_profit_price": 0.0, "leverage": 1, "position_size_pct": 0.10, "hypothesis": "...", "key_conditions_met": [], "key_conditions_missing": [], "confidence": 0.72, "evidence_strength": {{"funding": 0.6, "oi": 0.3, "momentum": -0.2, "volatility": 0.4}}, "uncertainty_factors": ["orderbook depth thinning reduces conviction"], "expected_value": "..."}}
   - Wait: {{"action": "wait", "reason": "..."}}
   - Close a position: {{"action": "close", "position_id": "...", "reason": "..."}}
 
@@ -269,3 +279,32 @@ def _build_trade_bank_section(
 
 === CROSS-AGENT PATTERN REFERENCE ===
 {cross_block}"""
+
+
+def _build_derived_features_section(sorted_assets: list[tuple[str, dict]]) -> str:
+    """Compact table of computed derived features per asset.
+    Shows momentum_acceleration, atr_percentile, bb_width,
+    volume_percentile_14d, and funding_acceleration where available.
+    """
+    if not sorted_assets:
+        return ""
+    lines = []
+    for asset, data in sorted_assets:
+        accel = data.get("momentum_acceleration")
+        atr_pct = data.get("atr_percentile")
+        bb_w = data.get("bb_width")
+        vol_pct = data.get("volume_percentile_14d")
+        f_accel = data.get("funding_acceleration")
+
+        accel_str = f"{accel:+.4f}" if accel is not None else "  n/a  "
+        atr_str = f"{atr_pct:.2f}" if atr_pct is not None else " n/a"
+        bb_str = f"{bb_w:.4f}" if bb_w is not None else "  n/a "
+        volp_str = f"{vol_pct:.2f}" if vol_pct is not None else " n/a"
+        facc_str = f"{f_accel:+.4f}" if f_accel is not None else "  n/a "
+
+        lines.append(
+            f"  {asset:12s} accel={accel_str} atr_pct={atr_str} "
+            f"bb_w={bb_str} vol_pct={volp_str} fund_acc={facc_str}"
+        )
+    section = "\n".join(lines)
+    return f"\n=== DERIVED FEATURES ===\n{section}"
