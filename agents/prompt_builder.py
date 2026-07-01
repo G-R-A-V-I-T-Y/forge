@@ -3,14 +3,23 @@ from store.performance import compute_metrics, format_performance_summary
 from store.query import query_trades, summarize
 from store.positions import get_desk_positions_summary
 
+# Hard requirement from the captain: agents must never assume they can see or
+# react to price movement faster than the heartbeat's own cadence.
+MARKET_DATA_CADENCE_NOTICE = (
+    "Market data refreshes every 5 minutes; you cannot see or act on price "
+    "movements faster than this. Do not assume intraday granularity finer "
+    "than 5 minutes when reasoning about entries or exits."
+)
+
 
 async def build_decision_prompt(
     agent_id: str,
     thesis_text: str,
-    market_state: dict,
+    heartbeat: dict,
     conn,
     provider,
     starting_balance: float = 50000.0,
+    universe: list[str] | None = None,
 ) -> str:
     account = get_latest_account(conn, agent_id, "paper") or {
         "balance": starting_balance,
@@ -50,26 +59,51 @@ async def build_decision_prompt(
 
     desk_positions = get_desk_positions_summary(conn, exclude_agent_id=agent_id)
 
-    assets_only = {k: v for k, v in market_state.items() if isinstance(v, dict)}
+    assets_data = heartbeat.get("assets", {})
+    tracked_universe = universe if universe is not None else list(assets_data.keys())
     sorted_assets = sorted(
-        assets_only.items(),
-        key=lambda kv: abs(kv[1].get("funding_rate_current", 0)),
+        ((a, assets_data[a]) for a in tracked_universe if a in assets_data),
+        key=lambda kv: abs(kv[1].get("funding") or 0),
         reverse=True,
     )
     market_lines = []
     for asset, data in sorted_assets:
-        funding = data.get("funding_rate_current", 0)
-        oi_chg = data.get("open_interest_24h_change_pct", 0)
-        liq_vol = data.get("liquidation_volume_1h_usd", 0)
-        liq_dir = data.get("liquidation_direction_dominant", "?")
+        price = data.get("price")
+        ret_24h = data.get("return_24h") or 0.0
+        funding = data.get("funding") or 0.0
+        rsi = data.get("rsi")
+        depth_imbalance = data.get("depth_imbalance")
+        rsi_str = f"{rsi:.1f}" if rsi is not None else "n/a"
+        depth_str = f"{depth_imbalance:+.2f}" if depth_imbalance is not None else "n/a"
+        price_str = f"{price:.4f}" if price is not None else "n/a"
         market_lines.append(
-            f"  {asset:12s} price={data['mid_price']:.4f} "
-            f"funding={funding:+.4%} OI_chg={oi_chg:+.1f}% "
-            f"liq={liq_vol:,.0f}({liq_dir})"
+            f"  {asset:12s} price={price_str:>10s} ret_24h={ret_24h:+.2%} "
+            f"funding={funding:+.4%} rsi={rsi_str:>5s} depth_imbalance={depth_str}"
         )
-    market_section = "\n".join(market_lines)
+    market_section = (
+        "\n".join(market_lines) if market_lines else "  No market data available."
+    )
 
-    regime = market_state.get("_regime", "range_low_vol")
+    cross_asset = heartbeat.get("cross_asset", {})
+    sector_strength = cross_asset.get("sector_strength") or {}
+    sector_str = ", ".join(
+        f"{sector}={val:+.2%}" for sector, val in sector_strength.items() if val is not None
+    ) or "n/a"
+    cross_section = (
+        f"  Breadth (24h, pct assets up): {cross_asset.get('market_breadth', 0):.0%} | "
+        f"Leader: {cross_asset.get('leader') or '?'} | Laggard: {cross_asset.get('laggard') or '?'}\n"
+        f"  Sector strength (24h avg return): {sector_str}"
+    )
+
+    regime_obj = heartbeat.get("regime", {})
+    regime = regime_obj.get("regime_tag", "range_low_vol")
+    regime_section = (
+        f"  Tag: {regime} | Risk-on score: {regime_obj.get('risk_on_score', 0):.2f} | "
+        f"Trend score: {regime_obj.get('trend_score', 0):.2f} | "
+        f"Fear & Greed index: {regime_obj.get('crypto_fear_index')}"
+    )
+
+    heartbeat_ts = heartbeat.get("timestamp", "unknown")
     top_asset = sorted_assets[0][0] if sorted_assets else None
     trade_bank_section = _build_trade_bank_section(conn, agent_id, regime, top_asset)
 
@@ -89,10 +123,16 @@ Account: ${balance:,.2f} | Peak: ${peak:,.2f} | Current DD: {dd_pct:.1%}
 === DESK POSITIONS (other traders) ===
 {desk_positions}
 
-=== MARKET REGIME ===
-{regime}
+=== MARKET DATA CADENCE (as of {heartbeat_ts}) ===
+{MARKET_DATA_CADENCE_NOTICE}
 
-=== MARKET STATE (all {len(sorted_assets)} assets) ===
+=== MARKET REGIME ===
+{regime_section}
+
+=== CROSS-ASSET OVERVIEW ===
+{cross_section}
+
+=== MARKET STATE (your {len(sorted_assets)} tracked assets) ===
 {market_section}
 
 {trade_bank_section}

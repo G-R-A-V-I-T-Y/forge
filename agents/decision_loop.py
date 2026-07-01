@@ -9,11 +9,33 @@ import asyncio
 import logging
 from agents.persona import build_system_prompt
 from agents.prompt_builder import build_decision_prompt
+from market.heartbeat import (
+    DEFAULT_HEARTBEAT_PATH,
+    heartbeat_max_age_seconds,
+    read_heartbeat_or_none,
+)
 from risk.gate import validate_order, RiskViolation
 from store.db import get_positions, get_trades, insert_trade
 from store.fingerprint import write_entry, write_outcome
 
 logger = logging.getLogger(__name__)
+
+
+def _asset_fingerprint_snapshot(heartbeat: dict, asset: str) -> dict:
+    """Adapt a heartbeat per-asset field dict into the shape write_entry()
+    expects. The heartbeat schema (Task A) doesn't carry raw OHLCV arrays or
+    liquidation data — it uses derived technicals/returns and trade-tape
+    stats (buy/sell volume, aggressor ratio) instead of get_liquidations().
+    Fields with no heartbeat equivalent are left at write_entry()'s own
+    defaults (empty list / 0) rather than fabricated; see the "Fingerprint
+    snapshot shape" section of
+    docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md.
+    """
+    asset_fields = (heartbeat.get("assets") or {}).get(asset) or {}
+    return {
+        "funding_rate_current": asset_fields.get("funding", 0) or 0,
+        "open_interest_24h_change_pct": asset_fields.get("oi_zscore", 0) or 0,
+    }
 
 
 async def run_decision(
@@ -33,11 +55,16 @@ async def run_decision(
         assets = config["universe"]
         desk_config = config["desk"]
 
-        market_state = await provider.get_market_state(assets)
+        heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+        heartbeat = read_heartbeat_or_none(heartbeat_path, heartbeat_max_age_seconds(config))
+        if heartbeat is None:
+            return {"action": "wait", "detail": "heartbeat unavailable or stale"}
+
         system_prompt = build_system_prompt(agent_id, config)
         decision_prompt = await build_decision_prompt(
-            agent_id, thesis_text, market_state, conn, provider,
+            agent_id, thesis_text, heartbeat, conn, provider,
             starting_balance=desk_config["starting_balance"],
+            universe=assets,
         )
 
         response = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt)
@@ -80,16 +107,20 @@ async def run_decision(
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
 
-            # Write the full fingerprint: market snapshot at entry (OHLCV,
-            # funding/OI/liquidation context, regime) plus the agent's
-            # reasoning, onto the trade row the bridge just created.
+            # Write the fingerprint: heartbeat-derived market context at
+            # entry (funding/OI-zscore proxy; see
+            # docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md
+            # for what heartbeat does and doesn't carry vs. the old
+            # market_state shape) plus the agent's reasoning and the
+            # categorical regime tag, onto the trade row the bridge just
+            # created.
             if fill.get("trade_id"):
-                asset_snapshot = market_state.get(response["asset"], {})
+                asset_snapshot = _asset_fingerprint_snapshot(heartbeat, response["asset"])
                 write_entry(
                     conn,
                     fill["trade_id"],
                     asset_snapshot,
-                    regime=market_state.get("_regime"),
+                    regime=(heartbeat.get("regime") or {}).get("regime_tag"),
                     reasoning=response,
                 )
 
