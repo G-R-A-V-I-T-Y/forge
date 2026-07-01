@@ -1,6 +1,8 @@
 """Tests for store/fingerprint.py."""
 import json
 
+import msgpack
+
 from store.db import insert_agent, insert_trade
 from store.fingerprint import write_entry, write_outcome, pack_ohlcv, unpack_ohlcv
 
@@ -88,6 +90,40 @@ def test_write_entry_enriches_existing_row(conn):
     # market_context_json remains whatever was set at trade insert (write_entry
     # writes only to dedicated fingerprint columns)
     assert row.get("market_context_json") is None
+
+
+def test_write_entry_stores_market_context_msgpack_encoded(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, _base_trade())
+
+    market_context = {
+        "portfolio": {"cash": 50000.0, "equity": 50000.0, "open_position_count": 1},
+        "cross_asset": {"market_breadth": 0.6, "leader": "SOL-PERP"},
+        "regime": {"regime_tag": "range_high_vol", "risk_on_score": 0.55},
+        "asset": {
+            "price": 145.2,
+            "funding": -0.0042,
+            "candles_5m": [[1, 1.0, 2.0, 0.5, 1.5, 100.0]] * 3,
+            "candles_30m": [[1, 1.0, 2.0, 0.5, 1.5, 300.0]],
+        },
+    }
+
+    write_entry(conn, "t1", _snapshot(), regime="range_high_vol", market_context=market_context)
+
+    row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
+    blob = row["market_context_json"]
+    assert isinstance(blob, (bytes, bytearray))
+    decoded = msgpack.unpackb(blob, raw=False)
+    assert decoded == market_context
+    assert decoded["asset"]["candles_5m"] == market_context["asset"]["candles_5m"]
+
+
+def test_write_entry_without_market_context_leaves_column_null(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_trade(conn, _base_trade())
+    write_entry(conn, "t1", _snapshot(), regime="range_high_vol")
+    row = dict(conn.execute("SELECT * FROM trades WHERE id = ?", ("t1",)).fetchone())
+    assert row["market_context_json"] is None
 
 
 def test_write_entry_without_reasoning_does_not_raise(conn):

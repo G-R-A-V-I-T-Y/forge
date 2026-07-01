@@ -8,7 +8,7 @@ as {"action": "error", "detail": str(exc)}.
 import asyncio
 import logging
 from agents.persona import build_system_prompt
-from agents.prompt_builder import build_decision_prompt
+from agents.prompt_builder import build_decision_prompt, build_portfolio_snapshot
 from market.heartbeat import (
     DEFAULT_HEARTBEAT_PATH,
     heartbeat_max_age_seconds,
@@ -21,20 +21,29 @@ from store.fingerprint import write_entry, write_outcome
 logger = logging.getLogger(__name__)
 
 
-def _asset_fingerprint_snapshot(heartbeat: dict, asset: str) -> dict:
-    """Adapt a heartbeat per-asset field dict into the shape write_entry()
-    expects. The heartbeat schema (Task A) doesn't carry raw OHLCV arrays or
-    liquidation data — it uses derived technicals/returns and trade-tape
-    stats (buy/sell volume, aggressor ratio) instead of get_liquidations().
-    Fields with no heartbeat equivalent are left at write_entry()'s own
-    defaults (empty list / 0) rather than fabricated; see the "Fingerprint
-    snapshot shape" section of
-    docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md.
+def build_trade_market_context(heartbeat: dict, asset: str, conn, agent_id: str, config: dict) -> dict:
+    """Consolidate the full trade-entry context — the trade "thumbprint" the
+    captain asked for — into one dict for write_entry()'s `market_context`
+    param:
+
+      - portfolio: this agent's cash/equity/exposure/open-positions/PnL/
+        risk-utilization at the moment of the trade, via
+        build_portfolio_snapshot() (the same helper the decision prompt's
+        Portfolio section is built from — not recomputed differently here).
+      - cross_asset / regime: the heartbeat's non-asset-specific blocks,
+        as-is.
+      - asset: the FULL per-asset heartbeat field dict for the traded
+        asset (all ~29 fields, including candles_5m/candles_30m/candles_4h).
+
+    Recorded so other agents' cross-agent trade-bank queries and the web UI
+    can see exactly what this agent saw at entry, not just a narrow
+    funding/OI proxy.
     """
-    asset_fields = (heartbeat.get("assets") or {}).get(asset) or {}
     return {
-        "funding_rate_current": asset_fields.get("funding", 0) or 0,
-        "open_interest_24h_change_pct": asset_fields.get("oi_zscore", 0) or 0,
+        "portfolio": build_portfolio_snapshot(conn, agent_id, config),
+        "cross_asset": heartbeat.get("cross_asset") or {},
+        "regime": heartbeat.get("regime") or {},
+        "asset": (heartbeat.get("assets") or {}).get(asset) or {},
     }
 
 
@@ -107,21 +116,29 @@ async def run_decision(
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
 
-            # Write the fingerprint: heartbeat-derived market context at
-            # entry (funding/OI-zscore proxy; see
-            # docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md
-            # for what heartbeat does and doesn't carry vs. the old
-            # market_state shape) plus the agent's reasoning and the
-            # categorical regime tag, onto the trade row the bridge just
-            # created.
+            # Write the fingerprint onto the trade row the bridge just
+            # created: the consolidated trade-thumbprint (portfolio state +
+            # heartbeat's cross_asset/regime blocks + the full per-asset
+            # heartbeat fields for the traded asset, including OHLCV
+            # candles) alongside the agent's reasoning and the categorical
+            # regime tag. See docs/superpowers/specs/
+            # 2026-07-01-heartbeat-wiring-design.md for the shape.
             if fill.get("trade_id"):
-                asset_snapshot = _asset_fingerprint_snapshot(heartbeat, response["asset"])
+                market_context = build_trade_market_context(
+                    heartbeat, response["asset"], conn, agent_id, config
+                )
+                asset_fields = market_context["asset"]
+                asset_snapshot = {
+                    "funding_rate_current": asset_fields.get("funding", 0) or 0,
+                    "open_interest_24h_change_pct": asset_fields.get("oi_zscore", 0) or 0,
+                }
                 write_entry(
                     conn,
                     fill["trade_id"],
                     asset_snapshot,
                     regime=(heartbeat.get("regime") or {}).get("regime_tag"),
                     reasoning=response,
+                    market_context=market_context,
                 )
 
             logger.info("[%s] Entered trade: %s", agent_id, fill)

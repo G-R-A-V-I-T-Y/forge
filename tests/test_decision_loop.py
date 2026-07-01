@@ -94,6 +94,19 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
     row = conn.execute("SELECT regime FROM trades WHERE id = ?", (trades[0]["id"],)).fetchone()
     assert row["regime"] == "range_high_vol"
 
+    # The consolidated trade-thumbprint (portfolio + cross_asset + regime +
+    # full per-asset heartbeat fields) was captured onto the trade row.
+    from store.query import get_trade
+    full = get_trade(conn, trades[0]["id"], decode_ohlcv=True)
+    mc = full["market_context_json"]
+    assert mc is not None
+    assert set(mc.keys()) == {"portfolio", "cross_asset", "regime", "asset"}
+    assert mc["portfolio"]["cash"] == 50000.0
+    assert mc["cross_asset"]["leader"] == "SOL-PERP"
+    assert mc["regime"]["regime_tag"] == "range_high_vol"
+    assert mc["asset"]["price"] == 145.20
+    assert mc["asset"]["funding"] == -0.0042
+
 
 @pytest.mark.asyncio
 async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
