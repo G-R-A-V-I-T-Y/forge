@@ -500,9 +500,9 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
 | `amber_wolf` | Trade Flow | Analyses every execution: aggressive buy vs sell volume, VWAP vs mid, buy pressure ratio, average trade size (block trades vs retail), cumulative delta. Enters on overwhelmingly one-sided institutional-quality flow. |
 | `steel_crane` | Liquidation Hunter | Monitors liquidation clusters, cascade history, leverage estimates, funding rates, OI changes. Enters when cascading liquidations and extreme leverage make a squeeze imminent — fades the cascade. |
 | `onyx_heron` | Relative Value | Trades only spreads: SOL vs ETH, BTC vs ETH, AI-tokens vs L1 basket. Uses z-score, correlation, cointegration to identify cheap/rich legs. Long cheap, short rich — naturally beta-neutral. |
-| `jade_hawk` | Regime Detection | Never trades. Classifies market into nine regimes: Trending, Mean-reverting, High vol, Low vol, Risk-on, Risk-off, Funding frenzy, Panic, Quiet accumulation. Every other agent conditions on this output. |
-| `violet_lion` | Volatility Trader | Predicts volatility magnitude, not direction. Increases position sizing when vol is artificially compressed; decreases when vol is extreme. Non-directional vol overlay for the desk. |
-| `crimson_fox` | Meta Agent | Does not study markets — studies the other nine agents. Learns which strategies perform in which regimes from the trade bank. Outputs confidence multipliers per agent based on current conditions and historical performance. |
+| `jade_hawk` | VWAP Mean Reversion | Fades price extremes relative to VWAP across 15m/1h/4h timeframes. Enters short when price > VWAP(1h) + 2*ATR, long when price < VWAP(1h) - 2*ATR. Opposite paradigm to the desk's momentum strategies. |
+| `violet_lion` | Volatility Regime Trader | Trades volatility regime transitions. In compressed vol (coiling), enters breakout direction with microstructure confirmation. In expanded vol, fades the emotional extreme. Produces directional trades from vol state changes. |
+| `crimson_fox` | Session Pattern Arbitrage | Exploits predictable intraday patterns across global sessions (US Open, US Reversal, Asian Drift, weekly patterns, pre-settlement windows). Low edge per trade but highly reliable compounding. Uses time, not price/volume/OI, as primary signal. |
 
 ---
 
