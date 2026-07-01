@@ -4,7 +4,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
-data/forge.db
+!data/forge.db
 data/backups/
 logs/
 .pytest_cache/

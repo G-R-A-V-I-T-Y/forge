@@ -899,7 +899,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 6. Add `data/backups/` directory (git-ignored): implement daily SQLite backup job in APScheduler (`cp data/forge.db data/backups/forge_{date}.db`), retain 30 days
 7. Implement SQLite database migrations: `data/migrations/` directory with numbered `.sql` files; on startup, check current schema version and apply any pending migrations; prevents manual DB surgery on updates
 8. Load test: simulate 10 agents all waking within the same second (set all wake intervals to 1s for 60s); verify no SQLite lock contention, no duplicate fingerprints, response times acceptable
-9. Security audit: confirm no secrets appear in any log file; confirm `.env` and `data/forge.db` are in `.gitignore`; confirm `.env.example` has all required keys with placeholder values and comments
+9. Security audit: confirm no secrets appear in any log file; confirm `.env` is in `.gitignore` (`data/forge.db` is intentionally committed, per the design above); confirm `.env.example` has all required keys with placeholder values and comments
 10. Create `scripts/fresh_start.py`: wipes existing `forge.db` (with confirmation prompt), re-runs schema init, seeds all 10 initial agents with their thesis files, prints "Ready. Run: python forge.py"
 11. Add system metrics to `/health` endpoint: CPU usage, memory usage, SQLite file size, agent wake success rate (last hour), LLM response time (p50/p95 last hour), exchange API latency (p50/p95 last hour)
 12. Add metrics panel to Settings page pulling from `/health`: green/yellow/red status indicators for each subsystem with last-check timestamp
