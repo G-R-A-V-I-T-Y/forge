@@ -1,6 +1,7 @@
 from store.db import get_trades, get_positions, get_latest_account
 from store.performance import compute_metrics, format_performance_summary
 from store.query import query_trades, summarize
+from store.positions import get_desk_positions_summary
 
 
 async def build_decision_prompt(agent_id: str, thesis_text: str,
@@ -40,6 +41,8 @@ async def build_decision_prompt(agent_id: str, thesis_text: str,
         )
     positions_section = "\n".join(pos_lines) if pos_lines else "  No open positions."
 
+    desk_positions = get_desk_positions_summary(conn, exclude_agent_id=agent_id)
+
     assets_only = {k: v for k, v in market_state.items() if isinstance(v, dict)}
     sorted_assets = sorted(
         assets_only.items(),
@@ -75,6 +78,9 @@ Account: ${balance:,.2f} | Peak: ${peak:,.2f} | Current DD: {dd_pct:.1%}
 
 === YOUR OPEN POSITIONS ===
 {positions_section}
+
+=== DESK POSITIONS (other traders) ===
+{desk_positions}
 
 === MARKET REGIME ===
 {regime}
