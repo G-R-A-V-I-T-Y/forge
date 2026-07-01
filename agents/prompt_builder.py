@@ -12,6 +12,57 @@ MARKET_DATA_CADENCE_NOTICE = (
 )
 
 
+def build_portfolio_snapshot(conn, agent_id: str, config: dict | None = None) -> dict:
+    """Per-agent portfolio-level snapshot at the current moment: cash/equity,
+    exposure, open positions (count/list), PnL, and risk utilization.
+
+    This is the same category of data the decision prompt's Portfolio
+    section already assembles (account balance/peak/drawdown, open
+    positions, performance metrics) — factored out here so it can also be
+    captured as-is into a trade fingerprint's `market_context.portfolio`
+    block (see agents/decision_loop.py) without recomputing it differently
+    in two places.
+    """
+    desk_config = (config or {}).get("desk", {})
+    starting_balance = desk_config.get("starting_balance", 50000.0)
+
+    account = get_latest_account(conn, agent_id, "paper") or {
+        "balance": starting_balance,
+        "peak_balance": starting_balance,
+    }
+    balance = account["balance"]
+    peak = account["peak_balance"]
+    dd_pct = (peak - balance) / peak if peak > 0 else 0.0
+
+    metrics = compute_metrics(conn, agent_id)
+    open_positions = get_positions(conn, agent_id)
+
+    exposure_usd = sum(p.get("notional_usd", 0) or 0 for p in open_positions)
+    unrealized_pnl_pct = sum(p.get("current_pnl_pct", 0) or 0 for p in open_positions)
+
+    max_concurrent = desk_config.get("max_concurrent_positions")
+    position_utilization = (
+        len(open_positions) / max_concurrent if max_concurrent else None
+    )
+
+    return {
+        "cash": balance,
+        "equity": balance,
+        "peak_balance": peak,
+        "drawdown_pct": dd_pct,
+        "exposure_usd": exposure_usd,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
+        "open_position_count": len(open_positions),
+        "open_positions": open_positions,
+        "performance": metrics,
+        "risk_utilization": {
+            "open_positions": len(open_positions),
+            "max_concurrent_positions": max_concurrent,
+            "position_utilization_pct": position_utilization,
+        },
+    }
+
+
 async def build_decision_prompt(
     agent_id: str,
     thesis_text: str,
