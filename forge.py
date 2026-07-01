@@ -27,7 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from market import heartbeat
 from market.provider import MarketProvider
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
-from store.positions import get_all_open_positions
+from store.positions import get_all_open_positions, update_position_pnl
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -53,6 +53,17 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
         len(packet.get("assets", {})),
         packet.get("timestamp"),
     )
+    assets_data = packet.get("assets", {})
+    if assets_data:
+        conn = get_connection(str(DB_PATH))
+        try:
+            update_position_pnl(conn, assets_data)
+        except Exception:
+            logger.warning(
+                "Failed to update position PnL from heartbeat", exc_info=True
+            )
+        finally:
+            conn.close()
 
 
 async def _spawn_agent_runner(

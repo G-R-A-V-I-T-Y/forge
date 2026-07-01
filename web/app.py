@@ -79,6 +79,27 @@ async def overview(request: Request):
     trades = conn.execute(
         "SELECT * FROM trades ORDER BY entry_timestamp DESC LIMIT 10"
     ).fetchall()
+    trades_list = [dict(t) for t in trades]
+    if config:
+        heartbeat = read_heartbeat_or_none(DEFAULT_HEARTBEAT_PATH, heartbeat_max_age_seconds(config))
+        if heartbeat:
+            assets_data = heartbeat.get("assets", {})
+            for t in trades_list:
+                if t.get("status") == "open":
+                    asset = t.get("asset")
+                    direction = t.get("direction")
+                    entry = t.get("entry_price")
+                    leverage = t.get("leverage") or 1
+                    asset_data = assets_data.get(asset)
+                    if asset_data and entry:
+                        current_price = asset_data.get("price")
+                        if current_price:
+                            if direction == "long":
+                                pnl = (current_price - entry) / entry * leverage
+                            else:
+                                pnl = (entry - current_price) / entry * leverage
+                            t["pnl_pct"] = pnl
+
     positions = conn.execute(
         "SELECT * FROM positions ORDER BY agent_id, opened_at"
     ).fetchall()
@@ -88,7 +109,7 @@ async def overview(request: Request):
         {
             "request": request,
             "agents": agents,
-            "trades": [dict(t) for t in trades],
+            "trades": trades_list,
             "positions": [dict(p) for p in positions],
             "total_trades": total_trades,
             "data_source": data_source,
