@@ -117,20 +117,7 @@ async def build_decision_prompt(
         key=lambda kv: abs(kv[1].get("funding") or 0),
         reverse=True,
     )
-    market_lines = []
-    for asset, data in sorted_assets:
-        price = data.get("price")
-        ret_24h = data.get("return_24h") or 0.0
-        funding = data.get("funding") or 0.0
-        rsi = data.get("rsi")
-        depth_imbalance = data.get("depth_imbalance")
-        rsi_str = f"{rsi:.1f}" if rsi is not None else "n/a"
-        depth_str = f"{depth_imbalance:+.2f}" if depth_imbalance is not None else "n/a"
-        price_str = f"{price:.4f}" if price is not None else "n/a"
-        market_lines.append(
-            f"  {asset:12s} price={price_str:>10s} ret_24h={ret_24h:+.2%} "
-            f"funding={funding:+.4%} rsi={rsi_str:>5s} depth_imbalance={depth_str}"
-        )
+    market_lines = _build_full_asset_blocks(sorted_assets)
     market_section = (
         "\n".join(market_lines) if market_lines else "  No market data available."
     )
@@ -140,10 +127,13 @@ async def build_decision_prompt(
     sector_str = ", ".join(
         f"{sector}={val:+.2%}" for sector, val in sector_strength.items() if val is not None
     ) or "n/a"
+    corr_matrix = cross_asset.get("correlation_matrix")
+    corr_str = _format_corr_matrix(corr_matrix) if corr_matrix else "n/a"
     cross_section = (
         f"  Breadth (24h, pct assets up): {cross_asset.get('market_breadth', 0):.0%} | "
         f"Leader: {cross_asset.get('leader') or '?'} | Laggard: {cross_asset.get('laggard') or '?'}\n"
-        f"  Sector strength (24h avg return): {sector_str}"
+        f"  Sector strength (24h avg return): {sector_str}\n"
+        f"  Correlation matrix:\n{corr_str}"
     )
 
     regime_obj = heartbeat.get("regime", {})
@@ -300,7 +290,7 @@ def _build_derived_features_section(sorted_assets: list[tuple[str, dict]]) -> st
         atr_str = f"{atr_pct:.2f}" if atr_pct is not None else " n/a"
         bb_str = f"{bb_w:.4f}" if bb_w is not None else "  n/a "
         volp_str = f"{vol_pct:.2f}" if vol_pct is not None else " n/a"
-        facc_str = f"{f_accel:+.4f}" if f_accel is not None else "  n/a "
+        facc_str = f"{f_accel:+.4f}" if f_accel is not None else "  n/a  "
 
         lines.append(
             f"  {asset:12s} accel={accel_str} atr_pct={atr_str} "
@@ -308,3 +298,88 @@ def _build_derived_features_section(sorted_assets: list[tuple[str, dict]]) -> st
         )
     section = "\n".join(lines)
     return f"\n=== DERIVED FEATURES ===\n{section}"
+
+
+def _pct(val, fallback="n/a"):
+    if val is None:
+        return fallback
+    return f"{val:+.4%}"
+
+
+def _n(val, fmt=".4f", fallback="n/a"):
+    if val is None:
+        return fallback
+    return f"{val:{fmt}}"
+
+
+def _build_full_asset_blocks(
+    sorted_assets: list[tuple[str, dict]],
+) -> list[str]:
+    """All heartbeat per-asset fields in a compact 4-line block per asset."""
+    blocks = []
+    for asset, data in sorted_assets:
+        price = _n(data.get("price"), ".2f")
+        ret5 = _pct(data.get("return_5m"))
+        ret30 = _pct(data.get("return_30m"))
+        ret4h = _pct(data.get("return_4h"))
+        ret24h = _pct(data.get("return_24h"))
+        vol = _n(data.get("volume"), ".2f")
+        oi = _n(data.get("open_interest"), ".1f")
+        fund = _pct(data.get("funding") or 0.0)
+        fund_z = _n(data.get("funding_zscore"), ".2f")
+        oi_z = _n(data.get("oi_zscore"), ".2f")
+        vol_z = _n(data.get("volume_zscore"), ".2f")
+        vwap = _pct(data.get("vwap_distance"))
+        atr = _n(data.get("atr"), ".1f")
+        rsi = _n(data.get("rsi"), ".1f")
+        rv = _n(data.get("realized_vol"), ".2f")
+        spread = _pct(data.get("spread"))
+        bd = _n(data.get("bid_depth"), ".2f")
+        ad = _n(data.get("ask_depth"), ".2f")
+        di = _n(data.get("depth_imbalance"), "+.2f")
+        se = _pct(data.get("slippage_estimate"))
+        bv = _n(data.get("buy_volume"), ".2f")
+        sv = _n(data.get("sell_volume"), ".2f")
+        ar = _n(data.get("aggressor_ratio"), ".3f")
+        ats = _n(data.get("avg_trade_size"), ".4f")
+        lt = _n(data.get("largest_trade"), ".1f")
+
+        blocks.append(
+            f"  {asset:12s} price={price} ret5={ret5} ret30={ret30} "
+            f"ret4h={ret4h} ret24h={ret24h} vol={vol} oi={oi}\n"
+            f"             fund={fund} fund_z={fund_z} oi_z={oi_z} vol_z={vol_z} "
+            f"vwap={vwap} atr={atr} rsi={rsi} rv={rv}\n"
+            f"             spread={spread} bid={bd} ask={ad} "
+            f"depth={di} slip={se}\n"
+            f"             buy={bv} sell={sv} agg={ar} avg_trade={ats} "
+            f"largest={lt} candles_5m={_candle_summary(data.get('candles_5m'))}"
+        )
+    return blocks
+
+
+def _candle_summary(candles, fallback="none"):
+    if not candles:
+        return fallback
+    last = candles[-1]
+    ts = last[0] if len(last) > 0 else "?"
+    o, h, l, c = last[1], last[2], last[3], last[4]
+    return f"{len(candles)}x5m o={o} h={h} l={l} c={c}"
+
+
+def _format_corr_matrix(matrix: dict | None) -> str:
+    if not matrix:
+        return "  n/a"
+    assets = sorted(matrix.keys())
+    entries = []
+    for i, a in enumerate(assets):
+        for b in assets[i + 1:]:
+            r = matrix[a].get(b)
+            if r is not None:
+                entries.append(f"{a}/{b}={r:.2f}")
+    if not entries:
+        return "  n/a"
+    pairs = sorted(entries, key=lambda x: -abs(float(x.split("=")[1])))
+    # Cap at most informative 15 pairs
+    pairs = pairs[:15]
+    rows = ["  " + "  ".join(pairs[i:i+3]) for i in range(0, len(pairs), 3)]
+    return "\n".join(rows)
