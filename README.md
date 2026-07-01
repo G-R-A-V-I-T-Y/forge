@@ -66,9 +66,26 @@ data_source: stub        # "stub" (default) or "hyperliquid"
 
 `store/performance.py` computes rolling metrics from closed trades: win rate, profit factor, average win/loss %, Sharpe ratio, best/worst trade, last-20 performance, and last-7-day return. These are injected into the agent's decision prompt so the LLM can self-evaluate its recent track record.
 
+## Trade Fingerprint Store
+
+`store/fingerprint.py` writes a full market snapshot on every trade: `write_entry()`
+captures OHLCV candles (15m/1h/4h, msgpack-compressed), funding rate history, OI and
+liquidation data, regime tag, and reasoning fields; `write_outcome()` fills in exit
+price, PnL, and postmortem when a trade closes. `store/query.py` builds filtered
+queries over that history — `query_trades()` (filter by agent, asset, direction,
+regime, outcome, date range, funding rate, OI change), `query_win_rate()` (win rate,
+total trades, profit factor), `query_all_agents()` (cross-agent, `agent_id=None`),
+and `format_trades_summary()` (LLM-readable text block for agent prompts). The same
+`query_trades()` powers the `/trades` dashboard page and the `/api/query` endpoint
+(GET with query params or POST with a JSON body).
+
+Run `scripts/verify_db_size.py` to confirm the SQLite file stays under the 50MB
+budget at 500 full trades.
+
 ## Milestones
 
 - **M1** (complete): Walking skeleton — stub LLM, stub market data, paper trading, web UI
 - **M2** (complete): Real Hyperliquid market data — `HyperliquidClient`, `MarketProvider`, `StubMarket`
 - **M3** (complete): Real LLM decisions (Qwen3.6-35B via Ollama) + performance metrics
-- **M4-M10**: Full system
+- **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
+- **M5-M10**: Full system
