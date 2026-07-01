@@ -491,16 +491,18 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
 
 ## Seeding the First Cohort
 
-| Agent | Seed Hypothesis |
-|---|---|
-| `iron_moth` | Funding rate mean reversion: persistent one-directional funding creates mechanical squeeze pressure |
-| `jade_hawk` | Liquidation cascade fade: post-cascade price action reverts as market absorbs the move |
-| `silver_basin` | Cross-asset lag: SOL and ARB lag BTC on breakouts by 10–20 minutes; trade the follower |
-| `copper_vane` | OI divergence: price rising + OI falling = weak move, fade it |
-| `gray_finch` | Session momentum: US equities open (14:30 UTC) drives crypto correlation burst; trade first candle breakout |
-| `amber_wolf` | Volatility compression: ATR contracts for N candles then expands — trade the expansion direction |
-| `steel_crane` | Dominance rotation: BTC dominance dropping while BTC price stable = altcoin capital rotation signal |
-| `onyx_heron` | Open: generate thesis from scratch after reviewing the full trade bank |
+| Agent | Strategy | Seed Hypothesis |
+|---|---|---|
+| `iron_moth` | Cross-sectional Momentum | Ranks all assets on multi-horizon returns (30m, 2h, 12h, 24h); enters top-ranked when momentum acceleration and volatility-adjusted returns confirm. Sector-relative momentum avoids beta crowding. |
+| `silver_basin` | Funding Dislocation | Studies only funding rates: z-score vs 14d history, trend, predicted funding from OI, acceleration. Enters when funding is statistically irrational; exits on normalisation. Ignores price. |
+| `copper_vane` | Open Interest Intelligence | OI×Price regime matrix: rising price + rising OI = genuine trend (go with); rising price + falling OI = short squeeze (fade); falling price + rising OI = new shorts (join); falling price + falling OI = capitulation (wait). |
+| `gray_finch` | Order Book Microstructure | Predicts next 5-20m price moves from bid/ask imbalance, liquidity gaps, resting walls, spread width, queue dynamics. No OHLCV, no funding. Enters on clear directional imbalance with minimal resistance. |
+| `amber_wolf` | Trade Flow | Analyses every execution: aggressive buy vs sell volume, VWAP vs mid, buy pressure ratio, average trade size (block trades vs retail), cumulative delta. Enters on overwhelmingly one-sided institutional-quality flow. |
+| `steel_crane` | Liquidation Hunter | Monitors liquidation clusters, cascade history, leverage estimates, funding rates, OI changes. Enters when cascading liquidations and extreme leverage make a squeeze imminent — fades the cascade. |
+| `onyx_heron` | Relative Value | Trades only spreads: SOL vs ETH, BTC vs ETH, AI-tokens vs L1 basket. Uses z-score, correlation, cointegration to identify cheap/rich legs. Long cheap, short rich — naturally beta-neutral. |
+| `jade_hawk` | Regime Detection | Never trades. Classifies market into nine regimes: Trending, Mean-reverting, High vol, Low vol, Risk-on, Risk-off, Funding frenzy, Panic, Quiet accumulation. Every other agent conditions on this output. |
+| `violet_lion` | Volatility Trader | Predicts volatility magnitude, not direction. Increases position sizing when vol is artificially compressed; decreases when vol is extreme. Non-directional vol overlay for the desk. |
+| `crimson_fox` | Meta Agent | Does not study markets — studies the other nine agents. Learns which strategies perform in which regimes from the trade bank. Outputs confidence multipliers per agent based on current conditions and historical performance. |
 
 ---
 
