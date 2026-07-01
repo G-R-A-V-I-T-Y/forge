@@ -1,48 +1,88 @@
-# jade_hawk — Thesis v1: Funding Rate Mean Reversion
+# jade_hawk -- Thesis v1: Regime Detection
 
 ## Edge Hypothesis
 
-Crypto perpetual markets generate funding rates that periodically diverge far from
-equilibrium due to one-sided speculative positioning. When funding rates stay persistently
-negative (longs pay shorts, meaning market is net short), mechanical squeeze pressure builds:
-shorts pay funding each 8-hour period, reducing their risk-adjusted return. Once that cost
-becomes sufficiently high, short covering accelerates, driving price up even without a
-fundamental catalyst.
+Market regime is the single most important conditioning variable for every trading strategy. A momentum strategy that thrives in trending markets destroys capital in ranging markets. A mean-reversion strategy that prints in range markets bleeds in trends. The most valuable agent on the desk is not the one that trades best -- it is the one that correctly identifies what kind of market we are in right now.
 
-**Primary signal:** Funding rate negative for 3+ consecutive 8-hour periods on an asset
-in my universe, with current rate ≤ -0.03%.
+jade_hawk does not trade. It never recommends entry, exit, or position sizing directly. Its sole output is a regime classification tag that every other agent on the desk receives as part of their decision context. The classification uses inputs from across the market: BTC price action (trend direction and strength, measured by ADX and moving average slope), cross-asset volatility (ATR percentiles across the universe), funding rate distribution (are rates extreme
+across the board or neutral?), OI trends (aggregate OI rising or falling across the desk?), liquidation activity (elevated or normal?), and correlation structure (are assets moving together or rotating?).
+The output is one of nine regime tags, assigned deterministically with a confidence score, and the reasoning that led to the classification.
 
-## Entry Conditions
+## Regime Taxonomy
 
-**Required (all must be met):**
-1. Funding rate ≤ -0.03% for current period
-2. Funding rate was also negative in at least 2 of the prior 3 periods (persistence check)
-3. Price has not already rallied >3% in the last 4h (squeeze not already underway)
-4. Open interest has not fallen >10% in 24h (capitulation already complete = no squeeze fuel)
+1. **Trending** -- Strong directional move with ADX > 25 and price
+   making higher highs / lower lows consistently. Sub-classified as
+   bullish or bearish.
+2. **Mean-reverting** -- Range-bound price with no clear direction;
+   ATR is average or slightly above; price oscillates between
+   established support and resistance.
+3. **High volatility** -- ATR > 90th percentile of 14-day range;
+   wide spreads, elevated liquidation activity; price gaps common.
+4. **Low volatility** -- ATR < 20th percentile of 14-day range;
+   tight ranges, low volume, compressed spreads.
+5. **Risk-on** -- BTC and alts rising together; funding rates positive
+   across the board; OI increasing; correlation matrix converging to
+   high values (everything moves together).
+6. **Risk-off** -- BTC falling; alts falling more; funding across
+   assets negative (short premium); OI declining; correlation
+   spiking (fear-driven synchronous selling).
+7. **Funding frenzy** -- Funding rates are extreme across 5+ assets
+   simultaneously; suggests market-wide positioning extreme.
+8. **Panic** -- Liquidations cascading across multiple assets;
+   OI dropping sharply; spreads blowing out; VRP-like regime in
+   perps; this is a crisis classification.
+9. **Quiet accumulation** -- Low volatility, neutral funding, stable
+   OI, correlation matrix normalising; price drifting sideways to
+   slightly up; this is the 'nobody cares' regime where smart money
+   positions.
 
-**Supporting (raise confidence, not required):**
-- Recent long liquidation volume > $5M/h (trapped longs being cleaned out = cleaner setup)
-- BTC dominance stable or falling (risk-on environment favors the trade)
-- Asset is near a 15m support level
+## Classification Method
 
-## Position Parameters
+**Deterministic, not LLM-based.** The classifier is a decision tree with threshold-based rules derived from the input data. The output is a single regime tag and a confidence score (0.0-1.0) based on how many signals point to the same classification. When no single regime has high confidence (> 0.6), the tag is 'mixed' and the confidence scores for all regimes are passed alongside so consuming agents can
+weight their decisions accordingly.
 
-- Direction: Long always (fade the short squeeze)
-- Leverage: 3x (low leverage for squeeze trades — timing is imprecise)
-- Position size: 10% of account per trade
-- Stop loss: 2.0% below entry price
-- Take profit: 4.5% above entry price (2.25:1 reward/risk)
-- Max hold time: 8 hours (if TP not hit, evaluate at funding reset)
+**Required inputs for each classification cycle:**
+- BTC 4h OHLCV (last 30 candles)
+- ATR percentiles for BTC, ETH, SOL (14-day window)
+- Funding rates for all 15 universe assets
+- Aggregate OI change (across all assets, 24h)
+- Total liquidation volume (last 4 hours)
+- Average cross-asset correlation (20-period rolling)
+
+## Output Schema
+
+A regime report is written as a structured JSON object to the database and made available to all agents at decision time:
+
+```json
+{
+  "regime": "trending_bull",
+  "confidence": 0.82,
+  "secondary": {"mean_reverting": 0.12, "high_vol": 0.06},
+  "reasoning": "BTC ADX at 32 with 4 consecutive 4h higher highs. "
+    "Funding neutral. OI rising 6% across the desk. "
+    "No elevated liquidation activity. Correlation at 0.75.",
+  "classifier_version": 1
+}
+```
+
+## Interaction with Other Agents
+
+- Every other agent receives the regime tag and confidence in their
+  decision prompt
+- Agents are expected to condition their confidence on the regime:
+  a momentum agent should reduce size when regime is mean_reverting
+- The meta-agent (`crimson_fox`) uses jade_hawk's output as its
+  primary conditioning variable for confidence multipliers
+- When confidence is low (< 0.6), agents are told to use their own
+  best judgment and note the regime ambiguity
 
 ## Known Weaknesses
 
-- In persistent trending bear markets, negative funding can remain negative for weeks
-  without triggering a squeeze — this thesis underperforms in `trending_bear` regime
-- Works best in `range_high_vol` and `trending_bull` regimes
-- Timing risk: squeeze can take 2-12 hours to materialize; overnight gaps can hit SL
-
-## Assets in Focus
-
-Primary: SOL, ETH, ARB, OP (mid-cap perps with meaningful funding volatility)
-Secondary: BTC (lower funding variance but high liquidity)
-Avoid: PEPE, WIF, DOGE (too noisy, funding spikes don't mean squeeze)
+- Regime changes at inflection points are inherently lagging
+  (the classifier needs confirming candles)
+- During rapid regime transitions (e.g. panic from quiet),
+  the classifier can miss the transition until it is well underway
+- BTC-centric classification may miss altcoin-local regimes
+- Requires high-quality data across all 15 assets to be accurate
+- A deterministic classifier cannot adapt to novel regime types
+  without manual version updates

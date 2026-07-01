@@ -491,16 +491,18 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
 
 ## Seeding the First Cohort
 
-| Agent | Seed Hypothesis |
-|---|---|
-| `iron_moth` | Funding rate mean reversion: persistent one-directional funding creates mechanical squeeze pressure |
-| `jade_hawk` | Liquidation cascade fade: post-cascade price action reverts as market absorbs the move |
-| `silver_basin` | Cross-asset lag: SOL and ARB lag BTC on breakouts by 10–20 minutes; trade the follower |
-| `copper_vane` | OI divergence: price rising + OI falling = weak move, fade it |
-| `gray_finch` | Session momentum: US equities open (14:30 UTC) drives crypto correlation burst; trade first candle breakout |
-| `amber_wolf` | Volatility compression: ATR contracts for N candles then expands — trade the expansion direction |
-| `steel_crane` | Dominance rotation: BTC dominance dropping while BTC price stable = altcoin capital rotation signal |
-| `onyx_heron` | Open: generate thesis from scratch after reviewing the full trade bank |
+| Agent | Strategy | Seed Hypothesis |
+|---|---|---|
+| `iron_moth` | Cross-sectional Momentum | Ranks all assets on multi-horizon returns (30m, 2h, 12h, 24h); enters top-ranked when momentum acceleration and volatility-adjusted returns confirm. Sector-relative momentum avoids beta crowding. |
+| `silver_basin` | Funding Dislocation | Studies only funding rates: z-score vs 14d history, trend, predicted funding from OI, acceleration. Enters when funding is statistically irrational; exits on normalisation. Ignores price. |
+| `copper_vane` | Open Interest Intelligence | OI×Price regime matrix: rising price + rising OI = genuine trend (go with); rising price + falling OI = short squeeze (fade); falling price + rising OI = new shorts (join); falling price + falling OI = capitulation (wait). |
+| `gray_finch` | Order Book Microstructure | Predicts next 5-20m price moves from bid/ask imbalance, liquidity gaps, resting walls, spread width, queue dynamics. No OHLCV, no funding. Enters on clear directional imbalance with minimal resistance. |
+| `amber_wolf` | Trade Flow | Analyses every execution: aggressive buy vs sell volume, VWAP vs mid, buy pressure ratio, average trade size (block trades vs retail), cumulative delta. Enters on overwhelmingly one-sided institutional-quality flow. |
+| `steel_crane` | Liquidation Hunter | Monitors liquidation clusters, cascade history, leverage estimates, funding rates, OI changes. Enters when cascading liquidations and extreme leverage make a squeeze imminent — fades the cascade. |
+| `onyx_heron` | Relative Value | Trades only spreads: SOL vs ETH, BTC vs ETH, AI-tokens vs L1 basket. Uses z-score, correlation, cointegration to identify cheap/rich legs. Long cheap, short rich — naturally beta-neutral. |
+| `jade_hawk` | Regime Detection | Never trades. Classifies market into nine regimes: Trending, Mean-reverting, High vol, Low vol, Risk-on, Risk-off, Funding frenzy, Panic, Quiet accumulation. Every other agent conditions on this output. |
+| `violet_lion` | Volatility Trader | Predicts volatility magnitude, not direction. Increases position sizing when vol is artificially compressed; decreases when vol is extreme. Non-directional vol overlay for the desk. |
+| `crimson_fox` | Meta Agent | Does not study markets — studies the other nine agents. Learns which strategies perform in which regimes from the trade bank. Outputs confidence multipliers per agent based on current conditions and historical performance. |
 
 ---
 
@@ -648,7 +650,7 @@ forge/
 │       └── uplot.min.js
 │
 └── scripts/
-    ├── fresh_start.py            ← initialize clean DB, seed all 8 agents
+    ├── fresh_start.py            ← initialize clean DB, seed all 10 agents
     ├── spawn_agent.py            ← CLI: manually create a new agent
     └── promote_agent.py          ← CLI: move agent to shadow or live mode
 ```
@@ -671,7 +673,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 **Tasks:**
 1. Initialize git repository with full directory structure per the repo layout above; add `.gitignore` (exclude `.env`, `*.pyc`, `__pycache__`)
-2. Write `config.yaml` with desk defaults: universe (15 assets), max leverage (10), max position size (0.20), wake interval (60s), starting balance (50000), target agent count (8)
+2. Write `config.yaml` with desk defaults: universe (15 assets), max leverage (10), max position size (0.20), wake interval (60s), starting balance (50000), target agent count (10)
 3. Write `data/schema.sql` defining all SQLite tables: `agents`, `theses`, `trades`, `accounts`, `positions`, `reflections`, `evaluations`, `settings`, `chat_history`
 4. Implement `store/db.py`: SQLite connection (WAL mode), schema initialization on first run, parameterized CRUD helpers for each table
 5. Implement `market/stub.py`: returns hardcoded realistic OHLCV arrays, funding rates (-0.01 to +0.03), OI values, and liquidation volumes for all 15 assets — deterministic but plausible
@@ -762,7 +764,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ### Milestone 5 — Multi-Agent Desk
 
-**Goal:** All 8 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
+**Goal:** All 10 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
 
 **You can verify:** Watch the leaderboard update live. Trigger two agents to want the same asset — confirm both can enter (same or opposing direction) and the desk position registry records both. Click into any agent to see their individual detail page.
 
@@ -771,8 +773,8 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 2. Remove the competing position check from `risk/gate.py`: competing positions are allowed — divergent theses in the same asset are signal and provide natural desk-wide hedging
 3. Add "DESK POSITIONS" section to `agents/prompt_builder.py`: shows all other agents' current positions (formatted as in the design doc above)
 4. Implement `meta/spawner.py`: `spawn_agent(name, seed_thesis_text, config_overrides)` — creates agent record in SQLite, writes thesis file, registers in scheduler
-5. Run `scripts/fresh_start.py`: initialize all 8 agents with their seed theses; document in README
-6. Update `forge.py` to launch all 8 agents as concurrent `asyncio` tasks; each agent's wake schedule is offset by 30s to avoid simultaneous Hyperliquid API bursts
+5. Run `scripts/fresh_start.py`: initialize all 10 agents with their seed theses; document in README
+6. Update `forge.py` to launch all 10 agents as concurrent `asyncio` tasks; each agent's wake schedule is offset by 30s to avoid simultaneous Hyperliquid API bursts
 7. Implement per-agent configurable wake interval: read from agent's config in SQLite (or fall back to desk default)
 8. Add `/` overview leaderboard: table of all agents sorted by Sharpe (default), columns: name, status, trades, win%, PF, Sharpe, weekly return, max DD, BTC corr; sortable by clicking column header
 9. Implement `/agents/{name}` page: equity curve (SVG via uPlot), full stats panel, trade history table, current thesis, open positions — all reading from SQLite
@@ -781,7 +783,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 12. Broadcast desk state update via WebSocket every 30 seconds; update leaderboard table in-place without page reload
 13. Test: manually trigger two agents to evaluate the same asset simultaneously; confirm both can enter positions (same or opposing direction) and the desk position registry records both correctly
 
-**Done when:** 8 agents running simultaneously. Leaderboard updates live. Competing positions visible and correctly recorded across the desk. All agent detail pages accessible.
+**Done when:** 10 agents running simultaneously. Leaderboard updates live. Competing positions visible and correctly recorded across the desk. All agent detail pages accessible.
 
 ---
 
@@ -896,13 +898,13 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 5. Create `docker-compose.yml`: `forge` service (Dockerfile), `ollama` service (official Ollama image with Qwen model volume); services start in correct order; port 8000 exposed for web UI
 6. Add `data/backups/` directory (git-ignored): implement daily SQLite backup job in APScheduler (`cp data/forge.db data/backups/forge_{date}.db`), retain 30 days
 7. Implement SQLite database migrations: `data/migrations/` directory with numbered `.sql` files; on startup, check current schema version and apply any pending migrations; prevents manual DB surgery on updates
-8. Load test: simulate 8 agents all waking within the same second (set all wake intervals to 1s for 60s); verify no SQLite lock contention, no duplicate fingerprints, response times acceptable
+8. Load test: simulate 10 agents all waking within the same second (set all wake intervals to 1s for 60s); verify no SQLite lock contention, no duplicate fingerprints, response times acceptable
 9. Security audit: confirm no secrets appear in any log file; confirm `.env` and `data/forge.db` are in `.gitignore`; confirm `.env.example` has all required keys with placeholder values and comments
-10. Create `scripts/fresh_start.py`: wipes existing `forge.db` (with confirmation prompt), re-runs schema init, seeds all 8 initial agents with their thesis files, prints "Ready. Run: python forge.py"
+10. Create `scripts/fresh_start.py`: wipes existing `forge.db` (with confirmation prompt), re-runs schema init, seeds all 10 initial agents with their thesis files, prints "Ready. Run: python forge.py"
 11. Add system metrics to `/health` endpoint: CPU usage, memory usage, SQLite file size, agent wake success rate (last hour), LLM response time (p50/p95 last hour), exchange API latency (p50/p95 last hour)
 12. Add metrics panel to Settings page pulling from `/health`: green/yellow/red status indicators for each subsystem with last-check timestamp
 
-**Done when:** Fresh git clone on a new machine, following README, produces a running system with all 8 agents active within 30 minutes. Docker Compose brings up the full stack with one command.
+**Done when:** Fresh git clone on a new machine, following README, produces a running system with all 10 agents active within 30 minutes. Docker Compose brings up the full stack with one command.
 
 ---
 
