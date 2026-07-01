@@ -31,7 +31,7 @@ SEED_AGENTS = [
         "- Price not already rallied >3% in the last 4h\n"
         "- OI has not fallen >10% in 24h\n\n"
         "Direction: Long (fade the short squeeze). "
-        "Leverage: 3x. Position size: 10%.\n"
+        "Leverage: 3x. Position size: 10%.\n",
     ),
     (
         "jade_hawk",
@@ -46,7 +46,7 @@ SEED_AGENTS = [
         "- Price moved >3% in the direction of liquidations\n"
         "- Price shows reversal candle pattern on 15m chart\n"
         "- OI is stable or recovering (not still collapsing)\n\n"
-        "Direction: Counter-trend. Leverage: 3x. Position size: 10%.\n"
+        "Direction: Counter-trend. Leverage: 3x. Position size: 10%.\n",
     ),
     (
         "silver_basin",
@@ -60,7 +60,7 @@ SEED_AGENTS = [
         "- SOL/ARB has not yet moved >1% in the same direction\n"
         "- The asset's correlation to BTC is >0.70 over the last 20 periods\n"
         "- Funding rate on the altcoin is neutral (±0.01%)\n\n"
-        "Direction: Same as BTC. Leverage: 4x. Position size: 10%.\n"
+        "Direction: Same as BTC. Leverage: 4x. Position size: 10%.\n",
     ),
     (
         "copper_vane",
@@ -75,7 +75,7 @@ SEED_AGENTS = [
         "- OI fell >5% during the same period\n"
         "- No major liquidation event to explain the OI drop\n"
         "- Price near a 4h resistance/support level\n\n"
-        "Direction: Fade the price move. Leverage: 3x. Position size: 12%.\n"
+        "Direction: Fade the price move. Leverage: 3x. Position size: 12%.\n",
     ),
     (
         "gray_finch",
@@ -89,7 +89,7 @@ SEED_AGENTS = [
         "- BTC has been ranging for at least 30 minutes pre-open\n"
         "- The first 1m candle at 14:30 breaks the pre-open range by >0.3%\n"
         "- Volume on the breakout candle is >2× the previous 5 candles' average\n\n"
-        "Direction: Direction of the breakout. Leverage: 4x. Position size: 10%.\n"
+        "Direction: Direction of the breakout. Leverage: 4x. Position size: 10%.\n",
     ),
     (
         "amber_wolf",
@@ -104,7 +104,7 @@ SEED_AGENTS = [
         "- ATR is in the bottom 20% of its 14-day range\n"
         "- Order book shows >60% bid or ask dominance (imbalance signal)\n"
         "- Funding rate has a directional bias (>0.005% or < -0.005%)\n\n"
-        "Direction: Order book and funding bias. Leverage: 5x. Position size: 12%.\n"
+        "Direction: Order book and funding bias. Leverage: 5x. Position size: 12%.\n",
     ),
     (
         "steel_crane",
@@ -118,7 +118,7 @@ SEED_AGENTS = [
         "- BTC price is within ±2% of where it was 24h ago\n"
         "- The top 10 altcoins (ex-BTC) are all green (+1%+) in the last 4h\n"
         "- At least 3 altcoins show above-average volume vs their 14-day average\n\n"
-        "Direction: Long the top-3 alts by volume. Leverage: 3x. Position size: 8% each.\n"
+        "Direction: Long the top-3 alts by volume. Leverage: 3x. Position size: 8% each.\n",
     ),
     (
         "onyx_heron",
@@ -128,7 +128,7 @@ SEED_AGENTS = [
         "review the full trade bank, study all other agents' strategies "
         "and performance, and generate a novel thesis from scratch based "
         "on observed patterns in the data.\n\n"
-        "Until a thesis is generated, this agent will wait and observe.\n"
+        "Until a thesis is generated, this agent will wait and observe.\n",
     ),
 ]
 
@@ -171,11 +171,15 @@ def main():
     # Seed agents
     for name, thesis in SEED_AGENTS:
         agent = spawn_agent(
-            conn, name, thesis,
+            conn,
+            name,
+            thesis,
             status="rookie",
             starting_balance=STARTING_BALANCE,
         )
-        print(f"  Created agent: {name} (status={agent['status']}, balance=${STARTING_BALANCE:,.0f})")
+        print(
+            f"  Created agent: {name} (status={agent['status']}, balance=${STARTING_BALANCE:,.0f})"
+        )
 
     conn.close()
 

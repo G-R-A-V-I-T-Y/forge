@@ -50,7 +50,9 @@ async def main():
     await provider.__aenter__()
 
     def bridge_factory(agent_id: str, conn, provider) -> PaperBridge:
-        return PaperBridge(agent_id=agent_id, conn=conn, provider=provider, config=config)
+        return PaperBridge(
+            agent_id=agent_id, conn=conn, provider=provider, config=config
+        )
 
     def llm_fn(system_prompt: str, decision_prompt: str) -> dict:
         return llm_client.decide(system_prompt, decision_prompt, config=config)
@@ -81,7 +83,6 @@ async def main():
     ).fetchall()
 
     scheduler = AsyncIOScheduler()
-    base_interval = desk_config.get("wake_interval_seconds", 60)
 
     for idx, row in enumerate(agent_rows):
         agent = dict(row)
@@ -119,13 +120,17 @@ async def main():
         )
         logger.info(
             "Scheduled %s — wakes every %ds (first wake in %ds)",
-            agent_id, per_agent_interval, offset_seconds,
+            agent_id,
+            per_agent_interval,
+            offset_seconds,
         )
 
     scheduler.start()
     logger.info("Scheduler started with %d agents", len(agent_rows))
 
-    server_config = uvicorn.Config(web_app, host="0.0.0.0", port=8000, log_level="warning")
+    server_config = uvicorn.Config(
+        web_app, host="0.0.0.0", port=8000, log_level="warning"
+    )
     server = uvicorn.Server(server_config)
     logger.info("Web UI starting at http://localhost:8000")
 

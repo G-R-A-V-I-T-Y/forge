@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from store.db import insert_agent, insert_account_snapshot, insert_position, insert_trade
+from store.db import (
+    insert_agent,
+    insert_account_snapshot,
+    insert_position,
+    insert_trade,
+)
 from store.positions import get_all_open_positions, get_desk_positions_summary
 from risk.gate import validate_order, RiskViolation
 from meta.spawner import generate_agent_name, spawn_agent, check_against_graveyard
@@ -44,21 +49,43 @@ def open_position(conn, agent_id: str, asset: str, direction: str, price: float)
     """Helper: insert a trade and position row."""
     ts = _now()
     tid = f"{agent_id}_{asset}_{ts}"
-    insert_trade(conn, {
-        "id": tid, "agent_id": agent_id, "asset": asset,
-        "direction": direction, "entry_price": price,
-        "stop_loss_price": price * 0.98, "take_profit_price": price * 1.05,
-        "leverage": 3, "position_size_pct": 0.10, "notional_usd": 5000.0,
-        "entry_timestamp": ts, "status": "open", "thesis_version": 1,
-        "mode": "paper",
-    })
-    insert_position(conn, {
-        "id": f"pos_{tid}", "agent_id": agent_id, "asset": asset,
-        "direction": direction, "entry_price": price,
-        "stop_loss_price": price * 0.98, "take_profit_price": price * 1.05,
-        "leverage": 3, "position_size_pct": 0.10, "notional_usd": 5000.0,
-        "opened_at": ts, "mode": "paper", "trade_id": tid,
-    })
+    insert_trade(
+        conn,
+        {
+            "id": tid,
+            "agent_id": agent_id,
+            "asset": asset,
+            "direction": direction,
+            "entry_price": price,
+            "stop_loss_price": price * 0.98,
+            "take_profit_price": price * 1.05,
+            "leverage": 3,
+            "position_size_pct": 0.10,
+            "notional_usd": 5000.0,
+            "entry_timestamp": ts,
+            "status": "open",
+            "thesis_version": 1,
+            "mode": "paper",
+        },
+    )
+    insert_position(
+        conn,
+        {
+            "id": f"pos_{tid}",
+            "agent_id": agent_id,
+            "asset": asset,
+            "direction": direction,
+            "entry_price": price,
+            "stop_loss_price": price * 0.98,
+            "take_profit_price": price * 1.05,
+            "leverage": 3,
+            "position_size_pct": 0.10,
+            "notional_usd": 5000.0,
+            "opened_at": ts,
+            "mode": "paper",
+            "trade_id": tid,
+        },
+    )
 
 
 class TestCompetingPositions:
@@ -75,7 +102,12 @@ class TestCompetingPositions:
     def test_two_agents_opposing_directions_both_pass(self):
         """Agent A long SOL, Agent B short SOL — both pass risk gate."""
         validate_order(VALID_ORDER, BALANCE, CONFIG, open_position_count=0)
-        short_order = {**VALID_ORDER, "direction": "short", "entry_price": 150.00, "stop_loss_price": 152.00}
+        short_order = {
+            **VALID_ORDER,
+            "direction": "short",
+            "entry_price": 150.00,
+            "stop_loss_price": 152.00,
+        }
         validate_order(short_order, BALANCE, CONFIG, open_position_count=0)
 
     def test_two_agents_same_asset_desk_positions(self, conn):
@@ -150,8 +182,11 @@ class TestSpawner:
     def test_spawn_agent_with_config(self, conn):
         overrides = {"wake_interval": 90}
         agent = spawn_agent(
-            conn, "config_test", "# Config test",
-            config_overrides=overrides, starting_balance=50000.0,
+            conn,
+            "config_test",
+            "# Config test",
+            config_overrides=overrides,
+            starting_balance=50000.0,
         )
         assert agent["name"] == "config_test"
         row = conn.execute(

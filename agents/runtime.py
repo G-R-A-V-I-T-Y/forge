@@ -1,7 +1,6 @@
 import json
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 from agents.decision_loop import run_decision
 
@@ -34,7 +33,9 @@ class AgentRuntime:
         try:
             return self.thesis_path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            logger.warning("[%s] Thesis file not found: %s", self.agent_id, self.thesis_path)
+            logger.warning(
+                "[%s] Thesis file not found: %s", self.agent_id, self.thesis_path
+            )
             return "No thesis loaded."
 
     def _read_agent_config(self) -> dict:
@@ -64,11 +65,14 @@ class AgentRuntime:
             )
             logger.info(
                 "[%s] Wake interval updated to %ds",
-                self.agent_id, new_interval,
+                self.agent_id,
+                new_interval,
             )
         except Exception as exc:
             logger.warning(
-                "[%s] Could not reschedule interval: %s", self.agent_id, exc,
+                "[%s] Could not reschedule interval: %s",
+                self.agent_id,
+                exc,
             )
 
     async def tick(self) -> None:
@@ -92,7 +96,13 @@ class AgentRuntime:
                 llm_fn=self.llm_fn,
                 bridge_factory=self.bridge_factory,
             )
-            logger.info("[%s] Decision: %s — %s",
-                        self.agent_id, result["action"], result.get("detail", ""))
+            logger.info(
+                "[%s] Decision: %s — %s",
+                self.agent_id,
+                result["action"],
+                result.get("detail", ""),
+            )
         except Exception as exc:
-            logger.error("[%s] Unexpected tick error: %s", self.agent_id, exc, exc_info=True)
+            logger.error(
+                "[%s] Unexpected tick error: %s", self.agent_id, exc, exc_info=True
+            )

@@ -1,6 +1,5 @@
 """meta/spawner.py — Agent spawning and name generation."""
 
-import random
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,21 +8,74 @@ _THESES_DIR = Path(__file__).parent.parent / "agents" / "theses"
 # Preset list matching the proposal's seed names — these are claimed at
 # spawn time so generate_agent_name skips them.
 _RESERVED_NAMES: set[str] = {
-    "iron_moth", "jade_hawk", "silver_basin", "copper_vane",
-    "gray_finch", "amber_wolf", "steel_crane", "onyx_heron",
+    "iron_moth",
+    "jade_hawk",
+    "silver_basin",
+    "copper_vane",
+    "gray_finch",
+    "amber_wolf",
+    "steel_crane",
+    "onyx_heron",
 }
 
 _ADJECTIVES = [
-    "amber", "steel", "onyx", "jade", "silver", "copper", "gray", "iron",
-    "crimson", "emerald", "sapphire", "golden", "bronze", "scarlet", "ivory",
-    "azure", "cobalt", "violet", "coral", "crystal", "frost", "shadow",
-    "storm", "thunder", "echo", "phantom", "polar", "dark", "dawn", "lunar",
+    "amber",
+    "steel",
+    "onyx",
+    "jade",
+    "silver",
+    "copper",
+    "gray",
+    "iron",
+    "crimson",
+    "emerald",
+    "sapphire",
+    "golden",
+    "bronze",
+    "scarlet",
+    "ivory",
+    "azure",
+    "cobalt",
+    "violet",
+    "coral",
+    "crystal",
+    "frost",
+    "shadow",
+    "storm",
+    "thunder",
+    "echo",
+    "phantom",
+    "polar",
+    "dark",
+    "dawn",
+    "lunar",
 ]
 
 _ANIMALS = [
-    "moth", "hawk", "basin", "vane", "finch", "wolf", "crane", "heron",
-    "fox", "owl", "raven", "stag", "bear", "serpent", "phoenix", "tiger",
-    "lion", "falcon", "viper", "puma", "jackal", "osprey", "badger", "kestrel",
+    "moth",
+    "hawk",
+    "basin",
+    "vane",
+    "finch",
+    "wolf",
+    "crane",
+    "heron",
+    "fox",
+    "owl",
+    "raven",
+    "stag",
+    "bear",
+    "serpent",
+    "phoenix",
+    "tiger",
+    "lion",
+    "falcon",
+    "viper",
+    "puma",
+    "jackal",
+    "osprey",
+    "badger",
+    "kestrel",
 ]
 
 
@@ -37,9 +89,7 @@ def generate_agent_name(conn, used_names: set[str] | None = None) -> str:
     Checks the SQLite agents table for existing names and the optional
     used_names set for in-memory dedup (e.g. during bulk seed).
     """
-    existing = {
-        row[0] for row in conn.execute("SELECT name FROM agents").fetchall()
-    }
+    existing = {row[0] for row in conn.execute("SELECT name FROM agents").fetchall()}
     taken = existing | (used_names or set())
 
     for adj in _ADJECTIVES:
@@ -106,6 +156,7 @@ def spawn_agent(
 
     # Create account snapshot
     from store.db import insert_account_snapshot
+
     insert_account_snapshot(conn, name, "paper", starting_balance, starting_balance)
 
     conn.commit()
@@ -126,4 +177,5 @@ def check_against_graveyard(conn, thesis_text: str) -> bool:
 
 def _serialise_config(overrides: dict) -> str:
     import json
+
     return json.dumps(overrides)

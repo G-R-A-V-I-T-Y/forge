@@ -52,7 +52,9 @@ def get_desk_positions_summary(conn, exclude_agent_id: str | None = None) -> str
                 if delta.days > 0:
                     duration_str = f"{delta.days}d {delta.seconds // 3600}h ago"
                 elif delta.seconds // 3600 > 0:
-                    duration_str = f"{delta.seconds // 3600}h {(delta.seconds // 60) % 60}m ago"
+                    duration_str = (
+                        f"{delta.seconds // 3600}h {(delta.seconds // 60) % 60}m ago"
+                    )
                 else:
                     duration_str = f"{delta.seconds // 60}m ago"
             except (ValueError, TypeError):
