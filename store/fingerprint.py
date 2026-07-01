@@ -3,31 +3,28 @@ import json
 import msgpack
 
 
-def write_entry(conn, trade_id: str, market_state: dict, agent_reasoning: dict) -> None:
-    asset = agent_reasoning.get("asset", "")
-    sd = market_state.get(asset, {})
+def write_entry(conn, trade_id: str, asset_snapshot: dict, *, regime: str = "",
+                reasoning: dict | None = None) -> None:
+    ohlcv_15m = msgpack.packb(asset_snapshot.get("ohlcv_15m", []), use_bin_type=True)
+    ohlcv_1h = msgpack.packb(asset_snapshot.get("ohlcv_1h", []), use_bin_type=True)
+    ohlcv_4h = msgpack.packb(asset_snapshot.get("ohlcv_4h", []), use_bin_type=True)
 
-    ohlcv_15m = msgpack.packb(sd.get("ohlcv_15m", []), use_bin_type=True)
-    ohlcv_1h = msgpack.packb(sd.get("ohlcv_1h", []), use_bin_type=True)
-    ohlcv_4h = msgpack.packb(sd.get("ohlcv_4h", []), use_bin_type=True)
-
-    funding_hist = sd.get("funding_rate_8h_history", [])
+    funding_hist = asset_snapshot.get("funding_rate_8h_history", [])
     funding_blob = msgpack.packb(funding_hist, use_bin_type=True)
 
     oi_data = {
-        "open_interest_usd": sd.get("open_interest_usd", 0),
-        "open_interest_24h_change_pct": sd.get("open_interest_24h_change_pct", 0),
+        "open_interest_usd": asset_snapshot.get("open_interest_usd", 0),
+        "open_interest_24h_change_pct": asset_snapshot.get("open_interest_24h_change_pct", 0),
     }
     oi_json = json.dumps(oi_data)
 
     liq_data = {
-        "liquidation_volume_1h_usd": sd.get("liquidation_volume_1h_usd", 0),
-        "liquidation_direction_dominant": sd.get("liquidation_direction_dominant", ""),
+        "liquidation_volume_1h_usd": asset_snapshot.get("liquidation_volume_1h_usd", 0),
+        "liquidation_direction_dominant": asset_snapshot.get("liquidation_direction_dominant", ""),
     }
     liq_json = json.dumps(liq_data)
 
-    regime = market_state.get("_regime", "")
-    ev_text = agent_reasoning.get("expected_value", "")
+    ev_text = (reasoning or {}).get("expected_value", "")
 
     conn.execute(
         """UPDATE trades SET ohlcv_15m_40_blob=?, ohlcv_1h_20_blob=?,
@@ -53,7 +50,8 @@ def write_outcome(conn, trade_id: str, outcome_dict: dict) -> None:
     conn.execute(
         """UPDATE trades SET exit_price=?, exit_timestamp=?,
            exit_reason=?, duration_minutes=?, pnl_pct=?,
-           pnl_usd=?, result=?, status=?, postmortem=? WHERE id=?""",
+           pnl_usd=?, result=?, status=?, postmortem=?,
+           agent_postmortem=? WHERE id=?""",
         (
             outcome_dict.get("exit_price"),
             outcome_dict.get("exit_timestamp"),
@@ -64,6 +62,7 @@ def write_outcome(conn, trade_id: str, outcome_dict: dict) -> None:
             outcome_dict.get("result"),
             outcome_dict.get("status", "closed"),
             outcome_dict.get("postmortem"),
+            outcome_dict.get("agent_postmortem"),
             trade_id,
         ),
     )
