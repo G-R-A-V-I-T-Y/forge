@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import math
 from pathlib import Path
@@ -8,6 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
+from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from execution.paper_bridge import PaperBridge
 
@@ -24,35 +24,69 @@ logger = logging.getLogger("forge.web")
 
 data_source_map = {"stub": "STUB", "hyperliquid": "LIVE"}
 
+
 @app.get("/", response_class=HTMLResponse)
 async def overview(request: Request):
     conn = app.state.conn
     provider = getattr(app.state, "provider", None)
     config = getattr(app.state, "config", None)
-    data_source = data_source_map.get(config.get("data_source", "stub"), "STUB") if config else "STUB"
+    data_source = (
+        data_source_map.get(config.get("data_source", "stub"), "STUB")
+        if config
+        else "STUB"
+    )
     exchange_ok = provider is not None and getattr(provider._backend, "available", True)
 
-    agent = conn.execute("SELECT * FROM agents WHERE id = ?", ("jade_hawk",)).fetchone()
-    account = conn.execute(
-        "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
-        ("jade_hawk",),
-    ).fetchone()
+    agent_rows = conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
+    agents = []
+    for row in agent_rows:
+        agent = dict(row)
+        aid = agent["id"]
+        account = conn.execute(
+            "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+            (aid,),
+        ).fetchone()
+        metrics = compute_metrics(conn, aid)
+        pos_count = conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE agent_id = ?", (aid,)
+        ).fetchone()[0]
+        bal = account["balance"] if account else 50000.0
+        peak = account["peak_balance"] if account else 50000.0
+        agents.append(
+            {
+                "name": aid,
+                "status": agent["status"],
+                "trades_count": metrics["closed_trades"],
+                "win_rate": metrics["win_rate"],
+                "profit_factor": metrics["profit_factor"]
+                if metrics["profit_factor"] != float("inf")
+                else 0.0,
+                "sharpe": metrics["sharpe"],
+                "weekly_return": metrics.get("last_7d_return", 0.0),
+                "max_drawdown": (peak - bal) / peak if peak > 0 else 0.0,
+                "open_positions_count": pos_count,
+            }
+        )
+
     trades = conn.execute(
-        "SELECT * FROM trades WHERE agent_id = ? ORDER BY entry_timestamp DESC LIMIT 10",
-        ("jade_hawk",),
+        "SELECT * FROM trades ORDER BY entry_timestamp DESC LIMIT 10"
     ).fetchall()
     positions = conn.execute(
-        "SELECT * FROM positions WHERE agent_id = ?", ("jade_hawk",)
+        "SELECT * FROM positions ORDER BY agent_id, opened_at"
     ).fetchall()
-    return templates.TemplateResponse("overview.html", {
-        "request": request,
-        "agent": dict(agent) if agent else {},
-        "account": dict(account) if account else {"balance": 50000.0, "peak_balance": 50000.0},
-        "trades": [dict(t) for t in trades],
-        "positions": [dict(p) for p in positions],
-        "data_source": data_source,
-        "exchange_ok": exchange_ok,
-    })
+    total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    return templates.TemplateResponse(
+        "overview.html",
+        {
+            "request": request,
+            "agents": agents,
+            "trades": [dict(t) for t in trades],
+            "positions": [dict(p) for p in positions],
+            "total_trades": total_trades,
+            "data_source": data_source,
+            "exchange_ok": exchange_ok,
+        },
+    )
 
 
 @app.get("/health")
@@ -63,10 +97,14 @@ async def health():
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     trade_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     data_source = config.get("data_source", "stub") if config else "stub"
-    exchange_available = provider is not None and getattr(provider._backend, "available", True)
+    exchange_available = provider is not None and getattr(
+        provider._backend, "available", True
+    )
 
     db_path = Path("data/forge.db")
-    db_size_mb = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0.0
+    db_size_mb = (
+        round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0.0
+    )
 
     return {
         "status": "ok" if exchange_available else "degraded",
@@ -132,28 +170,41 @@ async def trades_page(
     page = min(page, total_pages)
     offset = (page - 1) * PAGE_SIZE
 
-    trades = query_trades(conn, decode_ohlcv=False, limit=PAGE_SIZE, offset=offset, **filters)
+    trades = query_trades(
+        conn, decode_ohlcv=False, limit=PAGE_SIZE, offset=offset, **filters
+    )
 
     agents = [r["id"] for r in conn.execute("SELECT id FROM agents ORDER BY id")]
-    assets = [r[0] for r in conn.execute("SELECT DISTINCT asset FROM trades ORDER BY asset")]
-    regimes = [r[0] for r in conn.execute(
-        "SELECT DISTINCT regime FROM trades WHERE regime IS NOT NULL ORDER BY regime"
-    )]
+    assets = [
+        r[0] for r in conn.execute("SELECT DISTINCT asset FROM trades ORDER BY asset")
+    ]
+    regimes = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT regime FROM trades WHERE regime IS NOT NULL ORDER BY regime"
+        )
+    ]
 
-    return templates.TemplateResponse("trade_bank.html", {
-        "request": request,
-        "trades": trades,
-        "agents": agents,
-        "assets": assets,
-        "regimes": regimes,
-        "filters": {
-            "agent": agent, "asset": asset, "direction": direction,
-            "outcome": outcome, "regime": regime,
+    return templates.TemplateResponse(
+        "trade_bank.html",
+        {
+            "request": request,
+            "trades": trades,
+            "agents": agents,
+            "assets": assets,
+            "regimes": regimes,
+            "filters": {
+                "agent": agent,
+                "asset": asset,
+                "direction": direction,
+                "outcome": outcome,
+                "regime": regime,
+            },
+            "page": page,
+            "total_pages": total_pages,
+            "total": total,
         },
-        "page": page,
-        "total_pages": total_pages,
-        "total": total,
-    })
+    )
 
 
 @app.get("/api/query")
@@ -182,11 +233,21 @@ async def api_query(
     conn = app.state.conn
     trades = query_trades(
         conn,
-        agent_id=agent, asset=asset, direction=direction, regime=regime,
-        outcome=outcome, status=status, date_from=date_from, date_to=date_to,
-        funding_rate_min=funding_rate_min, funding_rate_max=funding_rate_max,
-        oi_change_min=oi_change_min, oi_change_max=oi_change_max,
-        limit=limit, offset=offset, decode_ohlcv=include_ohlcv,
+        agent_id=agent,
+        asset=asset,
+        direction=direction,
+        regime=regime,
+        outcome=outcome,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        funding_rate_min=funding_rate_min,
+        funding_rate_max=funding_rate_max,
+        oi_change_min=oi_change_min,
+        oi_change_max=oi_change_max,
+        limit=limit,
+        offset=offset,
+        decode_ohlcv=include_ohlcv,
     )
     return JSONResponse(trades)
 
@@ -197,21 +258,171 @@ async def api_query_post(request: Request):
     Used by the Head of Desk chat (future milestone) and for programmatic access.
     """
     conn = app.state.conn
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    body = (
+        await request.json()
+        if request.headers.get("content-type") == "application/json"
+        else {}
+    )
     trades = query_trades(
         conn,
-        agent_id=body.get("agent"), asset=body.get("asset"),
-        direction=body.get("direction"), regime=body.get("regime"),
-        outcome=body.get("outcome"), status=body.get("status"),
-        date_from=body.get("date_from"), date_to=body.get("date_to"),
+        agent_id=body.get("agent"),
+        asset=body.get("asset"),
+        direction=body.get("direction"),
+        regime=body.get("regime"),
+        outcome=body.get("outcome"),
+        status=body.get("status"),
+        date_from=body.get("date_from"),
+        date_to=body.get("date_to"),
         funding_rate_min=body.get("funding_rate_min"),
         funding_rate_max=body.get("funding_rate_max"),
         oi_change_min=body.get("oi_change_min"),
         oi_change_max=body.get("oi_change_max"),
-        limit=body.get("limit", 200), offset=body.get("offset", 0),
+        limit=body.get("limit", 200),
+        offset=body.get("offset", 0),
         decode_ohlcv=body.get("include_ohlcv", False),
     )
     return JSONResponse(trades)
+
+
+@app.get("/api/desk")
+async def api_desk():
+    """Returns JSON summary of all agents' current state for the leaderboard."""
+    conn = app.state.conn
+    rows = conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
+    agents = []
+    for row in rows:
+        agent = dict(row)
+        aid = agent["id"]
+
+        account = conn.execute(
+            "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+            (aid,),
+        ).fetchone()
+
+        balance = account["balance"] if account else 50000.0
+        peak = account["peak_balance"] if account else 50000.0
+
+        metrics = compute_metrics(conn, aid)
+
+        pos_count = conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE agent_id = ?", (aid,)
+        ).fetchone()[0]
+
+        weekly_return = metrics.get("last_7d_return", 0.0)
+
+        agents.append(
+            {
+                "name": aid,
+                "status": agent["status"],
+                "balance": round(balance, 2),
+                "trades_count": metrics["closed_trades"],
+                "win_rate": round(metrics["win_rate"], 4),
+                "profit_factor": round(metrics["profit_factor"], 4)
+                if metrics["profit_factor"] != float("inf")
+                else 0.0,
+                "sharpe": round(metrics["sharpe"], 4),
+                "weekly_return": round(weekly_return, 4),
+                "max_drawdown": round((peak - balance) / peak, 4) if peak > 0 else 0.0,
+                "open_positions_count": pos_count,
+            }
+        )
+    return agents
+
+
+@app.get("/agents/{name}", response_class=HTMLResponse)
+async def agent_detail(request: Request, name: str):
+    conn = app.state.conn
+    provider = getattr(app.state, "provider", None)
+    config = getattr(app.state, "config", None)
+    data_source = (
+        data_source_map.get(config.get("data_source", "stub"), "STUB")
+        if config
+        else "STUB"
+    )
+    exchange_ok = provider is not None and getattr(provider._backend, "available", True)
+
+    agent = conn.execute("SELECT * FROM agents WHERE id = ?", (name,)).fetchone()
+    if not agent:
+        return HTMLResponse("Agent not found", status_code=404)
+
+    agent = dict(agent)
+    aid = agent["id"]
+
+    account = conn.execute(
+        "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+        (aid,),
+    ).fetchone()
+    account_dict = (
+        dict(account) if account else {"balance": 50000.0, "peak_balance": 50000.0}
+    )
+    peak = account_dict["peak_balance"]
+    max_dd = (peak - account_dict["balance"]) / peak if peak > 0 else 0.0
+
+    metrics = compute_metrics(conn, aid)
+
+    open_positions = conn.execute(
+        "SELECT * FROM positions WHERE agent_id = ?", (aid,)
+    ).fetchall()
+
+    trade_history = conn.execute(
+        "SELECT * FROM trades WHERE agent_id = ? ORDER BY entry_timestamp DESC LIMIT 50",
+        (aid,),
+    ).fetchall()
+
+    thesis_version = agent.get("current_thesis_version", 1)
+    thesis_path = Path("agents/theses") / f"{aid}_v{thesis_version}.md"
+    try:
+        thesis_text = thesis_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        thesis_text = "Thesis file not found."
+
+    return templates.TemplateResponse(
+        "agent_detail.html",
+        {
+            "request": request,
+            "agent": agent,
+            "account": account_dict,
+            "max_drawdown": max_dd,
+            "metrics": metrics,
+            "open_positions": [dict(p) for p in open_positions],
+            "trade_history": [dict(t) for t in trade_history],
+            "thesis_version": thesis_version,
+            "thesis_text": thesis_text,
+            "data_source": data_source,
+            "exchange_ok": exchange_ok,
+        },
+    )
+
+
+@app.get("/api/agents/{name}")
+async def api_agent_detail(name: str):
+    conn = app.state.conn
+    agent = conn.execute("SELECT * FROM agents WHERE id = ?", (name,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    aid = agent["id"]
+    account = conn.execute(
+        "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+        (aid,),
+    ).fetchone()
+    metrics = compute_metrics(conn, aid)
+    pos_count = conn.execute(
+        "SELECT COUNT(*) FROM positions WHERE agent_id = ?", (aid,)
+    ).fetchone()[0]
+    return {
+        "name": aid,
+        "status": agent["status"],
+        "spawn_date": agent["spawn_date"],
+        "metrics": {
+            "win_rate": metrics["win_rate"],
+            "profit_factor": metrics["profit_factor"],
+            "sharpe": metrics["sharpe"],
+            "closed_trades": metrics["closed_trades"],
+            "last_7d_return": metrics.get("last_7d_return", 0.0),
+        },
+        "balance": account["balance"] if account else 50000.0,
+        "open_positions_count": pos_count,
+    }
 
 
 @app.post("/api/positions/{position_id}/close")
@@ -226,7 +437,9 @@ async def api_close_position(position_id: str):
     provider = getattr(app.state, "provider", None)
     config = getattr(app.state, "config", None)
 
-    bridge = PaperBridge(agent_id="jade_hawk", conn=conn, provider=provider, config=config)
+    bridge = PaperBridge(
+        agent_id="jade_hawk", conn=conn, provider=provider, config=config
+    )
     result = await bridge.close(position_id, reason="manual_close")
     if not result:
         return JSONResponse({"error": "position not found"}, status_code=404)
@@ -242,3 +455,51 @@ async def api_trade_detail(trade_id: str):
     if trade is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(trade)
+
+
+@app.websocket("/api/ws/desk")
+async def ws_desk(websocket: WebSocket):
+    """Broadcast desk state summary every 30 seconds to connected clients."""
+    await websocket.accept()
+    conn = app.state.conn
+    try:
+        while True:
+            rows = conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
+            agents = []
+            for row in rows:
+                agent = dict(row)
+                aid = agent["id"]
+                account = conn.execute(
+                    "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+                    (aid,),
+                ).fetchone()
+                balance = account["balance"] if account else 50000.0
+                peak = account["peak_balance"] if account else 50000.0
+                metrics = compute_metrics(conn, aid)
+                pos_count = conn.execute(
+                    "SELECT COUNT(*) FROM positions WHERE agent_id = ?", (aid,)
+                ).fetchone()[0]
+                agents.append(
+                    {
+                        "name": aid,
+                        "status": agent["status"],
+                        "balance": round(balance, 2),
+                        "trades_count": metrics["closed_trades"],
+                        "win_rate": round(metrics["win_rate"], 4),
+                        "profit_factor": round(metrics["profit_factor"], 4)
+                        if metrics["profit_factor"] != float("inf")
+                        else 0.0,
+                        "sharpe": round(metrics["sharpe"], 4),
+                        "weekly_return": round(metrics.get("last_7d_return", 0.0), 4),
+                        "max_drawdown": round((peak - balance) / peak, 4)
+                        if peak > 0
+                        else 0.0,
+                        "open_positions_count": pos_count,
+                    }
+                )
+            await websocket.send_json(agents)
+            await asyncio.sleep(30)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass

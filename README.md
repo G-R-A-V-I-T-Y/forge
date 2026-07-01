@@ -16,6 +16,9 @@ python forge.py
 ```
 
 Open http://localhost:8000 to see jade_hawk making stub trades every 60 seconds.
+On a fresh database `forge.py` seeds just `jade_hawk`; run
+`python scripts/fresh_start.py` first to reset and launch the full 8-agent
+desk instead (see [Multi-Agent Desk](#multi-agent-desk)).
 
 ## Requirements
 
@@ -82,10 +85,54 @@ and `format_trades_summary()` (LLM-readable text block for agent prompts). The s
 Run `scripts/verify_db_size.py` to confirm the SQLite file stays under the 50MB
 budget at 500 full trades.
 
+## Multi-Agent Desk
+
+`forge.py` reads every `ACTIVE`/`ROOKIE` agent row from SQLite at startup and
+launches one `AgentRuntime` per agent, each on its own APScheduler job. Wakes
+are staggered 30 seconds apart (agent index × 30s) to avoid simultaneous
+Hyperliquid API bursts. Each agent's wake interval is read from its
+`config_json` column on every tick (falling back to the desk default in
+`config.yaml`), so changing an agent's interval takes effect on its next wake
+without a restart; `AgentRuntime` reschedules its own APScheduler job when the
+interval changes.
+
+`store/positions.py` exposes `get_all_open_positions()` and
+`get_desk_positions_summary()`, giving every agent visibility into what every
+other agent currently holds. Competing positions — multiple agents in the same
+asset, including opposing directions — are allowed by design: divergent
+theses in the same asset are treated as signal and provide natural desk-wide
+hedging, so `risk/gate.py` does not block them.
+
+`meta/spawner.py` creates new agents: `spawn_agent()` inserts the agent row,
+writes the seed thesis file, and creates the starting paper account;
+`generate_agent_name()` picks an unused adjective_animal name;
+`check_against_graveyard()` is a stub that always reports the thesis as
+unique (a real similarity check lands in a later milestone).
+
+To reset the desk and seed all 8 initial agents (`iron_moth`, `jade_hawk`,
+`silver_basin`, `copper_vane`, `gray_finch`, `amber_wolf`, `steel_crane`,
+`onyx_heron`) with their seed theses:
+
+```bash
+python scripts/fresh_start.py
+```
+
+This deletes the existing `data/forge.db` (and any WAL/SHM sidecar files),
+re-initializes the schema, and seeds each agent via `spawn_agent()`. Pass
+`--yes` to skip the confirmation prompt. `python forge.py` will then launch
+all 8 agents concurrently.
+
+The `/` overview page shows a sortable leaderboard (click any column header)
+across all agents, and `/agents/{name}` shows a full detail page per agent.
+Both are backed by `GET /api/desk`, and `web/static/forge.js` opens a
+`WS /api/ws/desk` connection on page load that pushes the same desk summary
+every 30 seconds so the leaderboard updates live without a page reload.
+
 ## Milestones
 
 - **M1** (complete): Walking skeleton — stub LLM, stub market data, paper trading, web UI
 - **M2** (complete): Real Hyperliquid market data — `HyperliquidClient`, `MarketProvider`, `StubMarket`
 - **M3** (complete): Real LLM decisions (Qwen3.6-35B via Ollama) + performance metrics
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
-- **M5-M10**: Full system
+- **M5** (complete): Multi-agent desk — 8 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard + agent detail pages, `/api/desk`, `WS /api/ws/desk`
+- **M6-M10**: Full system

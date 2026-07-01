@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Forge &mdash; {{ agent.name }}{% endblock %}
+{% block content %}
+
+<h2>
+  <a href="/" style="color:#8b949e;text-decoration:none;">&larr; Desk</a>
+  {{ agent.name }}
+  <span class="badge badge-{{ agent.status }}">{{ agent.status.upper() }}</span>
+</h2>
+
+<div>
+  <div class="stat-card">
+    <div class="stat-label">Paper Balance</div>
+    <div class="stat-value" id="ag-balance">${{ "{:,.2f}".format(account.get('balance', 50000)) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Peak Balance</div>
+    <div class="stat-value">${{ "{:,.2f}".format(account.get('peak_balance', 50000)) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Current DD</div>
+    <div class="stat-value loss">{{ "{:.1%}".format(max_drawdown) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Trades (closed)</div>
+    <div class="stat-value">{{ metrics.closed_trades }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Win Rate</div>
+    <div class="stat-value {{ 'win' if metrics.win_rate >= 0.55 else ('loss' if metrics.win_rate > 0 else '') }}">
+      {{ "{:.1%}".format(metrics.win_rate) if metrics.win_rate > 0 else '—' }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Profit Factor</div>
+    <div class="stat-value {{ 'win' if metrics.profit_factor >= 1.4 else ('loss' if metrics.profit_factor > 0 else '') }}">
+      {{ "{:.2f}".format(metrics.profit_factor) if metrics.profit_factor > 0 else '—' }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Sharpe</div>
+    <div class="stat-value {{ 'win' if metrics.sharpe >= 1.5 else ('loss' if metrics.sharpe > 0 else '') }}">
+      {{ "{:.2f}".format(metrics.sharpe) if metrics.sharpe > 0 else '—' }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Weekly Return</div>
+    <div class="stat-value {{ 'win' if metrics.last_7d_return > 0 else ('loss' if metrics.last_7d_return < 0 else '') }}">
+      {{ "{:+.2%}".format(metrics.last_7d_return) if metrics.last_7d_return != 0 else '0.0%' }}
+    </div>
+  </div>
+</div>
+
+{% if open_positions %}
+<h2>Open Positions</h2>
+<table>
+  <tr>
+    <th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>Opened</th><th></th>
+  </tr>
+  {% for p in open_positions %}
+  <tr>
+    <td>{{ p.asset }}</td>
+    <td class="{{ 'win' if p.direction == 'long' else 'loss' }}">{{ p.direction.upper() }}</td>
+    <td>{{ "{:.4f}".format(p.entry_price) }}</td>
+    <td>{{ "{:.4f}".format(p.stop_loss_price) }}</td>
+    <td>{{ "{:.4f}".format(p.take_profit_price) }}</td>
+    <td>{{ "{:.0%}".format(p.position_size_pct) }}</td>
+    <td>{{ p.opened_at[:19] if p.opened_at else '' }}</td>
+    <td><button onclick="closePos('{{ p.id }}')">Close</button></td>
+  </tr>
+  {% endfor %}
+</table>
+<script>
+function closePos(id) {
+  if (!confirm('Close this position?')) return;
+  fetch('/api/positions/' + id + '/close', { method: 'POST' })
+    .then(function(r) { location.reload(); })
+    .catch(function(e) { alert(e.message); });
+}
+</script>
+{% endif %}
+
+<h2>Performance</h2>
+<table>
+  <tr><th>Metric</th><th>All Time</th><th>Last 20</th><th>Last 7 Days</th></tr>
+  <tr>
+    <td>Win Rate</td>
+    <td>{{ "{:.1%}".format(metrics.win_rate) if metrics.win_rate > 0 else '—' }}</td>
+    <td>{{ "{:.1%}".format(metrics.last_20_win_rate) if metrics.last_20_win_rate > 0 else '—' }}</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td>Profit Factor</td>
+    <td>{{ "{:.2f}".format(metrics.profit_factor) if metrics.profit_factor > 0 else '—' }}</td>
+    <td>{{ "{:.2f}".format(metrics.last_20_pf) if metrics.last_20_pf > 0 else '—' }}</td>
+    <td>—</td>
+  </tr>
+  <tr>
+    <td>Avg Win</td>
+    <td>{{ "{:+.2%}".format(metrics.avg_win_pct) if metrics.avg_win_pct != 0 else '—' }}</td>
+    <td colspan="2">—</td>
+  </tr>
+  <tr>
+    <td>Avg Loss</td>
+    <td>{{ "{:.2%}".format(metrics.avg_loss_pct) if metrics.avg_loss_pct != 0 else '—' }}</td>
+    <td colspan="2">—</td>
+  </tr>
+  <tr>
+    <td>Best Trade</td>
+    <td>{{ "{:+.2%}".format(metrics.best_trade_pct) if metrics.best_trade_pct != 0 else '—' }}</td>
+    <td colspan="2">—</td>
+  </tr>
+  <tr>
+    <td>Worst Trade</td>
+    <td>{{ "{:.2%}".format(metrics.worst_trade_pct) if metrics.worst_trade_pct != 0 else '—' }}</td>
+    <td colspan="2">—</td>
+  </tr>
+</table>
+
+{% if trade_history %}
+<h2>Trade History</h2>
+<table id="trade-history">
+  <tr>
+    <th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Result</th><th>Hypothesis</th><th>Time</th>
+  </tr>
+  {% for t in trade_history %}
+  <tr>
+    <td>{{ t.asset }}</td>
+    <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
+    <td>{{ "{:.4f}".format(t.entry_price) if t.entry_price else '—' }}</td>
+    <td>{{ "{:.4f}".format(t.exit_price) if t.exit_price else '—' }}</td>
+    <td class="{{ 'win' if (t.pnl_pct or 0) > 0 else ('loss' if (t.pnl_pct or 0) < 0 else '') }}">
+      {{ "{:+.2%}".format(t.pnl_pct) if t.pnl_pct is not none else '—' }}
+    </td>
+    <td>{{ t.result.upper() if t.result else (t.status.upper() if t.status else '—') }}</td>
+    <td style="font-size:11px;color:#8b949e;max-width:300px;overflow:hidden;text-overflow:ellipsis;">
+      {{ t.hypothesis[:80] if t.hypothesis else '—' }}
+    </td>
+    <td style="font-size:11px">{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Thesis</h2>
+<div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-top:8px;">
+  <div style="color:#8b949e;font-size:11px;margin-bottom:8px;">
+    Version {{ thesis_version }} &mdash;
+    <a href="#" style="color:#58a6ff;">View history</a>
+    (M6 feature)
+  </div>
+  <pre style="white-space:pre-wrap;color:#e6edf3;font-size:13px;background:#0d1117;padding:12px;border-radius:4px;">{{ thesis_text }}</pre>
+</div>
+
+<div style="margin-top:16px;display:flex;gap:8px;">
+  <button onclick="alert('Reflection triggered (M6 feature placeholder)')" style="background:#1f6feb;color:#fff;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;">Reflect Now</button>
+  <button onclick="alert('Promote to Shadow (M9 feature placeholder)')" style="background:#6e40c9;color:#fff;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;">Promote to Shadow</button>
+  <button onclick="alert('Go Live (M9 feature placeholder)')" style="background:#f0883e;color:#0d1117;border:none;border-radius:4px;padding:6px 14px;cursor:pointer;">Go Live</button>
+</div>
+
+{% endblock %}

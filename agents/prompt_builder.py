@@ -1,11 +1,17 @@
 from store.db import get_trades, get_positions, get_latest_account
 from store.performance import compute_metrics, format_performance_summary
 from store.query import query_trades, summarize
+from store.positions import get_desk_positions_summary
 
 
-async def build_decision_prompt(agent_id: str, thesis_text: str,
-                                market_state: dict, conn, provider,
-                                starting_balance: float = 50000.0) -> str:
+async def build_decision_prompt(
+    agent_id: str,
+    thesis_text: str,
+    market_state: dict,
+    conn,
+    provider,
+    starting_balance: float = 50000.0,
+) -> str:
     account = get_latest_account(conn, agent_id, "paper") or {
         "balance": starting_balance,
         "peak_balance": starting_balance,
@@ -30,7 +36,9 @@ async def build_decision_prompt(agent_id: str, thesis_text: str,
             f"  {t['asset']} {t['direction']} | PnL: {pnl:+.2%} | "
             f"exit: {t.get('exit_reason', '?')}{pm}"
         )
-    trades_section = "\n".join(trade_lines) if trade_lines else "  No closed trades yet."
+    trades_section = (
+        "\n".join(trade_lines) if trade_lines else "  No closed trades yet."
+    )
 
     pos_lines = []
     for p in open_positions:
@@ -39,6 +47,8 @@ async def build_decision_prompt(agent_id: str, thesis_text: str,
             f"SL: {p['stop_loss_price']:.4f} | TP: {p['take_profit_price']:.4f}"
         )
     positions_section = "\n".join(pos_lines) if pos_lines else "  No open positions."
+
+    desk_positions = get_desk_positions_summary(conn, exclude_agent_id=agent_id)
 
     assets_only = {k: v for k, v in market_state.items() if isinstance(v, dict)}
     sorted_assets = sorted(
@@ -76,6 +86,9 @@ Account: ${balance:,.2f} | Peak: ${peak:,.2f} | Current DD: {dd_pct:.1%}
 === YOUR OPEN POSITIONS ===
 {positions_section}
 
+=== DESK POSITIONS (other traders) ===
+{desk_positions}
+
 === MARKET REGIME ===
 {regime}
 
@@ -94,21 +107,32 @@ You may:
 Output JSON only."""
 
 
-def _build_trade_bank_section(conn, agent_id: str, regime: str, top_asset: str | None) -> str:
+def _build_trade_bank_section(
+    conn, agent_id: str, regime: str, top_asset: str | None
+) -> str:
     """Trade bank query section: the agent's own recent trades under similar
     conditions (same asset OR same regime), plus a cross-agent pattern
     reference for the most active asset right now. Queries store/query.py.
     """
     own_by_regime = query_trades(
-        conn, agent_id=agent_id, regime=regime, status="closed",
-        decode_ohlcv=False, limit=5,
+        conn,
+        agent_id=agent_id,
+        regime=regime,
+        status="closed",
+        decode_ohlcv=False,
+        limit=5,
     )
     own_by_asset = (
         query_trades(
-            conn, agent_id=agent_id, asset=top_asset, status="closed",
-            decode_ohlcv=False, limit=5,
+            conn,
+            agent_id=agent_id,
+            asset=top_asset,
+            status="closed",
+            decode_ohlcv=False,
+            limit=5,
         )
-        if top_asset else []
+        if top_asset
+        else []
     )
     similar = {t["id"]: t for t in own_by_regime + own_by_asset}
     similar_trades = sorted(
@@ -123,13 +147,21 @@ def _build_trade_bank_section(conn, agent_id: str, regime: str, top_asset: str |
             f"PnL: {pnl:+.2%} | result={t.get('result') or '?'}"
         )
     own_summary = summarize(similar_trades)
-    own_block = "\n".join(lines) if lines else "  No matching trades yet (same asset or regime)."
+    own_block = (
+        "\n".join(lines)
+        if lines
+        else "  No matching trades yet (same asset or regime)."
+    )
 
     cross_block = "  No cross-agent data yet."
     if top_asset:
         cross_trades = query_trades(
-            conn, agent_id=None, asset=top_asset, status="closed",
-            decode_ohlcv=False, limit=100,
+            conn,
+            agent_id=None,
+            asset=top_asset,
+            status="closed",
+            decode_ohlcv=False,
+            limit=100,
         )
         cross_summary = summarize(cross_trades)
         if cross_summary["closed_count"]:
