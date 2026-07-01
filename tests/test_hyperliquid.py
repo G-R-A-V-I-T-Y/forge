@@ -94,3 +94,32 @@ async def test_get_mid_price_returns_float():
     async with HyperliquidClient() as client:
         mid = await client.get_mid_price("BTC")
     assert mid == 65000.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_funding_history_casts_fundingrate_and_premium_to_float():
+    # Hyperliquid's real fundingHistory endpoint returns fundingRate/premium
+    # as JSON strings, not numbers — get_funding_history() must cast them,
+    # same as get_funding_rate() already does for "funding".
+    respx.post(BASE).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"coin": "BTC", "fundingRate": "0.0001", "premium": "0.00005", "time": 1000},
+                {"coin": "BTC", "fundingRate": "-0.0002", "premium": "-0.00006", "time": 2000},
+            ],
+        )
+    )
+    async with HyperliquidClient() as client:
+        history = await client.get_funding_history("BTC-PERP", 0)
+
+    assert len(history) == 2
+    for entry in history:
+        assert isinstance(entry["fundingRate"], float)
+        assert isinstance(entry["premium"], float)
+    assert history[0]["fundingRate"] == pytest.approx(0.0001)
+    assert history[1]["premium"] == pytest.approx(-0.00006)
+    # Non-numeric fields are left untouched
+    assert history[0]["coin"] == "BTC"
+    assert history[0]["time"] == 1000
