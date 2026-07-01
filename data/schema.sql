@@ -51,16 +51,14 @@ CREATE TABLE IF NOT EXISTS trades (
     confidence REAL,
     expected_value TEXT,
     agent_postmortem TEXT,
-    ohlcv_15m_blob BLOB,
-    ohlcv_1h_blob BLOB,
-    ohlcv_4h_blob BLOB,
-    funding_rate_current REAL,
-    funding_rate_8h_history TEXT,
-    open_interest_usd REAL,
-    open_interest_24h_change_pct REAL,
-    liquidation_volume_1h_usd REAL,
-    liquidation_direction_dominant TEXT,
+    ohlcv_15m_40_blob BLOB,
+    ohlcv_1h_20_blob BLOB,
+    ohlcv_4h_10_blob BLOB,
+    funding_history_blob BLOB,
+    oi_data_json TEXT,
+    liquidation_data_json TEXT,
     regime TEXT,
+    expected_value_text TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 

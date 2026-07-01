@@ -161,7 +161,7 @@ A single SQLite file (`data/forge.db`) holds all persistent state. No database s
 - `theses` — all thesis versions, all agents, including terminated ones
 - `trades` — full fingerprint for every trade ever made
 - `accounts` — per-agent account balance history (paper and live)
-- `positions` — currently open positions (all agents, for competing-position detection)
+- `positions` — currently open positions (all agents, for desk-wide position visibility)
 - `reflections` — log of every thesis reflection: evidence, research, proposed changes, adversarial critique, outcome
 - `evaluations` — meta-controller evaluation results per agent per cycle
 - `settings` — desk-wide and per-agent settings (editable from web UI)
@@ -178,7 +178,7 @@ Stateless Python validator. Every trade decision passes through it before execut
 - Maximum position size: 20% of account per trade (configurable lower)
 - Maximum concurrent open positions per agent: 3
 - Drawdown kill: if agent account drops >15% from peak, all positions closed, agent suspended
-- Competing position: if any other active agent holds a position in the same asset, entry is blocked
+- Competing position: agents may hold positions in the same asset as other agents (including opposing directions) — competing positions are valid signal and naturally hedge the desk
 
 No exceptions. Not for high-confidence trades. Not for "exceptional" market conditions.
 
@@ -290,7 +290,7 @@ DESK POSITIONS (other traders):
   gray_finch:   SHORT BTC @ $65,100 (-0.3%)  — entry 45m ago
 ```
 
-Agents cannot enter a position in any asset already held by another agent (any direction).
+Agents may hold positions in the same asset as other agents, including opposing directions. Competing positions represent divergent theses and provide natural portfolio hedging.
 
 **6. Current market state**
 
@@ -623,7 +623,7 @@ forge/
 │   ├── db.py                     ← SQLite connection + CRUD helpers
 │   ├── fingerprint.py            ← write/query/update trade fingerprints
 │   ├── performance.py            ← rolling metric calculation from SQLite
-│   ├── positions.py              ← desk position registry (competing position detection)
+│   ├── positions.py              ← desk position registry (all open positions across the desk)
 │   └── query.py                  ← structured query builder for trade bank
 │
 ├── meta/
@@ -762,13 +762,13 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ### Milestone 5 — Multi-Agent Desk
 
-**Goal:** All 8 initial agents run simultaneously. Competing position detection is active. The leaderboard shows all agents. No two agents hold the same asset at the same time.
+**Goal:** All 8 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
 
 **You can verify:** Watch the leaderboard update live. Trigger two agents to want the same asset — confirm one is blocked. Click into any agent to see their individual detail page.
 
 **Tasks:**
-1. Implement `store/positions.py`: `get_all_open_positions()` returns all open positions across all agents; `is_asset_held(asset)` checks if any agent currently holds a position in that asset
-2. Add competing position check to `risk/gate.py`: before approving any entry, call `is_asset_held(asset)` — raise `RiskViolation("competing_position: {asset} held by {agent_id}")` if true
+1. Implement `store/positions.py`: `get_all_open_positions()` returns all open positions across all agents for desk-wide visibility
+2. Remove the competing position check from `risk/gate.py`: competing positions are allowed — divergent theses in the same asset are signal and provide natural desk-wide hedging
 3. Add "DESK POSITIONS" section to `agents/prompt_builder.py`: shows all other agents' current positions (formatted as in the design doc above)
 4. Implement `meta/spawner.py`: `spawn_agent(name, seed_thesis_text, config_overrides)` — creates agent record in SQLite, writes thesis file, registers in scheduler
 5. Run `scripts/fresh_start.py`: initialize all 8 agents with their seed theses; document in README
@@ -779,9 +779,9 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 10. Add agent status badge (ROOKIE / ACTIVE / SUSPENDED / SHADOW / LIVE) with color coding
 11. Add `/api/desk` endpoint: returns JSON summary of all agents' current state (for WebSocket broadcasts)
 12. Broadcast desk state update via WebSocket every 30 seconds; update leaderboard table in-place without page reload
-13. Test: manually trigger two agents to evaluate the same asset simultaneously; confirm one is blocked by the competing position gate and the reason is logged
+13. Test: manually trigger two agents to evaluate the same asset simultaneously; confirm both can enter positions (same or opposing direction) and the desk position registry records both correctly
 
-**Done when:** 8 agents running simultaneously. Leaderboard updates live. Competing position detection confirmed working. All agent detail pages accessible.
+**Done when:** 8 agents running simultaneously. Leaderboard updates live. Competing positions visible and correctly recorded across the desk. All agent detail pages accessible.
 
 ---
 
@@ -911,7 +911,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 | Risk | Mitigation |
 |---|---|
 | Agents overfit to recent noise | 7-layer anti-overfitting system in thesis loop |
-| All agents converge on same thesis | Competing position blocking forces distinct focus; diversity spawns maintain breadth; Head of Desk flags thesis convergence |
+| All agents converge on same thesis | Competing positions provide signal when theses diverge; diversity spawns maintain breadth; Head of Desk flags thesis convergence |
 | Regime shift breaks all agents simultaneously | Regime tagging surfaces regime-specific strategies; meta-controller suspends agents failing in new regime |
 | Hyperliquid API downtime | Circuit breaker; agents skip cycle on unavailability; positions monitored by separate process |
 | Qwen inference too slow for 15m cadence | 30s hard timeout; async execution; "do nothing" fallback preserves account safety |
