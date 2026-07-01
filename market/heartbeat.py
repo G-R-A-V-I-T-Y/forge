@@ -13,11 +13,12 @@ docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md for the
 full field list and the documented approximations (OI-history sampling,
 BTC-dominance-within-tracked-universe, Fear & Greed third-party fetch).
 
-Task B — wiring `agents/decision_loop.py`, `execution/paper_bridge.py`, and
-the `/api/prices` web ticker to read this file instead of calling the
-provider directly, and actually applying `wake_interval_seconds` to the
-scheduler — is a separate follow-up PR. This module is NOT wired into
-`forge.py`'s scheduler here.
+Task B wires `agents/decision_loop.py`, `execution/paper_bridge.py`, and the
+`/api/prices` web ticker to read this file (via `read_heartbeat_or_none()`
+below) instead of calling the provider directly, applies
+`wake_interval_seconds` to the agent scheduler, and schedules
+`generate_heartbeat()` itself in `forge.py`. See
+docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md.
 """
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ from datetime import datetime, timezone
 import httpx
 import numpy as np
 import pandas as pd
+
+from market.regime import classify_regime
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,12 @@ OI_HISTORY_PATH = "data/heartbeat_oi_history.json"
 OI_HISTORY_MAX_SAMPLES = 100
 
 DEFAULT_HEARTBEAT_PATH = "data/heartbeat.json"
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 300
+
+# Daily-candle lookback used only for the categorical regime tag
+# (classify_regime() needs ~30 days of BTC daily candles; the 5m/25h
+# universe fetch above is unrelated and not reused here).
+REGIME_LOOKBACK_DAYS = 30
 
 BTC_ASSET = "BTC-PERP"
 
@@ -508,6 +517,7 @@ def _compute_regime(
     cross_asset: dict,
     oi_history_after: dict[str, list[float]],
     fear_index: int | None,
+    regime_tag: str,
 ) -> dict:
     # btc_dominance: Hyperliquid has no market-wide dominance endpoint. This
     # approximates dominance WITHIN THE TRACKED UNIVERSE only (BTC OI / sum
@@ -560,7 +570,23 @@ def _compute_regime(
         "market_breadth": market_breadth,
         "risk_on_score": risk_on_score,
         "trend_score": trend_score,
+        "regime_tag": regime_tag,
     }
+
+
+async def _fetch_regime_tag(provider) -> str:
+    """Categorical regime tag (trending_bull/trending_bear/range_low_vol/
+    range_high_vol/crisis) from classify_regime() on BTC daily candles.
+    Fetched once per heartbeat cycle, not per-agent, so downstream consumers
+    (fingerprints, trade-bank queries) keep the categorical tag they depend
+    on without any consumer calling the provider directly. Never raises —
+    degrades to the classifier's own low-data default."""
+    try:
+        btc_1d = await provider.get_ohlcv(BTC_ASSET, "1d", REGIME_LOOKBACK_DAYS)
+        return classify_regime(btc_1d or [])
+    except Exception:
+        logger.warning("heartbeat: BTC daily OHLCV fetch failed for regime_tag", exc_info=True)
+        return classify_regime([])
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +657,43 @@ def read_heartbeat(path: str) -> dict | None:
         return None
 
 
+def read_heartbeat_or_none(path: str, max_age_seconds: float) -> dict | None:
+    """Staleness-aware wrapper around read_heartbeat(). Returns None (never
+    raises) if the file is missing, unparseable, has no/garbled `timestamp`,
+    or is older than `max_age_seconds`. Task B's consumers (decision loop,
+    paper bridge, /api/prices) all use this instead of read_heartbeat()
+    directly so a stale packet is treated the same as a missing one."""
+    packet = read_heartbeat(path)
+    if packet is None:
+        return None
+    timestamp = packet.get("timestamp")
+    if not timestamp:
+        logger.warning("heartbeat at %s has no timestamp field", path)
+        return None
+    try:
+        written_at = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except (ValueError, TypeError):
+        logger.warning("heartbeat at %s has unparseable timestamp %r", path, timestamp)
+        return None
+    age_seconds = (datetime.now(timezone.utc) - written_at).total_seconds()
+    if age_seconds > max_age_seconds:
+        logger.warning(
+            "heartbeat at %s is stale (%.0fs old, max %.0fs)", path, age_seconds, max_age_seconds
+        )
+        return None
+    return packet
+
+
+def heartbeat_max_age_seconds(config: dict) -> float:
+    """Shared staleness-cutoff policy: tolerate one missed cycle before
+    calling the heartbeat stale."""
+    desk_cfg = config.get("desk", {})
+    interval = desk_cfg.get("heartbeat_interval_seconds", DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
+    return 2 * interval
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -654,6 +717,7 @@ async def generate_heartbeat(provider, config: dict) -> dict:
             return asset, await _fetch_asset_snapshot(provider, asset)
 
     fear_index_task = asyncio.create_task(_fetch_fear_greed())
+    regime_tag_task = asyncio.create_task(_fetch_regime_tag(provider))
     raw_results = await asyncio.gather(*[_one(a) for a in universe])
 
     assets_fields: dict[str, dict] = {}
@@ -670,7 +734,8 @@ async def generate_heartbeat(provider, config: dict) -> dict:
 
     cross_asset = _compute_cross_asset(assets_fields, asset_returns)
     fear_index = await fear_index_task
-    regime = _compute_regime(assets_fields, cross_asset, oi_history, fear_index)
+    regime_tag = await regime_tag_task
+    regime = _compute_regime(assets_fields, cross_asset, oi_history, fear_index, regime_tag)
 
     packet = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

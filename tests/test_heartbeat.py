@@ -20,7 +20,9 @@ from market.heartbeat import (
     compute_pca,
     correlation_matrix,
     generate_heartbeat,
+    heartbeat_max_age_seconds,
     read_heartbeat,
+    read_heartbeat_or_none,
     sector_strength,
     write_heartbeat,
 )
@@ -274,9 +276,11 @@ async def test_generate_heartbeat_end_to_end_structure(stub_config):
     for key in (
         "crypto_fear_index", "btc_dominance", "average_volatility", "average_funding",
         "average_oi_growth", "market_breadth", "risk_on_score", "trend_score",
+        "regime_tag",
     ):
         assert key in regime
     assert regime["crypto_fear_index"] == 42
+    assert isinstance(regime["regime_tag"], str) and regime["regime_tag"]
 
     # Atomic file was written and is readable back
     on_disk = read_heartbeat(stub_config["desk"]["heartbeat_path"])
@@ -296,3 +300,51 @@ async def test_generate_heartbeat_fear_greed_failure_is_graceful(stub_config):
     assert packet["regime"]["crypto_fear_index"] is None
     # Cycle still completed fully despite the third-party failure
     assert len(packet["assets"]) == len(stub_config["universe"])
+
+
+# ---------------------------------------------------------------------------
+# Staleness-aware reader
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_max_age_seconds_uses_config_interval():
+    assert heartbeat_max_age_seconds({"desk": {"heartbeat_interval_seconds": 300}}) == 600
+    assert heartbeat_max_age_seconds({}) == 600  # default 300s interval
+
+
+def test_read_heartbeat_or_none_missing_file_returns_none(tmp_path):
+    path = str(tmp_path / "does_not_exist.json")
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_malformed_json_returns_none(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not valid json")
+    assert read_heartbeat_or_none(str(path), max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_missing_timestamp_returns_none(tmp_path):
+    path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(path, {"assets": {}, "cross_asset": {}, "regime": {}})
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None
+
+
+def test_read_heartbeat_or_none_fresh_packet_returned(tmp_path):
+    from datetime import datetime, timezone
+    path = str(tmp_path / "heartbeat.json")
+    packet = {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "assets": {"BTC-PERP": {"price": 65000.0}},
+        "cross_asset": {},
+        "regime": {},
+    }
+    write_heartbeat(path, packet)
+    result = read_heartbeat_or_none(path, max_age_seconds=600)
+    assert result == packet
+
+
+def test_read_heartbeat_or_none_stale_packet_returns_none(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    path = str(tmp_path / "heartbeat.json")
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_heartbeat(path, {"timestamp": old_ts, "assets": {}, "cross_asset": {}, "regime": {}})
+    assert read_heartbeat_or_none(path, max_age_seconds=600) is None
