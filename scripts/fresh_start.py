@@ -493,13 +493,13 @@ SEED_AGENTS = [
         "database and made available to all agents at decision time:\n\n"
         "```json\n"
         "{\n"
-        "  \"regime\": \"trending_bull\",\n"
-        "  \"confidence\": 0.82,\n"
-        "  \"secondary\": {\"mean_reverting\": 0.12, \"high_vol\": 0.06},\n"
-        "  \"reasoning\": \"BTC ADX at 32 with 4 consecutive 4h higher highs. \"\n"
-        "    \"Funding neutral. OI rising 6% across the desk. \"\n"
-        "    \"No elevated liquidation activity. Correlation at 0.75.\",\n"
-        "  \"classifier_version\": 1\n"
+        '  "regime": "trending_bull",\n'
+        '  "confidence": 0.82,\n'
+        '  "secondary": {"mean_reverting": 0.12, "high_vol": 0.06},\n'
+        '  "reasoning": "BTC ADX at 32 with 4 consecutive 4h higher highs. "\n'
+        '    "Funding neutral. OI rising 6% across the desk. "\n'
+        '    "No elevated liquidation activity. Correlation at 0.75.",\n'
+        '  "classifier_version": 1\n'
         "}\n"
         "```\n\n"
         "## Interaction with Other Agents\n\n"
@@ -609,11 +609,11 @@ SEED_AGENTS = [
         "a likely regime transition. Its output is a set of confidence "
         "multipliers for each other agent -- a recommendation of how much "
         "to trust each strategy given the current market state.\n\n"
-        "Over time, crimson_fox develops a meta-model: \"In trending_bull "
+        'Over time, crimson_fox develops a meta-model: "In trending_bull '
         "regimes, iron_moth has a 68% win rate with 1.9 Sharpe. When funding "
         "is extreme, silver_basin's mean-reversion produces 72% win rates "
         "but only in the first 4 hours. In low_vol regimes, gray_finch and\n"
-        "amber_wolf both underperform -- reduce allocation to 0.5x.\" This\n"
+        'amber_wolf both underperform -- reduce allocation to 0.5x." This\n'
         "meta-knowledge may become the highest-Sharpe signal on the desk,\n"
         "as it compounds the edge of every other strategy through dynamic\n"
         "allocation.\n\n"
@@ -637,31 +637,31 @@ SEED_AGENTS = [
         "to all agents at decision time:\n\n"
         "```json\n"
         "{\n"
-        "  \"as_of\": \"2026-06-30T12:00:00Z\",\n"
-        "  \"regime\": \"trending_bull\",\n"
-        "  \"regime_confidence\": 0.82,\n"
-        "  \"multipliers\": {\n"
-        "    \"iron_moth\": 1.2,\n"
-        "    \"silver_basin\": 0.6,\n"
-        "    \"copper_vane\": 1.0,\n"
-        "    \"gray_finch\": 1.1,\n"
-        "    \"amber_wolf\": 1.0,\n"
-        "    \"steel_crane\": 0.8,\n"
-        "    \"onyx_heron\": 0.5,\n"
-        "    \"jade_hawk\": 1.0,\n"
-        "    \"violet_lion\": 1.0\n"
+        '  "as_of": "2026-06-30T12:00:00Z",\n'
+        '  "regime": "trending_bull",\n'
+        '  "regime_confidence": 0.82,\n'
+        '  "multipliers": {\n'
+        '    "iron_moth": 1.2,\n'
+        '    "silver_basin": 0.6,\n'
+        '    "copper_vane": 1.0,\n'
+        '    "gray_finch": 1.1,\n'
+        '    "amber_wolf": 1.0,\n'
+        '    "steel_crane": 0.8,\n'
+        '    "onyx_heron": 0.5,\n'
+        '    "jade_hawk": 1.0,\n'
+        '    "violet_lion": 1.0\n'
         "  },\n"
-        "  \"reasoning\": \"In trending_bull regimes (N=85 trades over 14\n"
+        '  "reasoning": "In trending_bull regimes (N=85 trades over 14\n'
         "    days), iron_moth shows 1.9 Sharpe and 68% WR -- momentum over-\n"
         "    performs. silver_basin has 0.8 Sharpe -- funding extremes are\n"
         "    less reliable in strong trends. onyx_heron is at 0.5x as mean-\n"
-        "    reversion pairs underperform in directional markets.\",\n"
-        "  \"analysis_version\": 12\n"
+        '    reversion pairs underperform in directional markets.",\n'
+        '  "analysis_version": 12\n'
         "}\n"
         "```\n\n"
         "## Output Integration\n\n"
         "- Every other agent receives its multiplier in the decision prompt:\n"
-        "  \"crimson_fox confidence multiplier for your strategy: 1.2x\"\n"
+        '  "crimson_fox confidence multiplier for your strategy: 1.2x"\n'
         "- Agents are encouraged (not required) to scale their conviction by\n"
         "  this multiplier when sizing\n"
         "- The risk gate does not enforce multipliers -- they are advisory\n"
