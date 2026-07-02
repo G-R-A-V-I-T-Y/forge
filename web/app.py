@@ -32,6 +32,21 @@ logger = logging.getLogger("forge.web")
 data_source_map = {"stub": "STUB", "hyperliquid": "LIVE"}
 
 
+def _resolve_model_used(conn, agent_id: str, last_model_used: str | None) -> str | None:
+    """Resolve the display model for a trader: prefer last_model_used from the
+    agents table, falling back to the model used on the agent's most recent
+    trade (trades.model_used). This ensures the column shows meaningful data
+    even when the agent-level field hasn't been populated yet (e.g. after a
+    fresh checkout that replaced the tracked database)."""
+    if last_model_used:
+        return last_model_used
+    row = conn.execute(
+        "SELECT model_used FROM trades WHERE agent_id = ? AND model_used IS NOT NULL ORDER BY entry_timestamp DESC LIMIT 1",
+        (agent_id,),
+    ).fetchone()
+    return row["model_used"] if row else None
+
+
 @app.get("/", response_class=HTMLResponse)
 async def overview(request: Request):
     conn = app.state.conn
@@ -72,7 +87,7 @@ async def overview(request: Request):
                 "weekly_return": metrics.get("last_7d_return", 0.0),
                 "max_drawdown": (peak - bal) / peak if peak > 0 else 0.0,
                 "open_positions_count": pos_count,
-                "last_model_used": agent.get("last_model_used"),
+                "last_model_used": _resolve_model_used(conn, aid, agent.get("last_model_used")),
             }
         )
 
@@ -372,7 +387,7 @@ async def api_desk():
                 "weekly_return": round(weekly_return, 4),
                 "max_drawdown": round((peak - balance) / peak, 4) if peak > 0 else 0.0,
                 "open_positions_count": pos_count,
-                "last_model_used": agent.get("last_model_used"),
+                "last_model_used": _resolve_model_used(conn, aid, agent.get("last_model_used")),
             }
         )
     return agents
@@ -552,7 +567,7 @@ async def ws_desk(websocket: WebSocket):
                         if peak > 0
                         else 0.0,
                         "open_positions_count": pos_count,
-                        "last_model_used": agent.get("last_model_used"),
+                        "last_model_used": _resolve_model_used(conn, aid, agent.get("last_model_used")),
                     }
                 )
             await websocket.send_json(agents)
