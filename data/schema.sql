@@ -6,7 +6,10 @@ CREATE TABLE IF NOT EXISTS agents (
     cull_date TEXT,
     config_json TEXT NOT NULL DEFAULT '{}',
     current_thesis_version INTEGER NOT NULL DEFAULT 1,
-    last_model_used TEXT
+    last_model_used TEXT,
+    wallet_address TEXT,
+    keystore_path TEXT,
+    live_enabled INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS theses (

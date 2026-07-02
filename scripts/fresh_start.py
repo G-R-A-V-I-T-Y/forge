@@ -481,6 +481,7 @@ SEED_AGENTS = [
         "Primary: SOL, ETH, AVAX, LINK (clean VWAP behaviour, consistent mean reversion)\n"
         "Secondary: BTC (tight VWAP bands, lower edge per trade)\n"
         "Avoid: PEPE, DOGE, WIF, TRUMP (noisy price action, VWAP less reliable as gravity)\n",
+    ),
     (
         "violet_lion",
         "# violet_lion -- Thesis v1: Volatility Regime Trader\n\n"
@@ -555,6 +556,7 @@ SEED_AGENTS = [
         "Primary: SOL, ETH, SUI (clean vol cycles, reliable compression/expansion patterns)\n"
         "Secondary: BTC (lower vol variance, but tighter compression signals)\n"
         "Avoid: Low-liquidity perps (PEPE, WIF, TRUMP) -- vol is permanently elevated, making compression signals unreliable\n",
+    ),
     (
         "crimson_fox",
         "# crimson_fox -- Thesis v1: Session Pattern Arbitrage\n\n"
@@ -632,6 +634,7 @@ SEED_AGENTS = [
         "Primary: BTC, ETH (most consistent session behaviour across all time windows)\n"
         "Secondary: SOL (growing session consistency, particularly in US hours)\n"
         "Avoid: Small-cap perps -- session patterns are unreliable when the asset itself drives the flow rather than macro session dynamics\n",
+    ),
 ]
 
 

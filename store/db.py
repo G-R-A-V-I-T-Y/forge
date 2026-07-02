@@ -54,6 +54,9 @@ _TRADES_MIGRATION_COLUMNS = {
 # against a pre-existing agents table, so this must be backfilled too.
 _AGENTS_MIGRATION_COLUMNS = {
     "last_model_used": "TEXT",
+    "wallet_address": "TEXT",
+    "keystore_path": "TEXT",
+    "live_enabled": "INTEGER DEFAULT 0",
 }
 
 
