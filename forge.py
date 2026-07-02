@@ -92,13 +92,22 @@ async def _spawn_agent_runner(
         stderr=asyncio.subprocess.PIPE,
     )
 
+    # Must exceed the worst-case total time for llm/model_chain.py's
+    # fallback chain: up to ~4 opencode tiers can hang/fail for the full
+    # OPENCODE_TIMEOUT_SECS (60s) each before falling through, plus the
+    # Ollama tier's own TIMEOUT_SECS (900s, see llm/ollama_client.py) —
+    # otherwise a real (but slow, e.g. queued behind other concurrent
+    # agents) Qwen answer gets killed here before it's ever captured.
+    AGENT_RUNNER_TIMEOUT_SECS = 1200
     try:
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=600
+            proc.communicate(), timeout=AGENT_RUNNER_TIMEOUT_SECS
         )
     except asyncio.TimeoutError:
         proc.kill()
-        logger.warning("[%s] Agent runner timed out after 600s", agent_id)
+        logger.warning(
+            "[%s] Agent runner timed out after %ds", agent_id, AGENT_RUNNER_TIMEOUT_SECS
+        )
         return {"agent_id": agent_id, "action": "timeout", "detail": ""}
 
     out_text = stdout.decode("utf-8", errors="replace")
