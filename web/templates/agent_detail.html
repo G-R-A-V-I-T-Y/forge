@@ -55,7 +55,7 @@
 <h2>Open Positions</h2>
 <table>
   <tr>
-    <th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>PnL%</th><th>Opened</th><th>Mode</th><th></th>
+    <th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>PnL%</th><th>Opened</th><th>Mode</th><th>Model</th><th></th>
   </tr>
   {% for p in open_positions %}
   <tr>
@@ -70,6 +70,7 @@
     </td>
     <td>{{ p.opened_at[:19] if p.opened_at else '' }}</td>
     <td><span class="badge badge-{{ p.mode }}">{{ p.mode.upper() }}</span></td>
+    <td style="font-size:11px;color:#8b949e">{{ p.model_used or '&mdash;' }}</td>
     <td><button onclick="closePos('{{ p.id }}')">Close</button></td>
   </tr>
   {% endfor %}
@@ -125,7 +126,7 @@ function closePos(id) {
 <h2>Trade History</h2>
 <table id="trade-history">
   <tr>
-    <th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Result</th><th>Mode</th><th>Hypothesis</th><th>Time</th>
+    <th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Result</th><th>Mode</th><th>Model</th><th>Hypothesis</th><th>Time</th>
   </tr>
   {% for t in trade_history %}
   <tr>
@@ -138,6 +139,7 @@ function closePos(id) {
     </td>
     <td>{{ t.result.upper() if t.result else (t.status.upper() if t.status else '—') }}</td>
     <td><span class="badge badge-{{ t.mode }}">{{ t.mode.upper() if t.mode else '' }}</span></td>
+    <td style="font-size:11px;color:#8b949e">{{ t.model_used or '&mdash;' }}</td>
     <td style="font-size:11px;color:#8b949e;max-width:300px;overflow:hidden;text-overflow:ellipsis;">
       {{ t.hypothesis[:80] if t.hypothesis else '—' }}
     </td>

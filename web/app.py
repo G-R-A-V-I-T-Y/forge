@@ -116,7 +116,9 @@ async def overview(request: Request):
                             t["pnl_pct"] = pnl
 
     positions = conn.execute(
-        "SELECT * FROM positions ORDER BY agent_id, opened_at"
+        "SELECT positions.*, trades.model_used AS model_used "
+        "FROM positions LEFT JOIN trades ON trades.id = positions.trade_id "
+        "ORDER BY positions.agent_id, positions.opened_at"
     ).fetchall()
     total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     return templates.TemplateResponse(
@@ -425,7 +427,10 @@ async def agent_detail(request: Request, name: str):
     metrics = compute_metrics(conn, aid)
 
     open_positions = conn.execute(
-        "SELECT * FROM positions WHERE agent_id = ?", (aid,)
+        "SELECT positions.*, trades.model_used AS model_used "
+        "FROM positions LEFT JOIN trades ON trades.id = positions.trade_id "
+        "WHERE positions.agent_id = ?",
+        (aid,),
     ).fetchall()
 
     trade_history = conn.execute(
