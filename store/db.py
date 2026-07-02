@@ -45,6 +45,8 @@ _TRADES_MIGRATION_COLUMNS = {
     "funding_rate_current": "REAL",
     "open_interest_24h_change_pct": "REAL",
     "model_used": "TEXT",
+    "fees_paid": "REAL",
+    "funding_paid": "REAL",
 }
 
 # Columns added by the model-fallback-chain feature. Same rationale as

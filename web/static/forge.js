@@ -109,6 +109,14 @@ function connectDeskWs() {
         var spVal = a.sharpe > 0 ? a.sharpe.toFixed(2) : '\u2014';
         var wrRet = a.weekly_return !== 0 ? (a.weekly_return * 100).toFixed(2) + '%' : '0.0%';
         var wrRetClass = a.weekly_return > 0 ? 'win' : (a.weekly_return < 0 ? 'loss' : '');
+        var modelHtml;
+        if (a.last_model_used === 'no model available') {
+          modelHtml = '<span class="badge" style="background:#f85149;color:#fff;">NO MODEL AVAILABLE</span>';
+        } else if (a.last_model_used) {
+          modelHtml = a.last_model_used;
+        } else {
+          modelHtml = '\u2014';
+        }
         var html = '<tr><td><a href="/agents/' + a.name + '">' + a.name + '</a></td>' +
           '<td>' + statusBadge + '</td>' +
           '<td>' + a.trades_count + '</td>' +
@@ -117,7 +125,8 @@ function connectDeskWs() {
           '<td class="' + spClass + '">' + spVal + '</td>' +
           '<td class="' + wrRetClass + '">' + wrRet + '</td>' +
           '<td class="loss">' + (a.max_drawdown * 100).toFixed(1) + '%</td>' +
-          '<td>' + a.open_positions_count + '</td></tr>';
+          '<td>' + a.open_positions_count + '</td>' +
+          '<td>' + modelHtml + '</td></tr>';
         if (oldRow) {
           oldRow.outerHTML = html;
         } else {
