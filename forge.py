@@ -27,7 +27,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from market import heartbeat
 from market.provider import MarketProvider
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
-from store.positions import get_all_open_positions, update_position_pnl
+from store.positions import get_all_open_positions, reconcile_positions, update_position_pnl
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -57,6 +57,9 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
     if assets_data:
         conn = get_connection(str(DB_PATH))
         try:
+            closed = await reconcile_positions(conn, assets_data, provider, config)
+            if closed:
+                logger.info("SL/TP reconciled %d position(s)", closed)
             update_position_pnl(conn, assets_data)
         except Exception:
             logger.warning(
@@ -184,11 +187,16 @@ async def main():
 
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     if agent_count == 0:
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        insert_agent(conn, "jade_hawk", "jade_hawk", now, "{}")
-        balance = desk_config["starting_balance"]
-        insert_account_snapshot(conn, "jade_hawk", "paper", balance, balance)
-        logger.info("Seeded default agent jade_hawk")
+        TRADER_NAMES = [
+            "jade_hawk", "crimson_fox", "amber_wolf", "cobalt_raven", "emerald_bear",
+            "silver_phoenix", "scarlet_viper", "golden_lion", "frost_unicorn", "storm_griffin",
+        ]
+        balance = desk_config.get("starting_balance", 1000.0)
+        for name in TRADER_NAMES:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            insert_agent(conn, name, name, now, "{}")
+            insert_account_snapshot(conn, name, "paper", balance, balance)
+        logger.info("Seeded %d default agents with $%.0f each", len(TRADER_NAMES), balance)
 
     web_app.state.conn = conn
     web_app.state.provider = provider

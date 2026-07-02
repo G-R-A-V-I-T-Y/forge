@@ -11,6 +11,7 @@ from store.db import (
     get_positions,
     get_latest_account,
 )
+from store.positions import execute_close, _parse_entry_ts
 from execution.bridge import TradingBridge
 
 
@@ -125,32 +126,26 @@ class PaperBridge(TradingBridge):
         asset = pos["asset"]
         exit_price = await self._fill_price(asset)
 
-        entry = pos["entry_price"]
-        if pos["direction"] == "long":
-            pnl_pct = (exit_price - entry) / entry * pos["leverage"]
-        else:
-            pnl_pct = (entry - exit_price) / entry * pos["leverage"]
-        pnl_usd = pos["notional_usd"] * pnl_pct
+        desk_config = (self.config or {}).get("desk", {})
+        heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+        max_age = heartbeat_max_age_seconds(self.config or {})
+        heartbeat = read_heartbeat_or_none(heartbeat_path, max_age)
+        funding_history = []
+        if heartbeat:
+            asset_data = (heartbeat.get("assets") or {}).get(asset, {})
+            funding_history = asset_data.get("funding_history", []) or []
 
-        now = _now()
-        account = await self.get_account()
-        new_balance = account["balance"] + pnl_usd
-        peak = max(account["peak"], new_balance)
+        taker_fee = desk_config.get("taker_fee", 0.00035)
 
-        with self.conn:
-            self.conn.execute(
-                """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
-                   exit_reason=?, pnl_pct=?, pnl_usd=?, result=? WHERE id=?""",
-                (exit_price, now, reason, pnl_pct, pnl_usd,
-                 "win" if pnl_pct > 0 else "loss", pos["trade_id"]),
-            )
-            self.conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
-            self.conn.execute(
-                "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, ?, ?, ?, ?)",
-                (self.agent_id, "paper", new_balance, peak, now),
-            )
-
-        return {"trade_id": pos["trade_id"], "exit_price": exit_price, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
+        return execute_close(
+            conn=self.conn,
+            position_id=position_id,
+            exit_price=exit_price,
+            reason=reason,
+            config={"taker_fee": taker_fee},
+            position_dict=pos,
+            funding_history=funding_history,
+        )
 
     async def get_account(self) -> dict:
         latest = get_latest_account(self.conn, self.agent_id, "paper")

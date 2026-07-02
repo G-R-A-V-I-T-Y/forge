@@ -147,3 +147,19 @@ tr.clickable {
 tr.clickable:hover td {
   background: #1c2128;
 }
+
+.badge-paper {
+  background: #21262d;
+  color: #8b949e;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.badge-live {
+  background: #1f6feb;
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
