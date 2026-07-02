@@ -3,7 +3,7 @@ import httpx
 import pytest
 import respx
 
-from llm.ollama_client import _extract_json, decide, MODEL, OLLAMA_URL
+from llm.ollama_client import _extract_json, decide, MODEL, OLLAMA_URL, TIMEOUT_SECS
 
 
 def test_extract_json_plain_object():
@@ -72,6 +72,17 @@ async def test_decide_falls_back_to_default_model_when_config_missing():
     sent_payload = route.calls.last.request.content
     import json as _json
     assert _json.loads(sent_payload)["model"] == MODEL == "qwen3.6:35b_optimized"
+
+
+def test_timeout_secs_gives_headroom_for_concurrent_agent_queueing():
+    # forge.py's fleet cycle spawns every agent (target_agent_count, up to
+    # 10) concurrently via asyncio.gather; when several agents fall through
+    # the opencode chain to this Ollama tier around the same time, their
+    # requests queue against the single local model instance. A single
+    # unloaded qwen3.6:35b request already measures 121-194s (see MODEL
+    # comment above), so a handful of queued requests can exceed a 300s
+    # timeout even though the Ollama server itself is up and healthy.
+    assert TIMEOUT_SECS >= 900.0
 
 
 @pytest.mark.asyncio

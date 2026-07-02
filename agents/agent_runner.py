@@ -30,6 +30,30 @@ from store.db import get_connection, get_agent
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_LOG_PATH = Path("data/forge.log")
+
+
+def _configure_logging(log_path: Path = DEFAULT_LOG_PATH) -> None:
+    """Set up stderr + persistent file logging for this agent subprocess.
+
+    llm/model_chain.py logs why each fallback-chain tier failed (timeout,
+    non-zero exit, invalid decision shape) via logger.warning(...). Without
+    a file handler those reasons only exist on this subprocess's stderr,
+    which forge.py only surfaces (truncated) on a non-zero exit — on a
+    normal exit (falling through to a working tier), they're lost. Multiple
+    agent subprocesses append to the same file concurrently; individual
+    warning lines are short enough that OS-level writes don't interleave
+    mid-line in practice, so no cross-process locking is used here.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handlers = [logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
 
 def _resolve_thesis(agent_id: str, agent_row: dict) -> str:
     version = agent_row.get("current_thesis_version", 1)
@@ -88,10 +112,7 @@ def main() -> None:
     parser.add_argument("--config-path", default="config.yaml")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    _configure_logging()
 
     result = asyncio.run(_run_once(args.agent_id, args.db_path, args.config_path))
 
