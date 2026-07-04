@@ -108,7 +108,7 @@ def test_tier_with_unparseable_json_falls_through():
             return _fake_completed_process(_ndjson_text_event("not valid json at all") + "\n")
         return _fake_completed_process(_valid_decision_ndjson())
 
-    with patch("subprocess.run", side_effect=side_effect) as mock_run:
+    with patch("subprocess.run", side_effect=side_effect):
         decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
 
     assert model_used == "DeepSeek V4 Flash Free"
@@ -123,7 +123,7 @@ def test_tier_with_missing_required_enter_fields_falls_through():
             return _fake_completed_process(incomplete)
         return _fake_completed_process(_valid_decision_ndjson())
 
-    with patch("subprocess.run", side_effect=side_effect) as mock_run:
+    with patch("subprocess.run", side_effect=side_effect):
         decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
 
     assert model_used == "DeepSeek V4 Flash Free"
@@ -135,7 +135,7 @@ def test_tier_error_event_falls_through():
             return _fake_completed_process('{"type":"error","error":{"name":"UnknownError"}}\n')
         return _fake_completed_process(_valid_decision_ndjson())
 
-    with patch("subprocess.run", side_effect=side_effect) as mock_run:
+    with patch("subprocess.run", side_effect=side_effect):
         decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
 
     assert model_used == "DeepSeek V4 Flash Free"

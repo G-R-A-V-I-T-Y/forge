@@ -65,6 +65,7 @@ def _run_coroutine_sync(coro: Coroutine[Any, Any, _T]) -> _T:
         raise result["error"]
     return result["value"]
 
+
 logger = logging.getLogger(__name__)
 
 

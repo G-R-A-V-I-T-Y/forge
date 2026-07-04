@@ -3,10 +3,8 @@
 All subprocess.Popen calls are mocked; no real binary is invoked.
 """
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from llm.llama_server import LlamaServerManager
 

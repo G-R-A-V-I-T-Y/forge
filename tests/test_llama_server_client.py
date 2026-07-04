@@ -1,5 +1,4 @@
 """Tests for llm/llama_server_client.py."""
-import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
@@ -87,6 +86,7 @@ async def test_uses_provided_port():
     class CapturingClient:
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
+
         async def post(self, url, **kw):
             captured_url.append(url)
             return resp

@@ -1,7 +1,5 @@
 """Tests for store/settings.py — persistence, defaults, and validation."""
-import json
 
-import pytest
 
 from store import settings as settings_store
 
