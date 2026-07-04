@@ -28,6 +28,8 @@ from market import heartbeat
 from market.provider import MarketProvider
 from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
 from store.positions import get_all_open_positions, reconcile_positions, update_position_pnl
+from store.settings import load_all as load_settings
+from llm.llama_server import server_manager as llama_server
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -210,6 +212,15 @@ async def main():
     web_app.state.conn = conn
     web_app.state.provider = provider
     web_app.state.config = config
+    web_app.state.llama_server = llama_server
+
+    # Start the local llama-server if configured.
+    local_settings = load_settings(conn)
+    if local_settings.get("spawn_on_startup"):
+        logger.info("spawn_on_startup=true — starting local llama-server")
+        llama_server.start(local_settings)
+    else:
+        logger.info("spawn_on_startup=false — local llama-server not started")
 
     open_positions = get_all_open_positions(conn)
     logger.info("Restored %d open positions across the desk", len(open_positions))
@@ -263,6 +274,7 @@ async def main():
         await asyncio.gather(server.serve(), fleet_task)
     finally:
         await provider.__aexit__(None, None, None)
+        llama_server.stop()
 
 
 if __name__ == "__main__":
