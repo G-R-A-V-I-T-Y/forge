@@ -74,32 +74,30 @@ def test_tier1_fails_nonzero_exit_tier2_succeeds():
     assert mock_run.call_count == 2
 
 
-def test_all_opencode_tiers_fail_falls_through_to_ollama():
+def test_all_opencode_tiers_fail_falls_through_to_llama_server():
     with patch("subprocess.run") as mock_run, \
-         patch("llm.client._ollama_decide") as mock_ollama:
+         patch("llm.model_chain._run_llama_server_tier") as mock_llama:
         mock_run.return_value = _fake_completed_process("", returncode=1, stderr="down")
-        mock_ollama.return_value = {"action": "wait", "reason": "ollama said wait"}
+        mock_llama.return_value = {"action": "wait", "reason": "llama said wait"}
 
         decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
 
     assert mock_run.call_count == 6  # all 6 opencode tiers attempted
-    mock_ollama.assert_called_once()
-    assert decision == {"action": "wait", "reason": "ollama said wait"}
-    assert model_used == "Ollama qwen3.6:35b_optimized"
+    mock_llama.assert_called_once()
+    assert decision == {"action": "wait", "reason": "llama said wait"}
+    assert model_used == "Local llama-server (Qwen3.6)"
 
 
-def test_all_tiers_fail_including_ollama_returns_explicit_error():
+def test_all_tiers_fail_including_llama_server_returns_explicit_error():
     with patch("subprocess.run") as mock_run, \
-         patch("llm.client._ollama_decide") as mock_ollama:
+         patch("llm.model_chain._run_llama_server_tier") as mock_llama:
         mock_run.return_value = _fake_completed_process("", returncode=1, stderr="down")
-        # This is llm/client.py's _ollama_decide() failure sentinel — the
-        # literal string model_chain.py's _run_ollama_tier() detects.
-        mock_ollama.return_value = {"action": "wait", "reason": "LLM unavailable or timed out"}
+        mock_llama.return_value = None
 
         decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
 
     assert mock_run.call_count == 6
-    mock_ollama.assert_called_once()
+    mock_llama.assert_called_once()
     assert decision == {"action": "error", "reason": "no model available"}
     assert model_used is None
 
@@ -145,7 +143,7 @@ def test_tier_error_event_falls_through():
 
 def test_chain_order_and_display_names():
     kinds = [t.kind for t in model_chain.CHAIN]
-    assert kinds == ["opencode"] * 6 + ["ollama"]
+    assert kinds == ["opencode"] * 6 + ["llama_server"]
     display_names = [t.display_name for t in model_chain.CHAIN]
     assert display_names == [
         "Claude Sonnet 5 (low)",
@@ -154,5 +152,33 @@ def test_chain_order_and_display_names():
         "MiMo V2.5 Free",
         "North Mini Code Free",
         "Nemotron 3 Ultra Free",
-        "Ollama qwen3.6:35b_optimized",
+        "Local llama-server (Qwen3.6)",
     ]
+
+
+def test_get_chain_falls_back_to_default_when_no_db():
+    with patch("llm.model_chain._load_chain_from_settings", return_value=None):
+        chain = model_chain.get_chain()
+    assert chain == model_chain.CHAIN
+
+
+def test_get_chain_uses_settings_when_available():
+    from llm.model_chain import Tier
+    custom = [Tier("opencode", "some/model", None, "Some Model")]
+    with patch("llm.model_chain._load_chain_from_settings", return_value=custom):
+        chain = model_chain.get_chain()
+    assert chain == custom
+
+
+def test_decide_uses_dynamic_chain():
+    """decide() dispatches based on get_chain(), not the hardcoded CHAIN."""
+    from llm.model_chain import Tier
+    custom_chain = [Tier("llama_server", None, None, "Test Local")]
+    with patch("llm.model_chain.get_chain", return_value=custom_chain), \
+         patch("llm.model_chain._run_llama_server_tier",
+               return_value={"action": "wait", "reason": "ok"}) as mock_ls:
+        decision, model_used = model_chain.decide(SYSTEM, PROMPT, config={})
+
+    mock_ls.assert_called_once()
+    assert model_used == "Test Local"
+    assert decision == {"action": "wait", "reason": "ok"}

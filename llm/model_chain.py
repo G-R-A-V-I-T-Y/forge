@@ -3,11 +3,15 @@
 Every agent's decision call tries an ordered list of models, using the
 first one that's actually available/reachable, and reports which model
 responded. Tiers 1-6 are routed through the `opencode` CLI (subprocess);
-tier 7 is the existing local Ollama mechanism in llm/ollama_client.py via
-llm/client.py's `_ollama_decide()` helper, unchanged internally. If every
-tier fails, `decide()` returns an explicit error result rather than
-silently degrading to a generic "wait" — the UI needs to show that
-literally no model was available.
+tier 7 is the forge-managed local llama-server (see llm/llama_server.py
+and llm/llama_server_client.py), which supersedes the old Ollama tier.
+If every tier fails, `decide()` returns an explicit error result rather
+than silently degrading to a generic "wait".
+
+The CHAIN list is dynamically loaded from the settings DB on each
+`decide()` call so that Settings → Save & Apply takes effect immediately
+in the next agent cycle without a forge restart. The hardcoded CHAIN
+below is the fallback when no DB is available.
 
 See docs/superpowers/specs/2026-07-01-model-fallback-chain-design.md for
 the full design rationale, including how the `opencode run --format json`
@@ -130,12 +134,14 @@ _REQUIRED_ENTER_FIELDS = (
 
 
 class Tier(NamedTuple):
-    kind: str  # "opencode" or "ollama"
-    model_id: str | None  # None for the "ollama" tier
+    kind: str  # "opencode", "ollama", or "llama_server"
+    model_id: str | None  # None for local tiers
     variant: str | None  # e.g. "low"; None if not applicable
     display_name: str
 
 
+# Hardcoded fallback — used when the settings DB is unavailable.
+# The dynamic chain loaded from settings supersedes this at runtime.
 CHAIN: list[Tier] = [
     Tier("opencode", "openrouter/anthropic/claude-sonnet-5", "low", "Claude Sonnet 5 (low)"),
     Tier("opencode", "opencode/deepseek-v4-flash-free", None, "DeepSeek V4 Flash Free"),
@@ -143,8 +149,46 @@ CHAIN: list[Tier] = [
     Tier("opencode", "opencode/mimo-v2.5-free", None, "MiMo V2.5 Free"),
     Tier("opencode", "opencode/north-mini-code-free", None, "North Mini Code Free"),
     Tier("opencode", "opencode/nemotron-3-ultra-free", None, "Nemotron 3 Ultra Free"),
-    Tier("ollama", None, None, "Ollama qwen3.6:35b_optimized"),
+    Tier("llama_server", None, None, "Local llama-server (Qwen3.6)"),
 ]
+
+_SETTINGS_DB_PATH = "data/forge.db"
+
+
+def _load_chain_from_settings() -> list[Tier] | None:
+    """Try to read the model_chain list from the settings DB.
+
+    Returns a list of Tier objects if the DB is readable and has a
+    model_chain setting, otherwise None so the caller falls back to CHAIN.
+    """
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'model_chain'"
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        chain_dicts = json.loads(row["value"])
+        return [
+            Tier(
+                kind=d.get("kind", "opencode"),
+                model_id=d.get("model_id"),
+                variant=d.get("variant"),
+                display_name=d.get("display_name", d.get("model_id", "unknown")),
+            )
+            for d in chain_dicts
+        ]
+    except Exception:
+        return None
+
+
+def get_chain() -> list[Tier]:
+    """Return the active model chain, preferring the settings DB over CHAIN."""
+    loaded = _load_chain_from_settings()
+    return loaded if loaded is not None else CHAIN
 
 
 def _is_valid_decision(decision: dict) -> bool:
@@ -247,21 +291,78 @@ def _run_ollama_tier(system_prompt: str, decision_prompt: str, config: dict | No
     return result
 
 
-def decide(system_prompt: str, decision_prompt: str, config: dict | None = None) -> tuple[dict, str | None]:
+def _run_llama_server_tier(
+    system_prompt: str, decision_prompt: str, config: dict | None
+) -> dict | None:
+    """Call the forge-managed llama-server via its OpenAI-compatible endpoint.
+
+    The port is read from the settings DB at call time so a Settings →
+    Save & Apply takes effect immediately in the next agent cycle.
+    """
+    import asyncio
+    from llm import llama_server_client
+
+    port = _DEFAULT_LLAMA_PORT
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'llama_server_port'"
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            port = int(json.loads(row["value"]))
+    except Exception:
+        pass
+
+    try:
+        result = asyncio.run(
+            llama_server_client.decide(system_prompt, decision_prompt, port=port)
+        )
+    except Exception as exc:
+        logger.error("llama-server tier failed: %s", exc)
+        return None
+
+    if result is None:
+        return None
+    if not _is_valid_decision(result):
+        logger.warning(
+            "llama-server tier returned an invalid decision shape: %r", result
+        )
+        return None
+    return result
+
+
+# Default port when settings DB is unavailable.
+_DEFAULT_LLAMA_PORT = 8080
+
+
+def decide(
+    system_prompt: str,
+    decision_prompt: str,
+    config: dict | None = None,
+) -> tuple[dict, str | None]:
     """Try the ordered model chain, returning (decision_dict, model_display_name)
     for the first tier that succeeds. If every tier fails, returns
     ({"action": "error", "reason": "no model available"}, None) — never a
     silent generic "wait", per the captain's explicit requirement.
+
+    The chain is loaded from the settings DB on each call so that
+    Settings → Save & Apply takes effect without a forge restart.
 
     Synchronous, matching llm/client.py's _ollama_decide() sync-wrapping
     pattern and agents/decision_loop.py's non-awaited llm_fn(...) calling
     convention.
     """
     message = f"{system_prompt}\n\n{decision_prompt}"
+    chain = get_chain()
 
-    for tier in CHAIN:
+    for tier in chain:
         if tier.kind == "opencode":
             decision = _run_opencode_tier(tier.model_id, tier.variant, message)
+        elif tier.kind == "llama_server":
+            decision = _run_llama_server_tier(system_prompt, decision_prompt, config)
         else:
             decision = _run_ollama_tier(system_prompt, decision_prompt, config)
 

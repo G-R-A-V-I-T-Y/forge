@@ -16,6 +16,7 @@ from market.heartbeat import (
 )
 from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
+from store import settings as settings_store
 from execution.paper_bridge import PaperBridge
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -532,6 +533,91 @@ async def api_trade_detail(trade_id: str):
     if trade is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(trade)
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    conn = app.state.conn
+    current = settings_store.load_all(conn)
+    llama_srv = getattr(app.state, "llama_server", None)
+    server_status = llama_srv.status() if llama_srv else {"running": False, "pid": None}
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "settings": current,
+            "server_status": server_status,
+            "min_context_size": settings_store.MIN_CONTEXT_SIZE,
+        },
+    )
+
+
+@app.get("/api/settings")
+async def api_get_settings():
+    conn = app.state.conn
+    return JSONResponse(settings_store.load_all(conn))
+
+
+@app.post("/api/settings")
+async def api_save_settings(request: Request):
+    """Persist settings and restart the local server if it was running."""
+    conn = app.state.conn
+    body = await request.json()
+
+    # Coerce numeric fields.
+    for int_key in ("context_size", "batch_size", "ubatch_size", "threads",
+                    "gpu_layers", "llama_server_port"):
+        if int_key in body:
+            try:
+                body[int_key] = int(body[int_key])
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {"error": f"{int_key} must be an integer"}, status_code=422
+                )
+
+    errors = settings_store.validate_server_settings(body)
+    if errors:
+        return JSONResponse({"errors": errors}, status_code=422)
+
+    settings_store.save_all(conn, body)
+
+    # Restart the local server so new settings take effect immediately.
+    llama_srv = getattr(app.state, "llama_server", None)
+    if llama_srv is not None and llama_srv.is_running():
+        all_settings = settings_store.load_all(conn)
+        llama_srv.restart(all_settings)
+
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/local-server/status")
+async def api_local_server_status():
+    llama_srv = getattr(app.state, "llama_server", None)
+    if llama_srv is None:
+        return JSONResponse({"running": False, "pid": None})
+    return JSONResponse(llama_srv.status())
+
+
+@app.post("/api/local-server/start")
+async def api_local_server_start():
+    conn = app.state.conn
+    llama_srv = getattr(app.state, "llama_server", None)
+    if llama_srv is None:
+        return JSONResponse({"error": "server manager not available"}, status_code=503)
+    all_settings = settings_store.load_all(conn)
+    ok = llama_srv.start(all_settings)
+    if ok:
+        return JSONResponse({"ok": True, "status": llama_srv.status()})
+    return JSONResponse({"error": "failed to start; check logs"}, status_code=500)
+
+
+@app.post("/api/local-server/stop")
+async def api_local_server_stop():
+    llama_srv = getattr(app.state, "llama_server", None)
+    if llama_srv is None:
+        return JSONResponse({"error": "server manager not available"}, status_code=503)
+    llama_srv.stop()
+    return JSONResponse({"ok": True, "status": llama_srv.status()})
 
 
 @app.websocket("/api/ws/desk")
