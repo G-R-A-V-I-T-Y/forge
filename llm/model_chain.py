@@ -19,15 +19,51 @@ NDJSON output shape was verified directly against the real binary.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
+from typing import Any, Coroutine, TypeVar
 from typing import NamedTuple
 
 from llm.ollama_client import _extract_json
+
+_T = TypeVar("_T")
+
+
+def _run_coroutine_sync(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run an async coroutine to completion from synchronous code.
+
+    decide() is called synchronously from inside agents/decision_loop.py's
+    running event loop (agents/agent_runner.py's asyncio.run(_run_once(...))),
+    so asyncio.run() here would raise "cannot be called from a running event
+    loop". Running the coroutine on a dedicated thread with its own event
+    loop avoids that regardless of whether a loop is already running.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +335,6 @@ def _run_llama_server_tier(
     The port is read from the settings DB at call time so a Settings →
     Save & Apply takes effect immediately in the next agent cycle.
     """
-    import asyncio
     from llm import llama_server_client
 
     port = _DEFAULT_LLAMA_PORT
@@ -317,7 +352,7 @@ def _run_llama_server_tier(
         pass
 
     try:
-        result = asyncio.run(
+        result = _run_coroutine_sync(
             llama_server_client.decide(system_prompt, decision_prompt, port=port)
         )
     except Exception as exc:
