@@ -23,7 +23,7 @@ desk instead (see [Multi-Agent Desk](#multi-agent-desk)).
 ## Requirements
 
 - Python 3.11+
-- (Milestone 2+) Ollama with `qwen3:35b` model
+- (Milestone 2+) A local `llama-server` binary + GGUF model (see [Local LLM Server & Settings](#local-llm-server--settings)), or Ollama with `qwen3:35b` for the legacy single-backend path
 - (Milestone 2+) Hyperliquid API access
 
 ## Architecture
@@ -35,7 +35,15 @@ forge.py → APScheduler → AgentRuntime.tick() → decision_loop → paper_bri
 
 ## LLM Backend
 
-LLM decisions are dispatched by `llm/client.py` which selects the backend via `config.yaml`:
+Production agent decisions go through `llm/model_chain.py`'s `decide()`, which tries an ordered
+fallback chain of models (several `opencode` CLI tiers, then a local last-resort tier) and reports
+which model actually answered. The chain is loaded from the `settings` DB on every call — see
+[Local LLM Server & Settings](#local-llm-server--settings) below — and falls back to a hardcoded
+default chain if the DB is unavailable. See
+`docs/superpowers/specs/2026-07-01-model-fallback-chain-design.md` for the full design.
+
+Independently, `llm/client.py` offers a simpler single-backend path selected via `config.yaml`,
+used mainly by older tests and scripts:
 
 ```yaml
 llm_backend: stub        # "stub" (default) or "ollama"
@@ -44,17 +52,29 @@ llm_backend: stub        # "stub" (default) or "ollama"
 - `stub` — hardcoded SOL long decision (deterministic, keeps tests fast)
 - `ollama` — async POST to `localhost:11434/api/chat` with `qwen3:35b` model
 
-### Ollama Setup
-
-To use the real LLM backend:
-
-1. Install [Ollama](https://ollama.com) for your platform
-2. Pull the model: `ollama pull qwen3:35b`
-3. Start Ollama (it runs as a background service by default on port 11434)
-4. Set `llm_backend: ollama` in `config.yaml`
-5. Run forge: `python forge.py`
-
 The Ollama client (`llm/ollama_client.py`) uses a 30-second timeout, sends system prompt + decision prompt as a chat conversation, and extracts JSON from the model response via regex fallback. On timeout or parse failure it falls back gracefully to a `wait` decision.
+
+## Local LLM Server & Settings
+
+The last-resort tier in the model chain is a forge-managed `llama-server` subprocess
+(`llm/llama_server.py`, module-level singleton `server_manager`), which replaced the old Ollama
+tier because running with `--reasoning off` cuts per-decision latency from ~160-290s to ~12-20s
+with no measured quality loss. `llm/llama_server_client.py` talks to it over its OpenAI-compatible
+`http://localhost:{port}/v1/chat/completions` endpoint.
+
+Configure it from the **Settings** page (`/settings`) in the web UI:
+
+- Toggle **spawn on startup** so forge launches the server automatically, or start/stop it live.
+- Edit context size, batch/ubatch size, thread count, `--reasoning` on/off, and GPU layers. Tuned
+  defaults (`batch_size=2048`, `ubatch_size=1024`, `context_size=24576`) come from empirical
+  testing; `context_size` cannot go below 12288 (real prompts run ~10-11k tokens).
+- Set the `llama-server` binary path and the GGUF model path — both required before the server
+  can start, with a clear error if unset or missing.
+- Drag to reorder the model fallback chain used by `model_chain.decide()`.
+
+**Save & Apply** persists settings to the `settings` SQLite table (`store/settings.py`) and
+restarts the local server immediately if it's running, so changes take effect without a forge
+restart. Model chain edits take effect on the very next agent decision cycle.
 
 Market data is supplied by `market/provider.py` (`MarketProvider`), which selects the backend via `config.yaml`:
 
@@ -136,7 +156,7 @@ every 30 seconds so the leaderboard updates live without a page reload.
 
 - **M1** (complete): Walking skeleton — stub LLM, stub market data, paper trading, web UI
 - **M2** (complete): Real Hyperliquid market data — `HyperliquidClient`, `MarketProvider`, `StubMarket`
-- **M3** (complete): Real LLM decisions (Qwen3.6-35B via Ollama) + performance metrics
+- **M3** (complete): Real LLM decisions (Qwen3.6-35B, now via the forge-managed llama-server) + performance metrics
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
 - **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard + agent detail pages, `/api/desk`, `WS /api/ws/desk`
 - **M6-M10**: Full system
