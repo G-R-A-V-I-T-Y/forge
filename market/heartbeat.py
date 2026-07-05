@@ -7,8 +7,10 @@ in config.yaml) and written atomically to `desk.heartbeat_path` (default
 Hyperliquid API on its own wake cycle.
 
 This module owns: fetching raw data for all universe assets, computing every
-derived per-asset / cross-asset / regime field, and the atomic file
-write/read. See
+derived per-asset / cross-asset / regime field, the atomic file write/read,
+and the append-only historical capture (`append_historical()`), which mirrors
+each packet as one JSON line into a daily `data/historical_data/{YYYY-MM-DD}.jsonl`
+file and is failure-isolated from the primary write. See
 docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md for the
 full field list and the documented approximations (OI-history sampling,
 BTC-dominance-within-tracked-universe, Fear & Greed third-party fetch).

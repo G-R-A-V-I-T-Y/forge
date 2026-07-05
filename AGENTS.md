@@ -16,6 +16,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `market/hyperliquid.py` — async `HyperliquidClient` with circuit breaker (5 failures → open, 60s cooldown) and rate limit retry (3 attempts, honours `Retry-After`). Concurrency capped at 10 via asyncio.Semaphore.
 - `market/provider.py` — `MarketProvider` facade; selects backend via `config["data_source"]` (`"stub"` or `"hyperliquid"`).
 - `config.yaml` `data_source: stub` keeps the default backend as stub so all existing tests pass unmodified.
+- `market/heartbeat.py` `append_historical()` mirrors every heartbeat packet as a JSON line into `data/historical_data/{YYYY-MM-DD}.jsonl` (dir is a hardcoded constant, not config; gitignored). It swallows all exceptions by design — the historical capture must never block the primary `write_heartbeat()` path.
 
 ## Testing
 
