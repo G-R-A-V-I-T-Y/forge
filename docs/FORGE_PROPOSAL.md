@@ -908,6 +908,30 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
+### Milestone 11 — Historical Heartbeat Data
+
+**Goal:** Build a self-sustaining training dataset from heartbeat logs, enabling statistical feature engineering that doesn't depend on the LLM pipeline. Every heartbeat cycle produces a full packet (timestamp, per-asset fields including funding rate/zscore/acceleration, cross_asset, regime) written to `data/heartbeat.json` — this milestone adds continuous, append-only capture of every packet as it passes through `write_heartbeat()`.
+
+**You can verify:** After running the system for 48+ hours, `data/historical_data/` contains one JSONL file per UTC day, each with thousands of records. `scripts/build_training_dataset.py` processes the JSONL into a Parquet file with multi-horizon labels. `market/features.py` exposes statistical forecast features via `FEATURE_REGISTRY`.
+
+**Tasks:**
+
+1. **Phase 1 — Historical heartbeat capture:** Hook into `write_heartbeat()` in `market/heartbeat.py` (the single choke point every packet already passes through) to append the full heartbeat packet, unmodified, as one JSON line to `data/historical_data/YYYY-MM-DD.jsonl` (one file per UTC day). This is purely additive — no change to cadence, schema, or the existing `heartbeat.json` behavior. Wrap in try/except with logging-only error handling so a write failure is failure-isolated and never blocks or slows the primary heartbeat cycle. Add `data/historical_data/` to `.gitignore`, following the existing convention of ignoring specific paths under `data/` by name rather than a blanket rule. No separate "outcome" recording is needed: because every packet has the same schema, a sample at time T joined with the heartbeat at T+2h (or any horizon) already contains the full realized price/funding trajectory. No fixed retention or rotation logic yet; deferred until it's an actual problem.
+2. **Phase 2 — Label/dataset post-processing:** Implement `scripts/build_training_dataset.py`, an offline script that loads a date range of `data/historical_data/*.jsonl` files and, for each (asset, timestamp) sample, joins forward heartbeats in the same timeline to compute realized labels at multiple horizons (30m, 2h, 4h, 24h): forward return, realized volatility over the horizon, max drawdown/runup, funding accrued, and whether a hypothetical stop-loss/take-profit would have triggered. Detect and exclude samples that fall within capture gaps (a missed heartbeat, e.g. from a Forge restart) using consecutive-timestamp deltas. Emit a flat Parquet table of features + multi-horizon labels for model fitting.
+3. **Phase 3 — Statistical/Bayesian forecast feature:** Implement a lightweight statistical or Bayesian model (e.g. regime-conditioned empirical return distributions, or a simple hierarchical/Bayesian regression by regime/asset) trained on Phase 2's dataset. Output: expected forward return + credible interval, expected funding accrual, a probability-of-up-move estimate. Explicitly NOT a deep-learning or LLM fine-tune — a few days to weeks of 5-minute-cadence data across ~20 assets is far too little and too noisy for a fine-tune to show real calibration gains. Compute the forecast once per heartbeat cycle and inject as a new feature via the existing `FEATURE_REGISTRY` plugin pattern in `market/features.py`, so it appears in the heartbeat packet as structured evidence alongside the existing `evidence_strength`/`confidence` fields that agents already reason over.
+
+4. Add `.gitignore` entry for `data/historical_data/` following the existing convention (ignore specific paths under `data/` by name, not blanket).
+
+5. Wire `FEATURE_REGISTRY` to include the statistical forecast feature alongside existing features; mark statistical features with a `source=statistical` flag so the agent can weigh them differently.
+
+6. Implement dataset refresh pipeline: add a cron job in `forge.py` that runs `scripts/build_training_dataset.py` weekly (or on-demand via `POST /api/refresh_dataset`); the new Parquet file replaces the old one atomically; old Parquet files are retained for 7 days in `data/training_dataset.parquet.bak.*`.
+
+**Defer — LLM Fine-Tuning (Future):** Fine-tuning the Qwen model directly on heartbeat-to-outcome pairs, or a thesis-reflection (M6-style) loop using this data, is explicitly deferred. The rationale: with only days to weeks of initial data, a statistical model is more data-efficient and interpretable than a fine-tune, and the LLM's job should stay "reason over well-calibrated evidence" rather than "learn market statistics from weights." Revisit fine-tuning only once Phase 3 has proven the forecast feature helps and historical data volume has grown to months, not days.
+
+**Done when:** After 48+ hours of system operation, the JSONL files contain thousands of records, the Parquet dataset has multi-horizon labels with gap detection, and statistical forecast features are actively contributing to agent decisions via `FEATURE_REGISTRY`.
+
+---
+
 ## Known Risks
 
 | Risk | Mitigation |
