@@ -105,6 +105,15 @@ and `format_trades_summary()` (LLM-readable text block for agent prompts). The s
 Run `scripts/verify_db_size.py` to confirm the SQLite file stays under the 50MB
 budget at 500 full trades.
 
+## Historical Heartbeat Capture
+
+Every heartbeat packet written to `data/heartbeat.json` is also appended as one
+JSON line to a daily `data/historical_data/{YYYY-MM-DD}.jsonl` file (UTC date
+from the packet's timestamp), building a continuous market-data history for
+later research and backtesting. This capture path is failure-isolated: any
+error is logged and swallowed so it can never block or degrade the primary
+heartbeat write. The directory is gitignored.
+
 ## Multi-Agent Desk
 
 `forge.py` reads every `ACTIVE`/`ROOKIE` agent row from SQLite at startup and

@@ -450,3 +450,140 @@ def test_read_heartbeat_or_none_stale_packet_returns_none(tmp_path):
     old_ts = (datetime.now(timezone.utc) - timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_heartbeat(path, {"timestamp": old_ts, "assets": {}, "cross_asset": {}, "regime": {}})
     assert read_heartbeat_or_none(path, max_age_seconds=600) is None
+
+
+# ---------------------------------------------------------------------------
+# Historical capture (append-only JSONL)
+# ---------------------------------------------------------------------------
+
+def test_append_historical_two_writes_produce_two_lines(tmp_path):
+    from market.heartbeat import append_historical, HISTORICAL_DATA_DIR
+    import os
+
+    dir_path = str(tmp_path / HISTORICAL_DATA_DIR)
+    packet = {
+        "timestamp": "2025-06-15T10:00:00Z",
+        "assets": {"BTC-PERP": {"price": 60000.0}},
+        "cross_asset": {},
+        "regime": {},
+    }
+    append_historical(packet, dir_path)
+    append_historical(packet, dir_path)
+
+    day_file = os.path.join(dir_path, "2025-06-15.jsonl")
+    with open(day_file) as f:
+        lines = [line for line in f.read().strip().split("\n") if line]
+    assert len(lines) == 2
+
+
+def test_append_historical_distinct_timestamps_distinct_day_files(tmp_path):
+    from market.heartbeat import append_historical, HISTORICAL_DATA_DIR
+    import os
+
+    dir_path = str(tmp_path / HISTORICAL_DATA_DIR)
+    packet_a = {
+        "timestamp": "2025-06-15T10:00:00Z",
+        "assets": {}, "cross_asset": {}, "regime": {},
+    }
+    packet_b = {
+        "timestamp": "2025-06-16T10:00:00Z",
+        "assets": {}, "cross_asset": {}, "regime": {},
+    }
+    append_historical(packet_a, dir_path)
+    append_historical(packet_b, dir_path)
+
+    day_a = os.path.join(dir_path, "2025-06-15.jsonl")
+    day_b = os.path.join(dir_path, "2025-06-16.jsonl")
+    assert os.path.exists(day_a)
+    assert os.path.exists(day_b)
+    with open(day_a) as f:
+        assert len([line for line in f.read().strip().split("\n") if line]) == 1
+    with open(day_b) as f:
+        assert len([line for line in f.read().strip().split("\n") if line]) == 1
+
+
+def test_append_historical_failure_does_not_break_primary_write(tmp_path):
+    from market.heartbeat import append_historical, write_heartbeat
+
+    # Block the directory path with a regular file so os.makedirs raises
+    dir_path = str(tmp_path / "blocked")
+    with open(dir_path, "w") as f:
+        f.write("not a directory")
+
+    packet = {
+        "timestamp": "2025-06-15T10:00:00Z",
+        "assets": {"BTC-PERP": {"price": 60000.0}},
+        "cross_asset": {},
+        "regime": {},
+    }
+    # append_historical must not raise
+    append_historical(packet, dir_path)
+
+    # Primary write must still succeed
+    hb_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(hb_path, packet)
+    on_disk = read_heartbeat(hb_path)
+    assert on_disk == packet
+
+
+def test_append_historical_no_timestamp_is_noop(tmp_path):
+    from market.heartbeat import append_historical, HISTORICAL_DATA_DIR
+    import os
+
+    dir_path = str(tmp_path / HISTORICAL_DATA_DIR)
+    packet = {
+        "assets": {},
+        "cross_asset": {},
+        "regime": {},
+    }
+    append_historical(packet, dir_path)
+    # No file should exist since there's no timestamp
+    day_files = [f for f in os.listdir(dir_path) if f.endswith(".jsonl")] if os.path.exists(dir_path) else []
+    assert len(day_files) == 0
+
+
+def test_append_historical_preserves_full_packet(tmp_path):
+    from market.heartbeat import append_historical, HISTORICAL_DATA_DIR
+    import os
+
+    dir_path = str(tmp_path / HISTORICAL_DATA_DIR)
+    packet = {
+        "timestamp": "2025-06-15T10:00:00Z",
+        "assets": {"BTC-PERP": {"price": 65000.0, "rsi_14": 62.3}},
+        "cross_asset": {"market_breadth": 0.75},
+        "regime": {"regime_tag": "risk_on"},
+    }
+    append_historical(packet, dir_path)
+
+    day_file = os.path.join(dir_path, "2025-06-15.jsonl")
+    with open(day_file) as f:
+        line = f.readline().strip()
+    restored = json.loads(line)
+    assert restored == packet
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generate_heartbeat_appends_to_historical_file(tmp_path, stub_config):
+    from market.heartbeat import HISTORICAL_DATA_DIR
+    from market.provider import MarketProvider
+
+    respx.get("https://api.alternative.me/fng/?limit=1").mock(
+        return_value=httpx.Response(200, json={"data": [{"value": "42"}]})
+    )
+    dir_path = tmp_path / HISTORICAL_DATA_DIR
+    stub_config["desk"]["heartbeat_path"] = str(tmp_path / "heartbeat.json")
+
+    provider = MarketProvider(stub_config)
+    async with provider:
+        packet = await generate_heartbeat(provider, stub_config)
+
+    day = packet["timestamp"][:10]
+    day_file = dir_path / f"{day}.jsonl"
+    assert day_file.exists()
+    import json
+    with open(day_file) as f:
+        lines = [line for line in f.read().strip().split("\n") if line]
+    assert len(lines) == 1
+    restored = json.loads(lines[0])
+    assert restored == packet

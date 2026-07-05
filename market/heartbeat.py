@@ -7,8 +7,10 @@ in config.yaml) and written atomically to `desk.heartbeat_path` (default
 Hyperliquid API on its own wake cycle.
 
 This module owns: fetching raw data for all universe assets, computing every
-derived per-asset / cross-asset / regime field, and the atomic file
-write/read. See
+derived per-asset / cross-asset / regime field, the atomic file write/read,
+and the append-only historical capture (`append_historical()`), which mirrors
+each packet as one JSON line into a daily `data/historical_data/{YYYY-MM-DD}.jsonl`
+file and is failure-isolated from the primary write. See
 docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md for the
 full field list and the documented approximations (OI-history sampling,
 BTC-dominance-within-tracked-universe, Fear & Greed third-party fetch).
@@ -148,9 +150,9 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
     losses = [max(-d, 0.0) for d in deltas]
     avg_gain = statistics.mean(gains[:period])
     avg_loss = statistics.mean(losses[:period])
-    for g, l in zip(gains[period:], losses[period:]):
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + l) / period
+    for gain, loss in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -746,6 +748,36 @@ def _update_oi_history(history: dict[str, list[float]], asset: str, oi_value: fl
 
 
 # ---------------------------------------------------------------------------
+# Historical capture (append-only JSONL)
+# ---------------------------------------------------------------------------
+
+HISTORICAL_DATA_DIR = "data/historical_data"
+
+
+def append_historical(packet: dict, dir_path: str = HISTORICAL_DATA_DIR) -> None:
+    """Append one heartbeat packet as a JSON line to a daily JSONL file.
+
+    File name is ``{YYYY-MM-DD}.jsonl`` derived from the packet's
+    ``timestamp`` field (UTC).  Failure is silently swallowed so this
+    path can *never* block or degrade the primary heartbeat write.
+    """
+    try:
+        ts = packet.get("timestamp")
+        if not ts:
+            return
+        day = ts[:10]  # "YYYY-MM-DD"
+        file_path = os.path.join(dir_path, f"{day}.jsonl")
+        os.makedirs(dir_path, exist_ok=True)
+        with open(file_path, "a") as f:
+            f.write(json.dumps(packet) + "\n")
+    except Exception:
+        logger.warning(
+            "failed to append historical heartbeat for %s",
+            packet.get("timestamp", "?"), exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Atomic write / read contract
 # ---------------------------------------------------------------------------
 
@@ -862,4 +894,5 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         "regime": regime,
     }
     write_heartbeat(heartbeat_path, packet)
+    append_historical(packet)
     return packet
