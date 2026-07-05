@@ -150,9 +150,9 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
     losses = [max(-d, 0.0) for d in deltas]
     avg_gain = statistics.mean(gains[:period])
     avg_loss = statistics.mean(losses[:period])
-    for g, l in zip(gains[period:], losses[period:]):
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + l) / period
+    for gain, loss in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss

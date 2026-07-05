@@ -472,7 +472,7 @@ def test_append_historical_two_writes_produce_two_lines(tmp_path):
 
     day_file = os.path.join(dir_path, "2025-06-15.jsonl")
     with open(day_file) as f:
-        lines = [l for l in f.read().strip().split("\n") if l]
+        lines = [line for line in f.read().strip().split("\n") if line]
     assert len(lines) == 2
 
 
@@ -497,9 +497,9 @@ def test_append_historical_distinct_timestamps_distinct_day_files(tmp_path):
     assert os.path.exists(day_a)
     assert os.path.exists(day_b)
     with open(day_a) as f:
-        assert len([l for l in f.read().strip().split("\n") if l]) == 1
+        assert len([line for line in f.read().strip().split("\n") if line]) == 1
     with open(day_b) as f:
-        assert len([l for l in f.read().strip().split("\n") if l]) == 1
+        assert len([line for line in f.read().strip().split("\n") if line]) == 1
 
 
 def test_append_historical_failure_does_not_break_primary_write(tmp_path):
@@ -583,7 +583,7 @@ async def test_generate_heartbeat_appends_to_historical_file(tmp_path, stub_conf
     assert day_file.exists()
     import json
     with open(day_file) as f:
-        lines = [l for l in f.read().strip().split("\n") if l]
+        lines = [line for line in f.read().strip().split("\n") if line]
     assert len(lines) == 1
     restored = json.loads(lines[0])
     assert restored == packet
