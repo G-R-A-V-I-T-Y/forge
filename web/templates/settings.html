@@ -105,6 +105,11 @@
     <input type="number" name="gpu_layers" value="{{ settings.gpu_layers }}" min="0">
   </div>
   <div class="form-row">
+    <label>CPU-offloaded MoE experts</label>
+    <input type="number" name="n_cpu_moe" value="{{ settings.n_cpu_moe }}" min="0">
+    <span style="color:#8b949e;font-size:11px;">32 recommended — required to fit this model in 10GB VRAM; 0 = fully offload to GPU (may OOM on smaller cards)</span>
+  </div>
+  <div class="form-row">
     <label>Enable reasoning/thinking mode</label>
     <input type="checkbox" name="reasoning" id="reasoning"
            {% if settings.reasoning %}checked{% endif %}>
@@ -229,6 +234,7 @@ function saveSettings() {
     ubatch_size: parseInt(form.querySelector('[name=ubatch_size]').value, 10),
     threads: parseInt(form.querySelector('[name=threads]').value, 10),
     gpu_layers: parseInt(form.querySelector('[name=gpu_layers]').value, 10),
+    n_cpu_moe: parseInt(form.querySelector('[name=n_cpu_moe]').value, 10),
     model_chain: gatherChain(),
   };
 

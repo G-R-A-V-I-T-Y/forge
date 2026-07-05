@@ -566,7 +566,7 @@ async def api_save_settings(request: Request):
 
     # Coerce numeric fields.
     for int_key in ("context_size", "batch_size", "ubatch_size", "threads",
-                    "gpu_layers", "llama_server_port"):
+                    "gpu_layers", "n_cpu_moe", "llama_server_port"):
         if int_key in body:
             try:
                 body[int_key] = int(body[int_key])

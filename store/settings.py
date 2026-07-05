@@ -22,7 +22,8 @@ DEFAULTS: dict[str, Any] = {
     "llama_server_binary": "",
     "llama_model_path": "",
     "llama_server_port": 8080,
-    "gpu_layers": 99,
+    "gpu_layers": 999,
+    "n_cpu_moe": 32,
     "model_chain": [
         {
             "kind": "opencode",
@@ -140,5 +141,13 @@ def validate_server_settings(settings: dict[str, Any]) -> list[str]:
                     errors.append(f"{key} must be a positive integer")
             except (TypeError, ValueError):
                 errors.append(f"{key} must be an integer")
+
+    n_cpu_moe = settings.get("n_cpu_moe")
+    if n_cpu_moe is not None:
+        try:
+            if int(n_cpu_moe) < 0:
+                errors.append("n_cpu_moe must be zero or a positive integer")
+        except (TypeError, ValueError):
+            errors.append("n_cpu_moe must be an integer")
 
     return errors

@@ -112,7 +112,8 @@ class LlamaServerManager:
         batch = int(settings.get("batch_size", 2048))
         ubatch = int(settings.get("ubatch_size", 1024))
         threads = int(settings.get("threads", 6))
-        gpu_layers = int(settings.get("gpu_layers", 99))
+        gpu_layers = int(settings.get("gpu_layers", 999))
+        n_cpu_moe = int(settings.get("n_cpu_moe", 32))
         reasoning = bool(settings.get("reasoning", False))
 
         cmd = [
@@ -124,9 +125,10 @@ class LlamaServerManager:
             "--ubatch-size", str(ubatch),
             "--threads", str(threads),
             "--n-gpu-layers", str(gpu_layers),
+            "--n-cpu-moe", str(n_cpu_moe),
             "--parallel", "1",
             "--cont-batching",
-            "--flash-attn",
+            "--flash-attn", "on",
             "--cache-type-k", "q8_0",
             "--cache-type-v", "q8_0",
         ]
