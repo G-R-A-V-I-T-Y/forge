@@ -746,6 +746,36 @@ def _update_oi_history(history: dict[str, list[float]], asset: str, oi_value: fl
 
 
 # ---------------------------------------------------------------------------
+# Historical capture (append-only JSONL)
+# ---------------------------------------------------------------------------
+
+HISTORICAL_DATA_DIR = "data/historical_data"
+
+
+def append_historical(packet: dict, dir_path: str = HISTORICAL_DATA_DIR) -> None:
+    """Append one heartbeat packet as a JSON line to a daily JSONL file.
+
+    File name is ``{YYYY-MM-DD}.jsonl`` derived from the packet's
+    ``timestamp`` field (UTC).  Failure is silently swallowed so this
+    path can *never* block or degrade the primary heartbeat write.
+    """
+    try:
+        ts = packet.get("timestamp")
+        if not ts:
+            return
+        day = ts[:10]  # "YYYY-MM-DD"
+        file_path = os.path.join(dir_path, f"{day}.jsonl")
+        os.makedirs(dir_path, exist_ok=True)
+        with open(file_path, "a") as f:
+            f.write(json.dumps(packet) + "\n")
+    except Exception:
+        logger.warning(
+            "failed to append historical heartbeat for %s",
+            packet.get("timestamp", "?"), exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Atomic write / read contract
 # ---------------------------------------------------------------------------
 
@@ -862,4 +892,5 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         "regime": regime,
     }
     write_heartbeat(heartbeat_path, packet)
+    append_historical(packet)
     return packet

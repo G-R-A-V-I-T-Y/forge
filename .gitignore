@@ -6,6 +6,7 @@ __pycache__/
 *.db-shm
 
 data/backups/
+data/historical_data/
 logs/
 .pytest_cache/
 *.egg-info/
