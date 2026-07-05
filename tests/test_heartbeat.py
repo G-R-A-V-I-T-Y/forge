@@ -505,8 +505,10 @@ def test_append_historical_distinct_timestamps_distinct_day_files(tmp_path):
 def test_append_historical_failure_does_not_break_primary_write(tmp_path):
     from market.heartbeat import append_historical, write_heartbeat
 
-    # Make the dir unwritable so append_historical raises
-    dir_path = str(tmp_path / "nodir")
+    # Block the directory path with a regular file so os.makedirs raises
+    dir_path = str(tmp_path / "blocked")
+    with open(dir_path, "w") as f:
+        f.write("not a directory")
 
     packet = {
         "timestamp": "2025-06-15T10:00:00Z",
@@ -561,10 +563,14 @@ def test_append_historical_preserves_full_packet(tmp_path):
 
 
 @pytest.mark.asyncio
+@respx.mock
 async def test_generate_heartbeat_appends_to_historical_file(tmp_path, stub_config):
     from market.heartbeat import HISTORICAL_DATA_DIR
     from market.provider import MarketProvider
 
+    respx.get("https://api.alternative.me/fng/?limit=1").mock(
+        return_value=httpx.Response(200, json={"data": [{"value": "42"}]})
+    )
     dir_path = tmp_path / HISTORICAL_DATA_DIR
     stub_config["desk"]["heartbeat_path"] = str(tmp_path / "heartbeat.json")
 
