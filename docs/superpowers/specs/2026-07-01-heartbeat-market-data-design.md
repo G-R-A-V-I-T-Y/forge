@@ -76,7 +76,7 @@ open_interest, funding, spread, atr, realized_vol, rsi,
 ema20, ema50, ema200, vwap_distance, volume_zscore, funding_zscore,
 oi_zscore, bid_depth, ask_depth, depth_imbalance, top5_imbalance,
 slippage_estimate, buy_volume, sell_volume, aggressor_ratio,
-avg_trade_size, largest_trade
+avg_trade_size, largest_trade, liq_total_usd, liq_long_usd, liq_short_usd
 ```
 
 Cross-asset (`cross_asset` object):
@@ -131,6 +131,14 @@ renamed or restructured here.
   case. `market/heartbeat.py` treats `"B"` or `"buy"` or `"long"` as a buy
   and everything else as a sell, so both real and stub data classify
   correctly without assuming one fixed vocabulary.
+
+- **Liquidations**: `liq_total_usd`/`liq_long_usd`/`liq_short_usd` come from
+  `market/coinalyze.py`'s `CoinalyzeClient` (Coinalyze REST API), fetched
+  once per heartbeat cycle for the full universe (batched, 15-min lookback),
+  not per-asset. Requires a `COINALYZE_API_KEY` env var or a
+  `coinalyze.api_key` entry in `config.yaml`; if absent, unreachable, or the
+  asset isn't covered by Coinalyze, the three fields are `None` for that
+  asset without blocking the rest of the packet.
 
 ## Documented approximations (called out explicitly)
 

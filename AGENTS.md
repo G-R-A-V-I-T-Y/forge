@@ -17,6 +17,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `market/provider.py` — `MarketProvider` facade; selects backend via `config["data_source"]` (`"stub"` or `"hyperliquid"`).
 - `config.yaml` `data_source: stub` keeps the default backend as stub so all existing tests pass unmodified.
 - `market/heartbeat.py` `append_historical()` mirrors every heartbeat packet as a JSON line into `data/historical_data/{YYYY-MM-DD}.jsonl` (dir is a hardcoded constant, not config; gitignored). It swallows all exceptions by design — the historical capture must never block the primary `write_heartbeat()` path.
+- `market/coinalyze.py` — async `CoinalyzeClient` (own circuit breaker, same 5-failures/60s-cooldown convention as `HyperliquidClient`) fetching liquidation data for `liq_total_usd`/`liq_long_usd`/`liq_short_usd`. Reads `COINALYZE_API_KEY` env var or `config["coinalyze"]["api_key"]`. `market/heartbeat.py`'s `_fetch_liquidations_batch()` wraps it with graceful degradation (missing key, unreachable API, or uncovered asset → `None` fields) so it never blocks the heartbeat cycle.
 
 ## Testing
 
