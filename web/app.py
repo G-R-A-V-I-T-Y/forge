@@ -640,9 +640,7 @@ async def api_all_balance_history():
     """Returns historical account balance data for all agents,
     keyed by agent name (matching WebSocket desk data)."""
     conn = app.state.conn
-    agents = conn.execute(
-        "SELECT id, name FROM agents ORDER BY name"
-    ).fetchall()
+    agents = conn.execute("SELECT id, name FROM agents ORDER BY name").fetchall()
     result = {}
     for agent in agents:
         aid = agent["id"]
@@ -654,8 +652,7 @@ async def api_all_balance_history():
             (aid,),
         ).fetchall()
         result[name] = [
-            {"balance": r["balance"], "recorded_at": r["recorded_at"]}
-            for r in rows
+            {"balance": r["balance"], "recorded_at": r["recorded_at"]} for r in rows
         ]
     return result
 
