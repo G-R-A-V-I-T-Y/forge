@@ -102,6 +102,8 @@ PER_ASSET_FIELDS = [
     "bb_width_percentile", "volume_percentile_14d", "funding_acceleration",
     "oi_drawdown_pct", "large_trade_volume_usd", "liquidation_cascade_flag",
     "candles_5m", "candles_30m", "candles_4h",
+    # Liquidation fields (Coinalyze REST, 15-min lookback)
+    "liq_total_usd", "liq_long_usd", "liq_short_usd",
 ]
 
 # Resampling factors (in units of 5m candles) for the longer-horizon
@@ -342,7 +344,11 @@ async def _fetch_asset_snapshot(provider, asset: str) -> dict:
     }
 
 
-def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
+def _compute_asset_fields(
+    raw: dict,
+    prior_oi_history: list[float],
+    liq_data: dict[str, float | None] | None = None,
+) -> dict:
     candles = raw["candles"]
     if not candles:
         return {k: None for k in PER_ASSET_FIELDS}
@@ -497,6 +503,10 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
         "candles_5m": candles_5m,
         "candles_30m": candles_30m,
         "candles_4h": candles_4h,
+        # Liquidation data from Coinalyze (15-min lookback)
+        "liq_total_usd": liq_data.get("liq_total_usd") if liq_data else None,
+        "liq_long_usd": liq_data.get("liq_long_usd") if liq_data else None,
+        "liq_short_usd": liq_data.get("liq_short_usd") if liq_data else None,
     }
 
     # Compute approved derived features from the feature library
@@ -709,6 +719,33 @@ async def _fetch_regime_tag(provider) -> str:
         return classify_regime([])
 
 
+async def _fetch_liquidations_batch(
+    universe: list[str],
+    coinalyze_api_key: str | None = None,
+) -> dict[str, dict[str, float | None] | None]:
+    """Fetch liquidation data for all universe assets via Coinalyze.
+
+    Returns a dict mapping each project asset to its liquidation feature
+    dict (``{"liq_total_usd", "liq_long_usd", "liq_short_usd"}``) or
+    ``None`` if Coinalyze is unreachable or the asset is not covered.
+    """
+    try:
+        from market.coinalyze import CoinalyzeClient
+    except ImportError:
+        logger.warning("heartbeat: CoinalyzeClient not available", exc_info=True)
+        return {a: None for a in universe}
+
+    try:
+        async with CoinalyzeClient(api_key=coinalyze_api_key) as client:
+            return await client.fetch_liquidations_for_assets(universe)
+    except Exception:
+        logger.warning(
+            "heartbeat: Coinalyze liquidations fetch failed, using None for all assets",
+            exc_info=True,
+        )
+        return {a: None for a in universe}
+
+
 # ---------------------------------------------------------------------------
 # OI-history rolling state (deliberate workaround for missing OI-history API)
 # ---------------------------------------------------------------------------
@@ -858,6 +895,7 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     desk_cfg = config.get("desk", {})
     heartbeat_path = desk_cfg.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
     universe = config.get("universe", [])
+    coinalyze_key = config.get("coinalyze", {}).get("api_key")
 
     oi_history = _load_oi_history(OI_HISTORY_PATH)
     sem = asyncio.Semaphore(5)
@@ -868,7 +906,12 @@ async def generate_heartbeat(provider, config: dict) -> dict:
 
     fear_index_task = asyncio.create_task(_fetch_fear_greed())
     regime_tag_task = asyncio.create_task(_fetch_regime_tag(provider))
+
+    # Fetch Coinalyze liquidation data once for the full universe (batched)
+    liq_task = _fetch_liquidations_batch(universe, coinalyze_key)
+
     raw_results = await asyncio.gather(*[_one(a) for a in universe])
+    liq_data_by_asset = await liq_task
 
     assets_fields: dict[str, dict] = {}
     asset_returns: dict[str, list[float]] = {}
@@ -876,7 +919,10 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     for asset, raw in raw_results:
         raw_oi = raw["oi"].get("openInterest")
         prior_history = _update_oi_history(oi_history, asset, raw_oi)
-        assets_fields[asset] = _compute_asset_fields(raw, prior_history)
+        liq_for_asset = liq_data_by_asset.get(asset)
+        assets_fields[asset] = _compute_asset_fields(
+            raw, prior_history, liq_for_asset,
+        )
         closes = [c[4] for c in raw["candles"]]
         asset_returns[asset] = _log_returns(closes) if len(closes) > 1 else []
 
