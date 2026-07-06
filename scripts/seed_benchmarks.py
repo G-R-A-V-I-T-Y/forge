@@ -25,6 +25,8 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
         "pinned_model": None,
         "benchmark_type": "random_walk",
         "description": "Random walk benchmark — makes random trading decisions",
+        "starting_balance": starting_balance,
+        "universe": universe,
     }
 
     conn.execute(
@@ -46,6 +48,8 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
         "benchmark_type": "btc_hold",
         "description": "BTC hold benchmark — only trades BTC, holds positions indefinitely",
         "preferred_asset": "BTC-PERP",
+        "starting_balance": starting_balance,
+        "universe": universe,
     }
 
     conn.execute(
