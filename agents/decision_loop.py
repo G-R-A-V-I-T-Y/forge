@@ -7,6 +7,7 @@ as {"action": "error", "detail": str(exc)}.
 
 import asyncio
 import logging
+
 from agents.persona import build_system_prompt
 from agents.prompt_builder import build_decision_prompt, build_portfolio_snapshot
 from market.heartbeat import (
@@ -14,14 +15,16 @@ from market.heartbeat import (
     heartbeat_max_age_seconds,
     read_heartbeat_or_none,
 )
-from risk.gate import validate_order, RiskViolation
-from store.db import get_positions, get_trades, insert_trade, update_last_model_used
+from risk.gate import RiskViolation, validate_order
+from store.db import get_positions, update_last_model_used
 from store.fingerprint import write_entry, write_outcome
 
 logger = logging.getLogger(__name__)
 
 
-def build_trade_market_context(heartbeat: dict, asset: str, conn, agent_id: str, config: dict) -> dict:
+def build_trade_market_context(
+    heartbeat: dict, asset: str, conn, agent_id: str, config: dict
+) -> dict:
     """Consolidate the full trade-entry context — the trade "thumbprint" the
     captain asked for — into one dict for write_entry()'s `market_context`
     param:
@@ -65,18 +68,26 @@ async def run_decision(
         desk_config = config["desk"]
 
         heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
-        heartbeat = read_heartbeat_or_none(heartbeat_path, heartbeat_max_age_seconds(config))
+        heartbeat = read_heartbeat_or_none(
+            heartbeat_path, heartbeat_max_age_seconds(config)
+        )
         if heartbeat is None:
             return {"action": "wait", "detail": "heartbeat unavailable or stale"}
 
         system_prompt = build_system_prompt(agent_id, config)
         decision_prompt = await build_decision_prompt(
-            agent_id, thesis_text, heartbeat, conn, provider,
+            agent_id,
+            thesis_text,
+            heartbeat,
+            conn,
+            provider,
             starting_balance=desk_config["starting_balance"],
             universe=assets,
         )
 
-        response, model_used = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt, agent_id)
+        response, model_used = _call_llm_with_retry(
+            llm_fn, system_prompt, decision_prompt, agent_id
+        )
 
         # Record which model produced (or failed to produce) this cycle's
         # decision — "most recently used model", not "model used for the
@@ -86,13 +97,20 @@ async def run_decision(
         # "no decision cycle has recorded a model yet" e.g. legacy rows)
         # covers the case where model_chain.decide() exhausted every tier.
         model_label = model_used
-        if model_label is None and response is not None and response.get("action") == "error":
+        if (
+            model_label is None
+            and response is not None
+            and response.get("action") == "error"
+        ):
             model_label = "no model available"
         if model_label is not None:
             update_last_model_used(conn, agent_id, model_label)
 
         if response is None:
-            return {"action": "wait", "detail": "LLM returned invalid response after retries"}
+            return {
+                "action": "wait",
+                "detail": "LLM returned invalid response after retries",
+            }
 
         action = response.get("action", "wait")
 
@@ -126,7 +144,9 @@ async def run_decision(
             try:
                 validate_order(
                     order=response,
-                    account_balance=_get_balance(conn, agent_id, desk_config["starting_balance"]),
+                    account_balance=_get_balance(
+                        conn, agent_id, desk_config["starting_balance"]
+                    ),
                     config=desk_config,
                     open_position_count=len(open_positions),
                     heartbeat_price=heartbeat_price,
@@ -135,7 +155,9 @@ async def run_decision(
                 logger.warning("[%s] Risk gate blocked order: %s", agent_id, e.reason)
                 return {"action": "risk_blocked", "detail": e.reason}
 
-            response["position_size_pct"] = response["position_size_pct"] * response["confidence"]
+            response["position_size_pct"] = (
+                response["position_size_pct"] * response["confidence"]
+            )
 
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
@@ -154,7 +176,8 @@ async def run_decision(
                 asset_fields = market_context["asset"]
                 asset_snapshot = {
                     "funding_rate_current": asset_fields.get("funding", 0) or 0,
-                    "open_interest_24h_change_pct": asset_fields.get("oi_zscore", 0) or 0,
+                    "open_interest_24h_change_pct": asset_fields.get("oi_zscore", 0)
+                    or 0,
                 }
                 write_entry(
                     conn,
@@ -169,7 +192,9 @@ async def run_decision(
             logger.info("[%s] Entered trade: %s", agent_id, fill)
             return {"action": "enter", "detail": str(fill)}
 
-        logger.warning("[%s] Unrecognized LLM action '%s', treating as wait", agent_id, action)
+        logger.warning(
+            "[%s] Unrecognized LLM action '%s', treating as wait", agent_id, action
+        )
         return {"action": "wait", "detail": f"unrecognized LLM action: {action}"}
 
     except Exception as exc:
@@ -178,7 +203,11 @@ async def run_decision(
 
 
 def _call_llm_with_retry(
-    llm_fn, system_prompt: str, decision_prompt: str, agent_id: str | None, max_retries: int = 2
+    llm_fn,
+    system_prompt: str,
+    decision_prompt: str,
+    agent_id: str | None,
+    max_retries: int = 2,
 ) -> tuple[dict | None, str | None]:
     """Call LLM and validate JSON response. Retry up to max_retries on bad output.
 
@@ -200,7 +229,9 @@ def _call_llm_with_retry(
         try:
             result = llm_fn(system_prompt, decision_prompt, agent_id=agent_id)
         except Exception as exc:
-            logger.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
+            logger.warning(
+                "LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc
+            )
             if attempt < max_retries:
                 continue
             return None, last_model_used
@@ -210,7 +241,9 @@ def _call_llm_with_retry(
             last_model_used = model_used
 
         if not isinstance(decision, dict):
-            logger.warning("LLM returned non-dict (attempt %d/%d)", attempt + 1, max_retries)
+            logger.warning(
+                "LLM returned non-dict (attempt %d/%d)", attempt + 1, max_retries
+            )
             if attempt < max_retries:
                 decision_prompt += "\n\nYour previous response was not valid JSON. Output a valid JSON object only."
                 continue
@@ -222,17 +255,35 @@ def _call_llm_with_retry(
             return decision, model_used
 
         if action not in ("enter", "wait", "close"):
-            logger.warning("LLM returned unknown action %r (attempt %d/%d)", action, attempt + 1, max_retries)
+            logger.warning(
+                "LLM returned unknown action %r (attempt %d/%d)",
+                action,
+                attempt + 1,
+                max_retries,
+            )
             if attempt < max_retries:
                 decision_prompt += f"\n\nAction '{action}' is not valid. Use 'enter', 'wait', or 'close'."
                 continue
             return None, last_model_used
 
         if action == "enter":
-            required = ("asset", "direction", "entry_price", "stop_loss_price", "leverage", "position_size_pct", "confidence")
+            required = (
+                "asset",
+                "direction",
+                "entry_price",
+                "stop_loss_price",
+                "leverage",
+                "position_size_pct",
+                "confidence",
+            )
             missing = [k for k in required if k not in decision]
             if missing:
-                logger.warning("LLM enter missing fields %s (attempt %d/%d)", missing, attempt + 1, max_retries)
+                logger.warning(
+                    "LLM enter missing fields %s (attempt %d/%d)",
+                    missing,
+                    attempt + 1,
+                    max_retries,
+                )
                 if attempt < max_retries:
                     decision_prompt += f"\n\nMissing required fields: {missing}. Include all trade parameters."
                     continue
@@ -243,7 +294,9 @@ def _call_llm_with_retry(
     return None, last_model_used
 
 
-async def run_postmortem(conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str) -> None:
+async def run_postmortem(
+    conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str
+) -> None:
     """Generate a one-sentence postmortem for a just-closed trade."""
     row = conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,)).fetchone()
     if not row:
@@ -277,13 +330,17 @@ async def run_postmortem(conn, agent_id: str, trade_id: str, llm_fn, system_prom
 
 def _get_balance(conn, agent_id: str, starting_balance: float) -> float:
     from store.db import get_latest_account
+
     latest = get_latest_account(conn, agent_id, "paper")
     return latest["balance"] if latest else starting_balance
 
 
-def log_decision(conn, agent_id: str, action: str, reason: str | None, details: dict | None) -> None:
+def log_decision(
+    conn, agent_id: str, action: str, reason: str | None, details: dict | None
+) -> None:
     """Log a decision to the decisions table."""
     from store.db import _now
+
     conn.execute(
         """INSERT INTO decisions (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
            VALUES (?, ?, ?, ?, ?)""",
@@ -292,9 +349,11 @@ def log_decision(conn, agent_id: str, action: str, reason: str | None, details: 
     conn.commit()
 
 
-async def run_counterfactual(conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str) -> None:
+async def run_counterfactual(
+    conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str
+) -> None:
     """Run a counterfactual analysis for a 'wait' decision that could have been a trade.
-    
+
     This is called nightly to analyze past wait decisions and determine if taking
     the trade would have been profitable.
     """
@@ -307,14 +366,14 @@ async def run_counterfactual(conn, agent_id: str, trade_id: str, llm_fn, system_
            ORDER BY d.timestamp DESC LIMIT 1""",
         (agent_id,),
     ).fetchone()
-    
+
     if not row:
         return
-    
+
     decision = dict(row)
     if not decision.get("asset"):
         return
-    
+
     # Build a prompt asking the LLM to analyze what would have happened
     prompt = (
         f"Counterfactual analysis for agent {agent_id}:\n"
@@ -325,9 +384,9 @@ async def run_counterfactual(conn, agent_id: str, trade_id: str, llm_fn, system_
         f"TP: {decision.get('take_profit_price', 'N/A')}\n"
         f"\nBased on the market context at that time, would taking a long or short position "
         f"have been profitable? What would the PnL have been?\n"
-        f"Respond with JSON: {{\"action\": \"long\"|\"short\"|\"wait\", \"expected_pnl_pct\": number, \"confidence\": number}}"
+        f'Respond with JSON: {{"action": "long"|"short"|"wait", "expected_pnl_pct": number, "confidence": number}}'
     )
-    
+
     try:
         result = llm_fn(system_prompt, prompt, agent_id=agent_id)
         if isinstance(result, tuple):
@@ -338,8 +397,17 @@ async def run_counterfactual(conn, agent_id: str, trade_id: str, llm_fn, system_
                 """UPDATE decisions 
                    SET counterfactual_result = ?, counterfactual_was_better = ?
                    WHERE id = ?""",
-                (json.dumps(result), 1 if result.get("action") in ("long", "short") else 0, decision["id"]),
+                (
+                    json.dumps(result),
+                    1 if result.get("action") in ("long", "short") else 0,
+                    decision["id"],
+                ),
             )
             conn.commit()
     except Exception as exc:
-        logger.warning("[%s] Counterfactual analysis failed for %s: %s", agent_id, decision["id"], exc)
+        logger.warning(
+            "[%s] Counterfactual analysis failed for %s: %s",
+            agent_id,
+            decision["id"],
+            exc,
+        )

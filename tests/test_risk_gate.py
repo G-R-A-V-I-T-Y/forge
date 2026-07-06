@@ -1,4 +1,5 @@
 import pytest
+
 from risk.gate import RiskViolation, validate_order
 
 CONFIG = {
@@ -94,7 +95,7 @@ def test_liquidation_price_too_close_raises():
     # 14.52 >= 2 * 2.20 = 4.40  → this passes.
     # To fail: leverage=10, SL very close to liq
     entry = 145.20
-    sl = entry * (1 - 0.06)   # 6% below entry — SL distance = 8.71
+    sl = entry * (1 - 0.06)  # 6% below entry — SL distance = 8.71
     # liq at 10x = 145.20 * (1 - 0.1) = 130.68 → liq distance = 14.52
     # need liq_dist >= 2 * sl_dist → 14.52 >= 17.42 → FAILS
     order = {**VALID_ORDER, "entry_price": entry, "stop_loss_price": sl, "leverage": 10}
@@ -104,6 +105,7 @@ def test_liquidation_price_too_close_raises():
 
 
 # ---- New checks for M6: SL/TP geometry ----
+
 
 def test_long_sl_above_entry_fails():
     # Long: SL must be BELOW entry
@@ -149,6 +151,7 @@ def test_short_sl_below_entry_fails():
 
 # ---- New checks for M6: notional exposure ----
 
+
 def test_notional_exposure_over_cap_raises():
     # position_size_pct * leverage = 0.20 * 10 = 2.0 → at the boundary, should pass
     order = {**VALID_ORDER, "position_size_pct": 0.20, "leverage": 10}
@@ -174,12 +177,19 @@ def test_notional_exposure_within_cap_passes():
 
 # ---- New checks for M6: entry price proximity ----
 
+
 def test_entry_price_too_far_from_heartbeat_raises():
     # Heartbeat price is 145.20, entry at 146.00 is 0.55% away — above 0.5% threshold
     order = {**VALID_ORDER, "entry_price": 146.00}
     heartbeat_price = 145.20
     with pytest.raises(RiskViolation) as exc:
-        validate_order(order, BALANCE, CONFIG, open_position_count=0, heartbeat_price=heartbeat_price)
+        validate_order(
+            order,
+            BALANCE,
+            CONFIG,
+            open_position_count=0,
+            heartbeat_price=heartbeat_price,
+        )
     assert "deviates" in exc.value.reason.lower()
 
 
@@ -187,7 +197,9 @@ def test_entry_price_within_heartbeat_tolerance_passes():
     # 0.4% deviation — within 0.5% tolerance
     order = {**VALID_ORDER, "entry_price": 145.78}  # 0.4% above 145.20
     heartbeat_price = 145.20
-    validate_order(order, BALANCE, CONFIG, open_position_count=0, heartbeat_price=heartbeat_price)
+    validate_order(
+        order, BALANCE, CONFIG, open_position_count=0, heartbeat_price=heartbeat_price
+    )
 
 
 def test_no_heartbeat_price_skips_proximity_check():
@@ -199,6 +211,7 @@ def test_no_heartbeat_price_skips_proximity_check():
 
 # ---- New checks for M6: reward:risk ratio ----
 
+
 def test_reward_risk_too_low_raises():
     # Reward: 6.5/145.20 = 4.48%, Risk: 2.2/145.20 = 1.52% → ratio = 2.95 — should pass
     # Make it fail: very tight TP, wide SL
@@ -207,7 +220,12 @@ def test_reward_risk_too_low_raises():
     tp = entry * 1.035  # 3.5% above → reward = 3.5% → ratio = 1.17 — passes
     # Make it fail: risk = 3%, reward = 1% → ratio = 0.33 < 0.5
     tp = entry * 1.01  # 1% above → reward = 1% → ratio = 0.33
-    order = {**VALID_ORDER, "entry_price": entry, "stop_loss_price": sl, "take_profit_price": tp}
+    order = {
+        **VALID_ORDER,
+        "entry_price": entry,
+        "stop_loss_price": sl,
+        "take_profit_price": tp,
+    }
     with pytest.raises(RiskViolation) as exc:
         validate_order(order, BALANCE, CONFIG, open_position_count=0)
     assert "reward:risk" in exc.value.reason.lower()
@@ -218,5 +236,10 @@ def test_reward_risk_at_minimum_passes():
     entry = 145.20
     sl = entry * 0.98  # 2% below → risk = 2%
     tp = entry * 1.03  # 3% above → reward = 3% → ratio = 1.5 — passes
-    order = {**VALID_ORDER, "entry_price": entry, "stop_loss_price": sl, "take_profit_price": tp}
+    order = {
+        **VALID_ORDER,
+        "entry_price": entry,
+        "stop_loss_price": sl,
+        "take_profit_price": tp,
+    }
     validate_order(order, BALANCE, CONFIG, open_position_count=0)

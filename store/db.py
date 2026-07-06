@@ -101,7 +101,9 @@ def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def update_last_model_used(conn: sqlite3.Connection, agent_id: str, model_name: str | None) -> None:
+def update_last_model_used(
+    conn: sqlite3.Connection, agent_id: str, model_name: str | None
+) -> None:
     """Record which model produced (or failed to produce) an agent's most
     recent decision cycle — "most recently used model", not "model used for
     the last trade": called after every wait/close/enter/error cycle, per
@@ -177,7 +179,7 @@ def get_latest_account(
 
 def void_corrupted_trades(conn: sqlite3.Connection) -> int:
     """Void trades that are structurally corrupted (missing SL/TP, wrong geometry, etc.)
-    
+
     Returns the number of trades voided.
     """
     # Find trades with missing SL or TP (both should be non-null)
@@ -187,7 +189,7 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
            WHERE (stop_loss_price IS NULL OR take_profit_price IS NULL)
            AND voided = 0"""
     )
-    
+
     # Find trades where SL/TP geometry is wrong for the direction
     # Long: SL should be < entry < TP
     # Short: TP should be < entry < SL
@@ -201,7 +203,7 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
                (direction = 'short' AND (take_profit_price >= entry_price OR entry_price >= stop_loss_price))
            )"""
     )
-    
+
     # Find trades where SL distance is < 0.3% (too tight)
     cursor = conn.execute(
         """UPDATE trades 
@@ -209,7 +211,7 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
            WHERE voided = 0
            AND ABS(entry_price - stop_loss_price) / entry_price < 0.003"""
     )
-    
+
     # Find trades where TP distance is < 0.5% (below fee hurdle)
     cursor = conn.execute(
         """UPDATE trades 
@@ -217,9 +219,9 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
            WHERE voided = 0
            AND ABS(take_profit_price - entry_price) / entry_price < 0.005"""
     )
-    
+
     conn.commit()
-    
+
     # Return count of voided trades
     cursor = conn.execute("SELECT COUNT(*) FROM trades WHERE voided = 1")
     return cursor.fetchone()[0]

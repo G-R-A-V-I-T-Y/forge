@@ -17,22 +17,29 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
     desk_config = config.get("desk", {})
     starting_balance = desk_config.get("starting_balance", 50000.0)
     universe = config.get("universe", ["BTC-PERP", "ETH-PERP", "SOL-PERP"])
-    
+
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    
+
     # Seed random_walk agent
     random_walk_config = {
         "pinned_model": None,
         "benchmark_type": "random_walk",
         "description": "Random walk benchmark — makes random trading decisions",
     }
-    
+
     conn.execute(
         """INSERT OR IGNORE INTO agents (id, name, status, spawn_date, config_json, current_thesis_version)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        ("benchmark_random_walk", "random_walk", "active", now, json.dumps(random_walk_config), 1),
+        (
+            "benchmark_random_walk",
+            "random_walk",
+            "active",
+            now,
+            json.dumps(random_walk_config),
+            1,
+        ),
     )
-    
+
     # Seed btc_hold agent
     btc_hold_config = {
         "pinned_model": None,
@@ -40,25 +47,33 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
         "description": "BTC hold benchmark — only trades BTC, holds positions indefinitely",
         "preferred_asset": "BTC-PERP",
     }
-    
+
     conn.execute(
         """INSERT OR IGNORE INTO agents (id, name, status, spawn_date, config_json, current_thesis_version)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        ("benchmark_btc_hold", "btc_hold", "active", now, json.dumps(btc_hold_config), 1),
+        (
+            "benchmark_btc_hold",
+            "btc_hold",
+            "active",
+            now,
+            json.dumps(btc_hold_config),
+            1,
+        ),
     )
-    
+
     conn.commit()
     print("Seeded benchmark agents: random_walk, btc_hold")
 
 
 if __name__ == "__main__":
-    import yaml
     from pathlib import Path
-    
+
+    import yaml
+
     config_path = Path("config.yaml")
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    
+
     conn = sqlite3.connect("data/forge.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     seed_benchmark_agents(conn, config)
