@@ -33,6 +33,9 @@ desk:
   taker_fee: 0.00035
   maker_fee: -0.00005
 
+# coinalyze:
+#   api_key: "..."              # alternative to COINALYZE_API_KEY env var; heartbeat liq_* fields degrade to null if neither is set
+
 data_source: hyperliquid          # stub | hyperliquid
 llm_backend: ollama                # stub | ollama — ollama uses the local Ollama instance
 llm_model: "qwen3.6:35b_optimized" # model name passed to Ollama's /api/chat

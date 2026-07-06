@@ -7,8 +7,10 @@ in config.yaml) and written atomically to `desk.heartbeat_path` (default
 Hyperliquid API on its own wake cycle.
 
 This module owns: fetching raw data for all universe assets, computing every
-derived per-asset / cross-asset / regime field, and the atomic file
-write/read. See
+derived per-asset / cross-asset / regime field, the atomic file write/read,
+and the append-only historical capture (`append_historical()`), which mirrors
+each packet as one JSON line into a daily `data/historical_data/{YYYY-MM-DD}.jsonl`
+file and is failure-isolated from the primary write. See
 docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md for the
 full field list and the documented approximations (OI-history sampling,
 BTC-dominance-within-tracked-universe, Fear & Greed third-party fetch).
@@ -100,6 +102,8 @@ PER_ASSET_FIELDS = [
     "bb_width_percentile", "volume_percentile_14d", "funding_acceleration",
     "oi_drawdown_pct", "large_trade_volume_usd", "liquidation_cascade_flag",
     "candles_5m", "candles_30m", "candles_4h",
+    # Liquidation fields (Coinalyze REST, 15-min lookback)
+    "liq_total_usd", "liq_long_usd", "liq_short_usd",
 ]
 
 # Resampling factors (in units of 5m candles) for the longer-horizon
@@ -148,9 +152,9 @@ def _rsi(closes: list[float], period: int = 14) -> float | None:
     losses = [max(-d, 0.0) for d in deltas]
     avg_gain = statistics.mean(gains[:period])
     avg_loss = statistics.mean(losses[:period])
-    for g, l in zip(gains[period:], losses[period:]):
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + l) / period
+    for gain, loss in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -340,7 +344,11 @@ async def _fetch_asset_snapshot(provider, asset: str) -> dict:
     }
 
 
-def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
+def _compute_asset_fields(
+    raw: dict,
+    prior_oi_history: list[float],
+    liq_data: dict[str, float | None] | None = None,
+) -> dict:
     candles = raw["candles"]
     if not candles:
         return {k: None for k in PER_ASSET_FIELDS}
@@ -495,6 +503,10 @@ def _compute_asset_fields(raw: dict, prior_oi_history: list[float]) -> dict:
         "candles_5m": candles_5m,
         "candles_30m": candles_30m,
         "candles_4h": candles_4h,
+        # Liquidation data from Coinalyze (15-min lookback)
+        "liq_total_usd": liq_data.get("liq_total_usd") if liq_data else None,
+        "liq_long_usd": liq_data.get("liq_long_usd") if liq_data else None,
+        "liq_short_usd": liq_data.get("liq_short_usd") if liq_data else None,
     }
 
     # Compute approved derived features from the feature library
@@ -707,6 +719,33 @@ async def _fetch_regime_tag(provider) -> str:
         return classify_regime([])
 
 
+async def _fetch_liquidations_batch(
+    universe: list[str],
+    coinalyze_api_key: str | None = None,
+) -> dict[str, dict[str, float | None] | None]:
+    """Fetch liquidation data for all universe assets via Coinalyze.
+
+    Returns a dict mapping each project asset to its liquidation feature
+    dict (``{"liq_total_usd", "liq_long_usd", "liq_short_usd"}``) or
+    ``None`` if Coinalyze is unreachable or the asset is not covered.
+    """
+    try:
+        from market.coinalyze import CoinalyzeClient
+    except ImportError:
+        logger.warning("heartbeat: CoinalyzeClient not available", exc_info=True)
+        return {a: None for a in universe}
+
+    try:
+        async with CoinalyzeClient(api_key=coinalyze_api_key) as client:
+            return await client.fetch_liquidations_for_assets(universe)
+    except Exception:
+        logger.warning(
+            "heartbeat: Coinalyze liquidations fetch failed, using None for all assets",
+            exc_info=True,
+        )
+        return {a: None for a in universe}
+
+
 # ---------------------------------------------------------------------------
 # OI-history rolling state (deliberate workaround for missing OI-history API)
 # ---------------------------------------------------------------------------
@@ -743,6 +782,36 @@ def _update_oi_history(history: dict[str, list[float]], asset: str, oi_value: fl
         series = series + [oi_value]
         history[asset] = series[-OI_HISTORY_MAX_SAMPLES:]
     return prior
+
+
+# ---------------------------------------------------------------------------
+# Historical capture (append-only JSONL)
+# ---------------------------------------------------------------------------
+
+HISTORICAL_DATA_DIR = "data/historical_data"
+
+
+def append_historical(packet: dict, dir_path: str = HISTORICAL_DATA_DIR) -> None:
+    """Append one heartbeat packet as a JSON line to a daily JSONL file.
+
+    File name is ``{YYYY-MM-DD}.jsonl`` derived from the packet's
+    ``timestamp`` field (UTC).  Failure is silently swallowed so this
+    path can *never* block or degrade the primary heartbeat write.
+    """
+    try:
+        ts = packet.get("timestamp")
+        if not ts:
+            return
+        day = ts[:10]  # "YYYY-MM-DD"
+        file_path = os.path.join(dir_path, f"{day}.jsonl")
+        os.makedirs(dir_path, exist_ok=True)
+        with open(file_path, "a") as f:
+            f.write(json.dumps(packet) + "\n")
+    except Exception:
+        logger.warning(
+            "failed to append historical heartbeat for %s",
+            packet.get("timestamp", "?"), exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +895,7 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     desk_cfg = config.get("desk", {})
     heartbeat_path = desk_cfg.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
     universe = config.get("universe", [])
+    coinalyze_key = config.get("coinalyze", {}).get("api_key")
 
     oi_history = _load_oi_history(OI_HISTORY_PATH)
     sem = asyncio.Semaphore(5)
@@ -836,7 +906,12 @@ async def generate_heartbeat(provider, config: dict) -> dict:
 
     fear_index_task = asyncio.create_task(_fetch_fear_greed())
     regime_tag_task = asyncio.create_task(_fetch_regime_tag(provider))
+
+    # Fetch Coinalyze liquidation data once for the full universe (batched)
+    liq_task = _fetch_liquidations_batch(universe, coinalyze_key)
+
     raw_results = await asyncio.gather(*[_one(a) for a in universe])
+    liq_data_by_asset = await liq_task
 
     assets_fields: dict[str, dict] = {}
     asset_returns: dict[str, list[float]] = {}
@@ -844,7 +919,10 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     for asset, raw in raw_results:
         raw_oi = raw["oi"].get("openInterest")
         prior_history = _update_oi_history(oi_history, asset, raw_oi)
-        assets_fields[asset] = _compute_asset_fields(raw, prior_history)
+        liq_for_asset = liq_data_by_asset.get(asset)
+        assets_fields[asset] = _compute_asset_fields(
+            raw, prior_history, liq_for_asset,
+        )
         closes = [c[4] for c in raw["candles"]]
         asset_returns[asset] = _log_returns(closes) if len(closes) > 1 else []
 
@@ -862,4 +940,5 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         "regime": regime,
     }
     write_heartbeat(heartbeat_path, packet)
+    append_historical(packet)
     return packet
