@@ -436,11 +436,13 @@ def decide(
         try:
             import sqlite3
             conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            pinned_model = _get_agent_pinned_model(conn, agent_id)
-            if pinned_model is None:
-                pinned_model = _get_agent_pinned_model_from_settings(conn, agent_id)
-            conn.close()
+            try:
+                conn.row_factory = sqlite3.Row
+                pinned_model = _get_agent_pinned_model(conn, agent_id)
+                if pinned_model is None:
+                    pinned_model = _get_agent_pinned_model_from_settings(conn, agent_id)
+            finally:
+                conn.close()
         except Exception:
             pass
     

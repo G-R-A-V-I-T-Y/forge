@@ -182,9 +182,9 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
     """
     # Find trades with missing SL or TP (both should be non-null)
     cursor = conn.execute(
-        """UPDATE trades 
+        """UPDATE trades
            SET voided = 1, void_reason = 'missing_stop_loss_or_take_profit'
-           WHERE stop_loss_price IS NULL OR take_profit_price IS NULL
+           WHERE (stop_loss_price IS NULL OR take_profit_price IS NULL)
            AND voided = 0"""
     )
     
@@ -216,22 +216,6 @@ def void_corrupted_trades(conn: sqlite3.Connection) -> int:
            SET voided = 1, void_reason = 'take_profit_below_fee_hurdle'
            WHERE voided = 0
            AND ABS(take_profit_price - entry_price) / entry_price < 0.005"""
-    )
-    
-    # Find trades with missing take_profit_price
-    cursor = conn.execute(
-        """UPDATE trades 
-           SET voided = 1, void_reason = 'missing_take_profit'
-           WHERE voided = 0
-           AND take_profit_price IS NULL"""
-    )
-    
-    # Find trades with missing stop_loss_price
-    cursor = conn.execute(
-        """UPDATE trades 
-           SET voided = 1, void_reason = 'missing_stop_loss'
-           WHERE voided = 0
-           AND stop_loss_price IS NULL"""
     )
     
     conn.commit()
