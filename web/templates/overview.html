@@ -152,16 +152,13 @@ function toggleReasoning(id) {
 
 <script src="/static/forge.js"></script>
 
-<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-
 <link rel="stylesheet" href="https://esm.sh/@1771technologies/lytenyte-core@2.2.0/css/dark.css">
 <link rel="stylesheet" href="https://esm.sh/@1771technologies/lytenyte-core@2.2.0/css/fonts.css">
 
 <script type="module">
-import { Grid, useClientDataSource } from "https://esm.sh/@1771technologies/lytenyte-core@2.2.0";
-import { useMemo } from "https://esm.sh/react@18.3.1";
-import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
+import { Grid, useClientDataSource } from "https://esm.sh/@1771technologies/lytenyte-core@2.2.0?external=react,react-dom";
+import React, { useMemo } from "https://esm.sh/react@18.3.1?target=es2022";
+import { createRoot } from "https://esm.sh/react-dom@18.3.1/client?target=es2022";
 
 /* ── Sparkline SVG helper ── */
 function renderSparklineSVG(history, width, height) {
@@ -281,7 +278,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
           if (d.win_rate >= 0.55) cls = 'win';
           else if (d.win_rate > 0) cls = 'loss';
           var val = d.win_rate > 0 ? (d.win_rate * 100).toFixed(1) + '%' : '\u2014';
-          return React.createElement('td', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
         }
       },
       {
@@ -293,7 +290,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
           if (d.profit_factor >= 1.4) cls = 'win';
           else if (d.profit_factor > 0) cls = 'loss';
           var val = d.profit_factor > 0 ? d.profit_factor.toFixed(2) : '\u2014';
-          return React.createElement('td', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
         }
       },
       {
@@ -305,7 +302,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
           if (d.sharpe >= 1.5) cls = 'win';
           else if (d.sharpe > 0) cls = 'loss';
           var val = d.sharpe > 0 ? d.sharpe.toFixed(2) : '\u2014';
-          return React.createElement('td', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12, color: '#f0883e' } }, val);
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12, color: '#f0883e' } }, val);
         }
       },
       {
@@ -315,7 +312,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
           var d = p.row.data;
           var cls = d.weekly_return > 0 ? 'win' : (d.weekly_return < 0 ? 'loss' : '');
           var val = d.weekly_return !== 0 ? (d.weekly_return * 100).toFixed(2) + '%' : '0.0%';
-          return React.createElement('td', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
         }
       },
       {
@@ -324,7 +321,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
           if (p.row.kind !== 'leaf') return null;
           var d = p.row.data;
           var val = (d.max_drawdown * 100).toFixed(1) + '%';
-          return React.createElement('td', { className: 'loss', style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+          return React.createElement('div', { className: 'loss', style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
         }
       },
       {

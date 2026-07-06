@@ -640,20 +640,23 @@ async def api_all_balance_history():
     """Returns historical account balance data for all agents,
     keyed by agent name (matching WebSocket desk data)."""
     conn = app.state.conn
-    agents = conn.execute("SELECT id, name FROM agents ORDER BY name").fetchall()
-    result = {}
-    for agent in agents:
-        aid = agent["id"]
-        name = agent["name"]
-        rows = conn.execute(
-            "SELECT balance, recorded_at FROM accounts "
-            "WHERE agent_id = ? AND mode = 'paper' "
-            "ORDER BY recorded_at DESC LIMIT 30",
-            (aid,),
-        ).fetchall()
-        result[name] = [
-            {"balance": r["balance"], "recorded_at": r["recorded_at"]} for r in rows
-        ]
+    agents = conn.execute(
+        "SELECT id, name FROM agents ORDER BY name"
+    ).fetchall()
+    agent_map = {a["id"]: a["name"] for a in agents}
+    rows = conn.execute(
+        "SELECT agent_id, balance, recorded_at FROM accounts "
+        "WHERE mode = 'paper' "
+        "ORDER BY agent_id, recorded_at DESC"
+    ).fetchall()
+    result = {name: [] for name in agent_map.values()}
+    for row in rows:
+        name = agent_map.get(row["agent_id"])
+        if name and len(result[name]) < 30:
+            result[name].append({
+                "balance": row["balance"],
+                "recorded_at": row["recorded_at"]
+            })
     return result
 
 

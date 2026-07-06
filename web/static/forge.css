@@ -54,15 +54,15 @@
 }
 
 /* Win/loss coloring for LyteNyte cells */
-.ln-grid.ln-dark .ln-row-cell.win {
+.ln-grid.ln-dark .win {
   color: #3fb950;
 }
 
-.ln-grid.ln-dark .ln-row-cell.loss {
+.ln-grid.ln-dark .loss {
   color: #f85149;
 }
 
-.ln-grid.ln-dark .ln-row-cell.open {
+.ln-grid.ln-dark .open {
   color: #f0883e;
 }
 
