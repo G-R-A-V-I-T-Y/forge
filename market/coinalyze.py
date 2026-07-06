@@ -20,8 +20,11 @@ exchange-specific liquidation breakdowns, so the data represents the
 aggregated liquidation volume across all supported venues for the given
 symbol.
 
-Auth: API key via ``COINALYZE_API_KEY`` environment variable or
-``config.yaml`` ``coinalyze_api_key`` field.
+Auth: API key via ``COINALYZE_API_KEY`` environment variable, or a
+``coinalyze.api_key`` entry in ``config.yaml``::
+
+    coinalyze:
+      api_key: "..."
 """
 from __future__ import annotations
 
