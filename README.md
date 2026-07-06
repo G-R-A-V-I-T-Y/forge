@@ -155,11 +155,14 @@ re-initializes the schema, and seeds each agent via `spawn_agent()`. Pass
 `--yes` to skip the confirmation prompt. `python forge.py` will then launch
 all 10 agents concurrently.
 
-The `/` overview page shows a sortable leaderboard (click any column header)
-across all agents, and `/agents/{name}` shows a full detail page per agent.
-Both are backed by `GET /api/desk`, and `web/static/forge.js` opens a
-`WS /api/ws/desk` connection on page load that pushes the same desk summary
-every 30 seconds so the leaderboard updates live without a page reload.
+The `/` overview page shows a sortable leaderboard, rendered as a LyteNyte
+Grid with a per-agent balance sparkline column, across all agents, and
+`/agents/{name}` shows a full detail page per agent. The leaderboard is
+backed by `GET /api/desk` for row data and `GET /api/agents/balance-history`
+for sparkline history (or `GET /api/agents/{name}/balance-history` for a
+single agent), and `web/static/forge.js` opens a `WS /api/ws/desk` connection
+on page load that pushes the same desk summary every 30 seconds so the grid
+updates live without a page reload.
 
 ## Milestones
 
@@ -167,5 +170,5 @@ every 30 seconds so the leaderboard updates live without a page reload.
 - **M2** (complete): Real Hyperliquid market data — `HyperliquidClient`, `MarketProvider`, `StubMarket`
 - **M3** (complete): Real LLM decisions (Qwen3.6-35B, now via the forge-managed llama-server) + performance metrics
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
-- **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard + agent detail pages, `/api/desk`, `WS /api/ws/desk`
+- **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard (LyteNyte Grid + sparklines) + agent detail pages, `/api/desk`, `/api/agents/balance-history`, `WS /api/ws/desk`
 - **M6-M10**: Full system
