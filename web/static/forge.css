@@ -1,5 +1,109 @@
 /* forge.css — chart and trade-bank styling. No build step, no dependencies. */
 
+/* --- LyteNyte Grid: dark theme overrides for Forge visual consistency --- */
+.ln-grid.ln-dark {
+  --ln-font-family: 'Courier New', monospace;
+  --ln-row-height: 32px;
+  --ln-header-height: 32px;
+  --ln-header-foreground: #8b949e;
+  --ln-header-background: #161b22;
+  --ln-row-foreground: #e6edf3;
+  --ln-row-background: #0d1117;
+  --ln-row-hover-background: #161b22;
+  --ln-row-alternate-background: #0d1117;
+  --ln-border-color: #21262d;
+  --ln-scrollbar-thumb: #30363d;
+  --ln-scrollbar-track: #0d1117;
+  --ln-sort-indicator-color: #8b949e;
+  --ln-sort-indicator-hover-color: #58a6ff;
+  --ln-selection-color: #1f6feb;
+}
+
+.ln-grid.ln-dark .ln-header {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.ln-grid.ln-dark .ln-row {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.ln-grid.ln-dark .ln-cell {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.ln-grid.ln-dark .ln-header-cell {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: #8b949e;
+  background: #161b22;
+  border-bottom: 1px solid #21262d;
+}
+
+.ln-grid.ln-dark .ln-row-cell {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: #e6edf3;
+  border-bottom: 1px solid #21262d;
+}
+
+.ln-grid.ln-dark .ln-row:hover .ln-row-cell {
+  background: #161b22;
+}
+
+/* Win/loss coloring for LyteNyte cells */
+.ln-grid.ln-dark .win {
+  color: #3fb950;
+}
+
+.ln-grid.ln-dark .loss {
+  color: #f85149;
+}
+
+.ln-grid.ln-dark .open {
+  color: #f0883e;
+}
+
+/* Sortable header styling */
+.ln-grid.ln-dark .ln-header-cell[aria-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ln-grid.ln-dark .ln-header-cell[aria-sort]:hover {
+  color: #58a6ff;
+}
+
+/* Column resize handle */
+.ln-grid.ln-dark .ln-resize-handle {
+  background: #21262d;
+}
+
+.ln-grid.ln-dark .ln-resize-handle:hover {
+  background: #58a6ff;
+}
+
+/* Scrollbar styling */
+.ln-grid.ln-dark::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.ln-grid.ln-dark::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+.ln-grid.ln-dark::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+
+.ln-grid.ln-dark::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
 /* --- Candlestick chart container --- */
 .chart-container {
   background: #0d1117;
