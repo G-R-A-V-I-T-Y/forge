@@ -374,15 +374,52 @@ def _run_llama_server_tier(
 _DEFAULT_LLAMA_PORT = 8080
 
 
+def _get_agent_pinned_model(conn, agent_id: str) -> Tier | None:
+    """Get the pinned model for an agent, if one is configured."""
+    try:
+        row = conn.execute(
+            "SELECT config_json FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+        if row:
+            import json
+            config = json.loads(row["config_json"])
+            pinned_model = config.get("pinned_model")
+            if pinned_model:
+                return Tier(kind="opencode", model_id=pinned_model, variant=None, display_name=pinned_model)
+    except Exception:
+        pass
+    return None
+
+
+def _get_agent_pinned_model_from_settings(conn, agent_id: str) -> Tier | None:
+    """Get the pinned model from settings DB for an agent."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (f"agent_{agent_id}_model",)
+        ).fetchone()
+        if row:
+            model_id = json.loads(row["value"])
+            return Tier(kind="opencode", model_id=model_id, variant=None, display_name=model_id)
+    except Exception:
+        pass
+    return None
+
+
 def decide(
     system_prompt: str,
     decision_prompt: str,
     config: dict | None = None,
+    agent_id: str | None = None,
 ) -> tuple[dict, str | None]:
     """Try the ordered model chain, returning (decision_dict, model_display_name)
     for the first tier that succeeds. If every tier fails, returns
     ({"action": "error", "reason": "no model available"}, None) — never a
     silent generic "wait", per the captain's explicit requirement.
+
+    For M6: if agent_id is provided, checks for a pinned model for that agent.
+    If a pinned model is found, only that model is tried (no fallback chain).
+    This ensures each agent uses the same model consistently for reproducible
+    decision-making.
 
     The chain is loaded from the settings DB on each call so that
     Settings → Save & Apply takes effect without a forge restart.
@@ -392,6 +429,40 @@ def decide(
     convention.
     """
     message = f"{system_prompt}\n\n{decision_prompt}"
+    
+    # Check for agent-pinned model
+    pinned_model = None
+    if agent_id:
+        try:
+            import sqlite3
+            conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            pinned_model = _get_agent_pinned_model(conn, agent_id)
+            if pinned_model is None:
+                pinned_model = _get_agent_pinned_model_from_settings(conn, agent_id)
+            conn.close()
+        except Exception:
+            pass
+    
+    # If agent has a pinned model, only try that model (no fallback)
+    if pinned_model:
+        logger.info("Agent %s using pinned model: %s", agent_id, pinned_model.display_name)
+        decision = None
+        if pinned_model.kind == "opencode":
+            decision = _run_opencode_tier(pinned_model.model_id, pinned_model.variant, message)
+        elif pinned_model.kind == "llama_server":
+            decision = _run_llama_server_tier(system_prompt, decision_prompt, config)
+        else:
+            decision = _run_ollama_tier(system_prompt, decision_prompt, config)
+        
+        if decision is not None:
+            logger.info("Pinned model: %s answered", pinned_model.display_name)
+            return decision, pinned_model.display_name
+        
+        logger.error("Pinned model %s failed for agent %s", pinned_model.display_name, agent_id)
+        return {"action": "error", "reason": f"pinned model {pinned_model.display_name} unavailable"}, None
+    
+    # No pinned model — use the normal chain
     chain = get_chain()
 
     for tier in chain:

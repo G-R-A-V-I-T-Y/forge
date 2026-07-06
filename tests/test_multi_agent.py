@@ -107,6 +107,7 @@ class TestCompetingPositions:
             "direction": "short",
             "entry_price": 150.00,
             "stop_loss_price": 152.00,
+            "take_profit_price": 148.00,  # For short: TP < entry < SL
         }
         validate_order(short_order, BALANCE, CONFIG, open_position_count=0)
 

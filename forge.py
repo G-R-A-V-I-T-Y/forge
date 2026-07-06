@@ -245,6 +245,37 @@ async def main():
     logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
 
     # ------------------------------------------------------------------
+    # Counterfactual analysis — runs nightly at 02:00 UTC.
+    # Analyzes past "wait" decisions to determine if taking the trade
+    # would have been profitable.
+    # ------------------------------------------------------------------
+    async def _run_counterfactual_job():
+        """Run counterfactual analysis for all agents."""
+        try:
+            agents = conn.execute("SELECT id, name FROM agents").fetchall()
+            for agent in agents:
+                agent_id = agent["id"]
+                agent_name = agent["name"]
+                logger.info("Running counterfactual analysis for agent %s (%s)", agent_id, agent_name)
+                # Get the system prompt for the agent
+                from agents.persona import build_system_prompt
+                system_prompt = build_system_prompt(agent_id, config)
+                from agents.decision_loop import run_counterfactual
+                await run_counterfactual(conn, agent_id, None, lambda sp, dp, **kw: llm_fn(sp, dp), system_prompt)
+        except Exception as exc:
+            logger.error("Counterfactual analysis failed: %s", exc, exc_info=True)
+
+    scheduler.add_job(
+        _run_counterfactual_job,
+        trigger="cron",
+        hour=2,
+        minute=0,
+        id="counterfactual",
+        replace_existing=True,
+    )
+    logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
+
+    # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all
     # agents are spawned as parallel subprocesses.
     # ------------------------------------------------------------------
@@ -275,10 +306,6 @@ async def main():
     finally:
         await provider.__aexit__(None, None, None)
         llama_server.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 if __name__ == "__main__":

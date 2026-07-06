@@ -68,7 +68,7 @@ def _bridge_factory(config):
 STUB_MODEL_LABEL = "Test Stub Model"
 
 
-def _stub_llm_fn(system_prompt, decision_prompt):
+def _stub_llm_fn(system_prompt, decision_prompt, **kwargs):
     """llm_fn now returns (decision_dict, model_display_name) — see
     llm/model_chain.py's decide(). Wraps llm.stub.decide() for tests that
     only care about the decision shape, not the fallback chain itself."""
@@ -129,7 +129,7 @@ async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def bad_llm(sys, prompt):
+    def bad_llm(sys, prompt, **kwargs):
         return {
             "action": "enter",
             "asset": "SOL-PERP",
@@ -172,7 +172,7 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def wait_llm(sys, prompt):
+    def wait_llm(sys, prompt, **kwargs):
         return {"action": "wait", "reason": "no setup fits thesis today"}, "Test Wait Model"
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
@@ -211,7 +211,7 @@ async def test_decision_loop_error_action_propagates_and_records_no_model_availa
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def no_model_llm(sys, prompt):
+    def no_model_llm(sys, prompt, **kwargs):
         return {"action": "error", "reason": "no model available"}, None
 
     heartbeat_path = str(tmp_path / "heartbeat.json")

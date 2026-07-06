@@ -132,6 +132,12 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     close_ts = time.time()
 
+    # Calculate duration in minutes
+    entry_ts = _parse_entry_ts(position_dict.get("opened_at"))
+    duration_minutes = 0
+    if entry_ts is not None:
+        duration_minutes = max(0, int((close_ts - entry_ts) / 60))
+
     funding_pnl = _calculate_funding(position_dict, close_ts, funding_history)
 
     net_pnl_usd = gross_pnl_usd - entry_fee - exit_fee + funding_pnl
@@ -156,10 +162,10 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
         conn.execute(
             """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
                exit_reason=?, pnl_pct=?, pnl_usd=?, result=?,
-               fees_paid=?, funding_paid=? WHERE id=?""",
+               fees_paid=?, funding_paid=?, duration_minutes=? WHERE id=?""",
             (exit_price, now, reason, net_pnl_pct, net_pnl_usd,
              "win" if net_pnl_usd > 0 else "loss",
-             entry_fee + exit_fee, -funding_pnl, position_dict["trade_id"]),
+             entry_fee + exit_fee, -funding_pnl, duration_minutes, position_dict["trade_id"]),
         )
         conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
         conn.execute(
@@ -174,6 +180,7 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
         "pnl_usd": net_pnl_usd,
         "fees_paid": entry_fee + exit_fee,
         "funding_paid": -funding_pnl,
+        "duration_minutes": duration_minutes,
     }
 
 

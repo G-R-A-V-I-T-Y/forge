@@ -25,7 +25,7 @@ desk:
   max_position_size_pct: 0.20
   max_concurrent_positions: 3
   wake_interval_seconds: 300
-  starting_balance: 1000.0
+  starting_balance: 50000.0
   target_agent_count: 10
   drawdown_kill_pct: 0.15
   heartbeat_interval_seconds: 300

@@ -76,7 +76,7 @@ async def run_decision(
             universe=assets,
         )
 
-        response, model_used = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt)
+        response, model_used = _call_llm_with_retry(llm_fn, system_prompt, decision_prompt, agent_id)
 
         # Record which model produced (or failed to produce) this cycle's
         # decision — "most recently used model", not "model used for the
@@ -121,12 +121,15 @@ async def run_decision(
 
         if action == "enter":
             open_positions = get_positions(conn, agent_id)
+            asset_data = (heartbeat.get("assets") or {}).get(response.get("asset", ""))
+            heartbeat_price = (asset_data or {}).get("price") if asset_data else None
             try:
                 validate_order(
                     order=response,
                     account_balance=_get_balance(conn, agent_id, desk_config["starting_balance"]),
                     config=desk_config,
                     open_position_count=len(open_positions),
+                    heartbeat_price=heartbeat_price,
                 )
             except RiskViolation as e:
                 logger.warning("[%s] Risk gate blocked order: %s", agent_id, e.reason)
@@ -175,7 +178,7 @@ async def run_decision(
 
 
 def _call_llm_with_retry(
-    llm_fn, system_prompt: str, decision_prompt: str, max_retries: int = 2
+    llm_fn, system_prompt: str, decision_prompt: str, agent_id: str | None, max_retries: int = 2
 ) -> tuple[dict | None, str | None]:
     """Call LLM and validate JSON response. Retry up to max_retries on bad output.
 
@@ -195,7 +198,7 @@ def _call_llm_with_retry(
     last_model_used = None
     for attempt in range(max_retries + 1):
         try:
-            result = llm_fn(system_prompt, decision_prompt)
+            result = llm_fn(system_prompt, decision_prompt, agent_id=agent_id)
         except Exception as exc:
             logger.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
             if attempt < max_retries:
@@ -276,3 +279,67 @@ def _get_balance(conn, agent_id: str, starting_balance: float) -> float:
     from store.db import get_latest_account
     latest = get_latest_account(conn, agent_id, "paper")
     return latest["balance"] if latest else starting_balance
+
+
+def log_decision(conn, agent_id: str, action: str, reason: str | None, details: dict | None) -> None:
+    """Log a decision to the decisions table."""
+    from store.db import _now
+    conn.execute(
+        """INSERT INTO decisions (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (agent_id, _now(), action, reason, json.dumps(details) if details else None),
+    )
+    conn.commit()
+
+
+async def run_counterfactual(conn, agent_id: str, trade_id: str, llm_fn, system_prompt: str) -> None:
+    """Run a counterfactual analysis for a 'wait' decision that could have been a trade.
+    
+    This is called nightly to analyze past wait decisions and determine if taking
+    the trade would have been profitable.
+    """
+    # Get the last wait decision for this agent
+    row = conn.execute(
+        """SELECT d.*, t.asset, t.entry_price, t.stop_loss_price, t.take_profit_price
+           FROM decisions d
+           LEFT JOIN trades t ON d.agent_id = t.agent_id
+           WHERE d.agent_id = ? AND d.decision_action = 'wait'
+           ORDER BY d.timestamp DESC LIMIT 1""",
+        (agent_id,),
+    ).fetchone()
+    
+    if not row:
+        return
+    
+    decision = dict(row)
+    if not decision.get("asset"):
+        return
+    
+    # Build a prompt asking the LLM to analyze what would have happened
+    prompt = (
+        f"Counterfactual analysis for agent {agent_id}:\n"
+        f"Asset: {decision['asset']}\n"
+        f"Decision at {decision['timestamp']}: wait\n"
+        f"Current price: {decision.get('entry_price', 'N/A')}\n"
+        f"SL: {decision.get('stop_loss_price', 'N/A')}\n"
+        f"TP: {decision.get('take_profit_price', 'N/A')}\n"
+        f"\nBased on the market context at that time, would taking a long or short position "
+        f"have been profitable? What would the PnL have been?\n"
+        f"Respond with JSON: {{\"action\": \"long\"|\"short\"|\"wait\", \"expected_pnl_pct\": number, \"confidence\": number}}"
+    )
+    
+    try:
+        result = llm_fn(system_prompt, prompt, agent_id=agent_id)
+        if isinstance(result, tuple):
+            result, _ = result
+        if isinstance(result, dict):
+            # Store the counterfactual result
+            conn.execute(
+                """UPDATE decisions 
+                   SET counterfactual_result = ?, counterfactual_was_better = ?
+                   WHERE id = ?""",
+                (json.dumps(result), 1 if result.get("action") in ("long", "short") else 0, decision["id"]),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("[%s] Counterfactual analysis failed for %s: %s", agent_id, decision["id"], exc)
