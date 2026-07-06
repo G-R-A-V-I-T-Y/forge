@@ -172,3 +172,4 @@ updates live without a page reload.
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
 - **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard (LyteNyte Grid + sparklines) + agent detail pages, `/api/desk`, `/api/agents/balance-history`, `WS /api/ws/desk`
 - **M6-M10**: Full system
+- **M11** (Phase 1 complete): Historical heartbeat data — daily JSONL capture in `data/historical_data/`; training-dataset build and statistical forecast features planned (see `docs/FORGE_PROPOSAL.md`)
