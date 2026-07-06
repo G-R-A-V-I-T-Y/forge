@@ -24,54 +24,7 @@
 </div>
 
 <h2>Leaderboard</h2>
-<table id="leaderboard">
-  <thead>
-    <tr>
-      <th class="sortable" data-sort="name" onclick="sortTable('name')">Name <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="status" onclick="sortTable('status')">Status <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="trades" onclick="sortTable('trades')">Trades <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="win_rate" onclick="sortTable('win_rate')">Win% <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="profit_factor" onclick="sortTable('profit_factor')">PF <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="sharpe" onclick="sortTable('sharpe')" style="color:#f0883e;">Sharpe <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="weekly_return" onclick="sortTable('weekly_return')">Wkly Ret <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="max_drawdown" onclick="sortTable('max_drawdown')">Max DD <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="open_positions" onclick="sortTable('open_positions')">Open <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="model" onclick="sortTable('model')">Model <span class="sort-arrow"></span></th>
-    </tr>
-  </thead>
-  <tbody id="leaderboard-body">
-    {% for a in agents %}
-    <tr>
-      <td><a href="/agents/{{ a.name }}">{{ a.name }}</a></td>
-      <td><span class="badge badge-{{ a.status }}">{{ a.status.upper() }}</span></td>
-      <td>{{ a.trades_count }}</td>
-      <td class="{{ 'win' if a.win_rate >= 0.55 else ('loss' if a.win_rate > 0 else '') }}">
-        {{ "{:.1%}".format(a.win_rate) if a.win_rate > 0 else '&mdash;' }}
-      </td>
-      <td class="{{ 'win' if a.profit_factor >= 1.4 else ('loss' if a.profit_factor > 0 else '') }}">
-        {{ "{:.2f}".format(a.profit_factor) if a.profit_factor > 0 else '&mdash;' }}
-      </td>
-      <td class="{{ 'win' if a.sharpe >= 1.5 else ('loss' if a.sharpe > 0 else '') }}">
-        {{ "{:.2f}".format(a.sharpe) if a.sharpe > 0 else '&mdash;' }}
-      </td>
-      <td class="{{ 'win' if a.weekly_return > 0 else ('loss' if a.weekly_return < 0 else '') }}">
-        {{ "{:+.2%}".format(a.weekly_return) if a.weekly_return != 0 else '0.0%' }}
-      </td>
-      <td class="loss">{{ "{:.1%}".format(a.max_drawdown) }}</td>
-      <td>{{ a.open_positions_count }}</td>
-      <td>
-        {% if a.last_model_used == 'no model available' %}
-        <span class="badge" style="background:#f85149;color:#fff;">NO MODEL AVAILABLE</span>
-        {% elif a.last_model_used %}
-        {{ a.last_model_used }}
-        {% else %}
-        &mdash;
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div id="leaderboard-grid" style="width:100%;overflow-x:auto;"></div>
 
 {% if positions %}
 <h2>Open Positions</h2>
@@ -198,34 +151,254 @@ function toggleReasoning(id) {
 {% endif %}
 
 <script src="/static/forge.js"></script>
-<script>
-/* Sortable leaderboard columns. Live updates arrive via forge.js's connectDeskWs(). */
-var sortDir = {};
-var currentSort = 'sharpe';
-var currentDir = 'desc';
 
-function sortTable(col) {
-  if (currentSort === col) {
-    currentDir = currentDir === 'asc' ? 'desc' : 'asc';
-  } else {
-    currentSort = col;
-    currentDir = 'desc';
+<link rel="stylesheet" href="https://esm.sh/@1771technologies/lytenyte-core@2.2.0/css/dark.css">
+<link rel="stylesheet" href="https://esm.sh/@1771technologies/lytenyte-core@2.2.0/css/fonts.css">
+
+<script type="module">
+import { Grid, useClientDataSource } from "https://esm.sh/@1771technologies/lytenyte-core@2.2.0?external=react,react-dom";
+import React, { useMemo } from "https://esm.sh/react@18.3.1?target=es2022";
+import { createRoot } from "https://esm.sh/react-dom@18.3.1/client?target=es2022";
+
+/* ── Sparkline SVG helper ── */
+function renderSparklineSVG(history, width, height) {
+  if (!history || history.length < 2) {
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+      '<line x1="4" y1="' + (height / 2) + '" x2="' + (width - 4) + '" y2="' + (height / 2) + '" stroke="#484f58" stroke-width="1" stroke-dasharray="2,2"/>' +
+      '</svg>';
   }
-  var tbody = document.getElementById('leaderboard-body');
-  var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
-  var colIdx = {name:0, status:1, trades:2, win_rate:3, profit_factor:4, sharpe:5, weekly_return:6, max_drawdown:7, open_positions:8, model:9};
-  var idx = colIdx[col] || 0;
-  rows.sort(function(a, b) {
-    var va = a.cells[idx] ? a.cells[idx].innerText.trim() : '';
-    var vb = b.cells[idx] ? b.cells[idx].innerText.trim() : '';
-    var na = parseFloat(va.replace(/[^0-9.-]/g, ''));
-    var nb = parseFloat(vb.replace(/[^0-9.-]/g, ''));
-    if (!isNaN(na) && !isNaN(nb)) {
-      return currentDir === 'asc' ? na - nb : nb - na;
-    }
-    return currentDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+  var sorted = history.slice().reverse();
+  var values = sorted.map(function(d) { return d.balance; });
+  var min = Math.min.apply(null, values);
+  var max = Math.max.apply(null, values);
+  var range = max - min || 1;
+  var padding = 2;
+  var plotW = width - padding * 2;
+  var plotH = height - padding * 2;
+  var points = values.map(function(v, i) {
+    var x = padding + (i / (values.length - 1)) * plotW;
+    var y = padding + plotH * (1 - (v - min) / range);
+    return x + ',' + y;
   });
-  rows.forEach(function(r) { tbody.appendChild(r); });
+  var isUp = values[values.length - 1] >= values[0];
+  var color = isUp ? '#3fb950' : '#f85149';
+  var areaPath = points[0] + ' ' + points.join(' L ') + ' L ' +
+    (padding + plotW) + ',' + (padding + plotH) + ' L ' + padding + ',' + (padding + plotH) + ' Z';
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+    '<path d="' + areaPath + '" fill="' + color + '" opacity="0.08"/>' +
+    '<polyline points="' + points.join(' ') + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '</svg>';
 }
+
+/* ── Sparkline cell (React) ── */
+function SparklineCell({ history }) {
+  var svg = renderSparklineSVG(history, 90, 24);
+  return React.createElement('div', {
+    style: { paddingInline: 8, display: 'flex', alignItems: 'center' }
+  }, React.createElement('span', { dangerouslySetInnerHTML: { __html: svg }, style: { pointerEvents: 'none' } }));
+}
+
+/* ── Badge helper for status ── */
+function StatusBadge({ status }) {
+  var cls = 'badge-' + status;
+  return React.createElement('span', { className: 'badge ' + cls }, status.toUpperCase());
+}
+
+/* ── Model badge helper ── */
+function ModelBadge({ model }) {
+  if (!model) return React.createElement('span', null, '\u2014');
+  if (model === 'no model available') {
+    return React.createElement('span', {
+      className: 'badge',
+      style: { background: '#f85149', color: '#fff', fontSize: '9px', padding: '2px 5px' }
+    }, 'NO MODEL');
+  }
+  return React.createElement('span', { style: { fontSize: '11px' } }, model);
+}
+
+/* ── Link cell helper ── */
+function LinkCell({ href, children }) {
+  return React.createElement('a', { href: href, style: { color: '#58a6ff', textDecoration: 'none' } }, children);
+}
+
+/* ── LeaderboardGrid ── */
+function LeaderboardGrid({ agents, balanceHistory }) {
+  var data = useMemo(function() {
+    return agents.map(function(a) {
+      return {
+        __id: a.name,
+        name: a.name,
+        status: a.status,
+        trades_count: a.trades_count,
+        win_rate: a.win_rate,
+        profit_factor: a.profit_factor,
+        sharpe: a.sharpe,
+        weekly_return: a.weekly_return,
+        max_drawdown: a.max_drawdown,
+        open_positions_count: a.open_positions_count,
+        last_model_used: a.last_model_used,
+        sparkline: balanceHistory[a.name] || []
+      };
+    });
+  }, [agents, balanceHistory]);
+
+  var ds = useClientDataSource({ data: data, sort: [{ id: 'sharpe', direction: 'desc' }] });
+
+  var columns = useMemo(function() {
+    return [
+      {
+        id: 'name', name: 'Name', width: 160,
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement(LinkCell, { href: '/agents/' + p.row.data.name }, p.row.data.name);
+        }
+      },
+      {
+        id: 'status', name: 'Status', width: 90,
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement(StatusBadge, { status: p.row.data.status });
+        }
+      },
+      {
+        id: 'trades', name: 'Trades', width: 70, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement('div', {
+            style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 }
+          }, p.row.data.trades_count);
+        }
+      },
+      {
+        id: 'win_rate', name: 'Win%', width: 75, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          var d = p.row.data;
+          var cls = '';
+          if (d.win_rate >= 0.55) cls = 'win';
+          else if (d.win_rate > 0) cls = 'loss';
+          var val = d.win_rate > 0 ? (d.win_rate * 100).toFixed(1) + '%' : '\u2014';
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+        }
+      },
+      {
+        id: 'profit_factor', name: 'PF', width: 70, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          var d = p.row.data;
+          var cls = '';
+          if (d.profit_factor >= 1.4) cls = 'win';
+          else if (d.profit_factor > 0) cls = 'loss';
+          var val = d.profit_factor > 0 ? d.profit_factor.toFixed(2) : '\u2014';
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+        }
+      },
+      {
+        id: 'sharpe', name: 'Sharpe', width: 80, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          var d = p.row.data;
+          var cls = '';
+          if (d.sharpe >= 1.5) cls = 'win';
+          else if (d.sharpe > 0) cls = 'loss';
+          var val = d.sharpe > 0 ? d.sharpe.toFixed(2) : '\u2014';
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12, color: '#f0883e' } }, val);
+        }
+      },
+      {
+        id: 'weekly_return', name: 'Wkly Ret', width: 90, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          var d = p.row.data;
+          var cls = d.weekly_return > 0 ? 'win' : (d.weekly_return < 0 ? 'loss' : '');
+          var val = d.weekly_return !== 0 ? (d.weekly_return * 100).toFixed(2) + '%' : '0.0%';
+          return React.createElement('div', { className: cls, style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+        }
+      },
+      {
+        id: 'max_drawdown', name: 'Max DD', width: 85, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          var d = p.row.data;
+          var val = (d.max_drawdown * 100).toFixed(1) + '%';
+          return React.createElement('div', { className: 'loss', style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 } }, val);
+        }
+      },
+      {
+        id: 'open_positions', name: 'Open', width: 60, type: 'number',
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement('div', {
+            style: { paddingInline: 8, textAlign: 'right', fontFamily: "'Courier New', monospace", fontSize: 12 }
+          }, p.row.data.open_positions_count);
+        }
+      },
+      {
+        id: 'model', name: 'Model', width: 160,
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement(ModelBadge, { model: p.row.data.last_model_used });
+        }
+      },
+      {
+        id: 'sparkline', name: 'Balance', width: 110,
+        cellRenderer: function(p) {
+          if (p.row.kind !== 'leaf') return null;
+          return React.createElement(SparklineCell, { history: p.row.data.sparkline });
+        }
+      }
+    ];
+  }, []);
+
+  return React.createElement('div', {
+    className: 'ln-grid ln-dark',
+    style: {
+      width: '100%',
+      borderRadius: 6,
+      overflow: 'hidden',
+      border: '1px solid #30363d',
+      background: '#0d1117'
+    }
+  }, React.createElement(Grid, {
+    columns: columns,
+    columnBase: { resizable: true, sortable: true },
+    rowSource: ds,
+    rowAlternateAttr: 'root'
+  }));
+}
+
+/* ── Mount ── */
+var agentsData = {{ agents|tojson }};
+var balanceHistoryData = {};
+
+fetch('/api/agents/balance-history')
+  .then(function(r) { return r.json(); })
+  .then(function(data) { balanceHistoryData = data; })
+  .catch(function() {});
+
+var root = createRoot(document.getElementById('leaderboard-grid'));
+root.render(
+  React.createElement(LeaderboardGrid, { agents: agentsData, balanceHistory: balanceHistoryData })
+);
+
+/* ── WebSocket: update grid on desk data refresh ── */
+(function connectDeskWs() {
+  var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  var ws;
+  function connect() {
+    ws = new WebSocket(protocol + '//' + location.host + '/api/ws/desk');
+    ws.onmessage = function(evt) {
+      var agents = JSON.parse(evt.data);
+      if (!agents) return;
+      root.render(
+        React.createElement(LeaderboardGrid, { agents: agents, balanceHistory: balanceHistoryData })
+      );
+    };
+    ws.onclose = function() { setTimeout(connect, 5000); };
+    ws.onerror = function() { ws.close(); };
+  }
+  connect();
+})();
 </script>
+
 {% endblock %}
