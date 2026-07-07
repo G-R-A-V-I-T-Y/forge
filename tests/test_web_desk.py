@@ -39,9 +39,8 @@ def test_overview_leaderboard_shows_model_column(conn):
     r = _client(conn).get("/")
     assert r.status_code == 200
     assert "Big Pickle" in r.text
-    # LyteNyte Grid renders client-side; agent data is embedded as JSON
-    assert '"name": "jade_hawk"' in r.text
-    assert '"last_model_used": "Big Pickle"' in r.text
+    # Server-rendered leaderboard table (plain HTML, not a client-side JS grid)
+    assert '<a href="/agents/jade_hawk">jade_hawk</a>' in r.text
 
 
 def test_overview_leaderboard_shows_no_model_available_badge(conn):
@@ -57,5 +56,6 @@ def test_overview_leaderboard_shows_em_dash_before_any_cycle(conn):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     r = _client(conn).get("/")
     assert r.status_code == 200
-    # LyteNyte Grid: em-dash is the JS escape '\u2014' in source (3 numeric cells)
-    assert r.text.count("\\u2014") >= 3
+    # Server-rendered leaderboard table: em-dash is the HTML entity &mdash;
+    # (win_rate, profit_factor, sharpe all render as em-dash before any cycle)
+    assert r.text.count("&mdash;") >= 3
