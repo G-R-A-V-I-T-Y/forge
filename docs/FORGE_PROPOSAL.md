@@ -27,9 +27,47 @@ The meta-controller is the *Head of Desk*. It reviews performance, allocates att
 
 This framing isn't cosmetic. Giving the LLM a professional trader persona — with explicit awareness of its evaluation criteria and the consequences of underperformance — measurably shifts the distribution of its reasoning toward careful, structured, probabilistic thinking rather than generic chatbot output.
 
-Agents are not rule engines following a lookup table. They reason. A good Slay the Spire player doesn't say "rule: take every relic that gives block." They look at their current deck, HP, floor, and what boss is coming, then make a judgment call about what gives the best probability-weighted path to the top. Forge agents do the same: the thesis provides strategic identity and vocabulary; the LLM provides the reasoning; the performance data keeps it honest.
+---
 
-A rule says "enter when funding < -0.03%." A reasoning agent says "funding is -0.03% but OI has been falling for 12 hours, suggesting shorts are already covering — the setup is weaker than the number implies. Wait."
+## The Central Design: Three-Loop Desk
+
+A critical lesson from running the system: the LLM is deployed at the wrong timescale. Having a 35B model re-read thousands of numbers every 5 minutes to recompute what a z-score means is the weakest possible use of LLM intelligence — slow, expensive, noisy, and impossible to backtest. The strongest use is the reflection loop: LLMs should do the *slow thinking* (hypothesis generation, strategy synthesis, postmortem reasoning, regime interpretation) and emit *fast artifacts* (executable, backtestable strategy specs) that trade mechanically.
+
+**The consequence: split every agent into a slow mind and a fast body.**
+
+- The *mind* (LLM, runs at reflection cadence — hours/days): owns the thesis, reads the trade bank and backtests, does research, writes and revises a **strategy spec** — a constrained, executable artifact (signals, thresholds, entry/exit/sizing rules, regime filters).
+- The *body* (deterministic Python, runs at heartbeat cadence): executes the spec mechanically. Fast, free, consistent, and — critically — **backtestable**, so every proposed thesis revision is validated against history *before* it risks even paper capital.
+
+This is not abandoning the vision; it is the prop-shop model taken seriously. Real traders don't recompute their indicators by hand every 5 minutes — they design a playbook and execute it with discipline, revising it in the evening.
+
+And because the question deserves an empirical answer rather than an architectural decree: **keep 2–3 pure LLM-decides agents in the arena** (with pinned models, temperature 0, and full decision logging) as a control arm. If the reasoning agents beat the compiled agents on risk-adjusted net PnL over 500+ trades, the ecosystem will say so. Forge's whole point is that the market decides.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ SLOW LOOP — Evolution (hours–days)  · frontier LLM (Claude)        │
+│  reflection: trade bank + counterfactuals + backtests + research   │
+│  → revised STRATEGY SPEC (versioned, validated, diffable)          │
+│  meta-controller: evaluate vs null model · cull · spawn · graveyard│
+└──────────────┬─────────────────────────────────────────────────────┘
+                │ deploys spec (only after walk-forward validation)
+┌──────────────▼─────────────────────────────────────────────────────┐
+│ MID LOOP — Desk Risk Officer (30–60 min) · local LLM               │
+│  regime synthesis, event awareness, gross-exposure throttle,       │
+│  per-agent enable/disable, emergency posture. Cannot ADD risk.     │
+└──────────────┬─────────────────────────────────────────────────────┘
+                │ risk budget / kill flags
+┌──────────────▼─────────────────────────────────────────────────────┐
+│ FAST LOOP — Execution (5 min heartbeat, later WS) · pure Python    │
+│  compiled agents: evaluate spec → orders                           │
+│  LLM-control-arm agents: pinned model, temp 0, decision logging    │
+│  risk gate (hardened) → paper/live bridge → fingerprints           │
+└────────────────────────────────────────────────────────────────────┘
+        ▲                                    │
+        │   market_history store  ◄──────────┘ every heartbeat appends
+        │   (candles, funding, OI, liqs, events — backtest substrate)
+```
+
+**The strategy spec is the pivotal new artifact.** Not free code (unsafe, unverifiable) and not a rigid config (kills expressiveness): a constrained JSON/YAML DSL over the heartbeat's feature vocabulary — entry conditions as weighted evidence terms (the theses already use exactly this shape!), exit rules, sizing curve, regime filters, max hold, per-asset scope. The existing thesis markdown remains the human-readable "why"; the spec is its executable shadow. The LLM writes both; the backtester referees; only validated specs deploy.
 
 ---
 
@@ -74,43 +112,57 @@ BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK, ARB, OP, SUI, TON, PEPE, WIF, + one r
 
 Large enough to support dozens of distinct, non-overlapping strategies. Small enough to monitor quality signals across all assets without meaningful API cost.
 
+### Most Likely Money-Making Paradigms
+
+Ranked by (structural persistence × fit to Forge's architecture × evidence in the literature and this DB):
+
+1. **Funding harvest / funding dislocation** — The one edge in this market that is *paid, not predicted*: extreme funding is a cash flow you collect while positioned against a crowd that must eventually pay to stay. Self-refreshing (leverage demand never dies), measurable.
+2. **Liquidation cascade fade** — Forced flow is the most mechanical inefficiency in perps: liquidations are price-insensitive sellers/buyers, and the overshoot-revert pattern is well documented. Requires the real liquidation feed.
+3. **Event/unlock positioning** — Token unlocks and listings are scheduled, public, and repeatedly under-anticipated in mid-caps. Perfect for LLM reasoning (each event has idiosyncratic structure) at slow cadence with mechanical execution.
+4. **Cross-sectional momentum / relative value at 4h–daily horizons** — Real but crowded; survives fees only at longer horizons and modest turnover. Keep, but force holding periods ≥ 12h.
+5. **Regime/vol transition trading** — Legitimate as *filters and modulators* for the whole desk more than as standalone alpha.
+6. **Microstructure at 5-min LLM cadence** — Structurally unviable as built. Retire or rebuild on streaming data much later.
+
+Portfolio-level: the money-maker profile for Forge v1 is **a book that is mostly market-neutral-ish carry (funding) + episodic convexity (cascade fades, events), with momentum as the diversifier** — not 10 directional LLM day-traders. Daily-PnL-positive is a carry-book property, not a prediction-book property.
+
 ---
 
 ## Target Performance
 
 | Metric | Individual Agent Target | Portfolio Target (ensemble) |
 |---|---|---|
-| Annual return | 25–45% | 20–35% |
+| Annual return | 10–25% | 15–30% |
 | Max drawdown | 8–15% | 3–6% |
 | Win rate | >55% | — |
 | Profit factor | >1.4 | — |
-| Sharpe ratio | >1.5 | >2.0 |
+| Sharpe ratio | >1.0 | >1.5 |
 | Trade frequency | 3–15 per day | — |
 
 The portfolio drawdown is structurally lower than any individual agent's drawdown because agent equity curves are weakly correlated with each other and with BTC. Sizing live allocations in proportion to Sharpe ratio suppresses portfolio drawdown further.
 
-The target numbers are aspirational, not engineering requirements. The system finds whatever edge exists and compounds it.
+The target numbers are aspirational, not engineering requirements. The system finds whatever edge exists and compounds it. A realistic v1 success is: *funding-carry book yielding 10–25% annualized on small capital with max DD < 10%, plus optionality from event/cascade agents* — and, more importantly, a machine that produces and validates new strategies faster than old ones decay. That second thing is the actual asset being built.
 
 ---
 
 ## System Architecture
 
 ```
-                    HYPERLIQUID API
-                  (market data, REST)
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-     ┌─────────┐   ┌─────────┐   ┌─────────┐
-     │ Agent A │   │ Agent B │   │ Agent N │
-     │ thesis  │   │ thesis  │   │ thesis  │
-     │ account │   │ account │   │ account │
-     └────┬────┘   └────┬────┘   └────┬────┘
-          └──────────────┼─────────────┘
-                         │ trade decisions
+                     HYPERLIQUID API
+                   (market data, REST)
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+   ┌───────────┐   ┌───────────┐   ┌───────────┐
+   │ Agent A   │   │ Agent B   │   │ Agent N   │
+   │ compiled  │   │ compiled  │   │ compiled  │
+   │ (fast)    │   │ (fast)    │   │ (fast)    │
+   └─────┬─────┘   └─────┬─────┘   └─────┬─────┘
+         │               │               │
+         └───────────────┼───────────────┘
+                         │ execution orders
                          ▼
                   ┌──────────────┐
-                  │  RISK GATE   │  ← non-bypassable
+                  │  RISK GATE   │  ← non-bypassable, hardened
                   └──────┬───────┘
                          │
               ┌──────────┴──────────┐
@@ -123,15 +175,20 @@ The target numbers are aspirational, not engineering requirements. The system fi
               │
               ▼
      ┌─────────────────┐
-     │  SQLITE DATABASE│  ← single file, in git repo
+     │  SQLITE DATABASE│  ← forge.db + market_history store
      │  trades, theses,│
      │  accounts, state│
      └────────┬────────┘
               │
               ▼
      ┌─────────────────┐
-     │  META-CONTROLLER│  ← evaluates, culls, spawns
+     │  META-CONTROLLER│  ← evaluate vs null · cull · spawn
      │  HEAD OF DESK   │  ← synthesis, chat interface
+     └────────┬────────┘
+              │
+              ▼
+     ┌─────────────────┐
+     │  RISK OFFICER   │  ← mid loop: regime, exposure, kill flags
      └─────────────────┘
               │
               ▼
@@ -140,45 +197,49 @@ The target numbers are aspirational, not engineering requirements. The system fi
      └─────────────────┘
 ```
 
-### Data Layer: API-on-Demand
+### Data Layer: Market History Store
 
-There is no local market data store to maintain. When an agent wakes up, it calls the Hyperliquid API directly for the data it needs at that moment:
+**There is a local market data store.** The proposal's original "API-on-demand, no local store" decision must be reversed. Without stored history: no backtesting (kills the compiled-strategy paradigm), z-scores computed on degenerate baselines, pattern-persistence checks impossible.
 
-- OHLCV (1m, 5m, 15m, 1h, 4h candles for requested assets and lookback)
-- Current funding rates + 24h history
-- Open interest + 24h change
-- Recent liquidation data
-- Current order book (top levels)
+The `market_history` store (SQLite or parquet, separate from forge.db): 5m/1h/1d candles, hourly funding, OI snapshots, liquidation events, and event calendar data for the full universe. Backfilled from Hyperliquid's API and appended from each heartbeat. Est. a few GB/year — trivial.
 
-The only things stored persistently are the outputs of human decisions and agent decisions: trade records, thesis versions, performance metrics, agent state. These live in SQLite.
+**Additional data sources:**
+- **Real liquidation feed** (WS flag or Coinalyze): the single highest-value feed for liquidation-cascade strategies
+- **Event calendar**: FOMC/CPI datetimes (static quarterly file), **token unlock schedules** (predictable forced supply), exchange listing announcements
+- **Cross-exchange context**: Binance/Bybit funding + basis for the same assets — dislocations between venues are cleaner mean-reversion signals than absolute levels
 
-### Persistence: SQLite Only
+### Persistence: SQLite
 
-A single SQLite file (`data/forge.db`) holds all persistent state. No database server. No Docker required for data. The file is small enough to commit to the repository (trade fingerprints compressed, OHLCV snapshots stored as compact binary arrays). A fresh `git clone` on a new laptop gives you the complete institutional memory of the desk.
+Two databases:
+- `data/forge.db` — all persistent state: trade records, thesis versions, performance metrics, agent state
+- `data/market_history.db` — candles, funding, OI, liquidations, events (the backtest substrate)
 
-**SQLite tables:**
-- `agents` — agent registry (name, status, spawn date, cull date, config)
+A fresh `git clone` on a new laptop gives you the complete institutional memory of the desk (trade fingerprints compressed, OHLCV snapshots stored as compact binary arrays).
+
+**SQLite tables (forge.db):**
+- `agents` — agent registry (name, status, spawn date, cull date, config, pinned model)
 - `theses` — all thesis versions, all agents, including terminated ones
 - `trades` — full fingerprint for every trade ever made
+- `decisions` — every heartbeat cycle: agent, timestamp, action (enter/wait/close/risk_blocked/error), reason, confidence, model, prompt hash, top-N candidate assets
 - `accounts` — per-agent account balance history (paper and live)
 - `positions` — currently open positions (all agents, for desk-wide position visibility)
 - `reflections` — log of every thesis reflection: evidence, research, proposed changes, adversarial critique, outcome
 - `evaluations` — meta-controller evaluation results per agent per cycle
 - `settings` — desk-wide and per-agent settings (editable from web UI)
 - `chat_history` — head-of-desk conversation history
+- `live_trades` — immutable append-only record of all real money trades
 
 ### Risk Gate
 
 Stateless Python validator. Every trade decision passes through it before execution. Non-bypassable by agent logic.
 
 **Hard rules:**
-- Stop loss: mandatory; must be ≥0.3% from entry price
-- Liquidation price must be ≥2× stop loss distance from entry (stop out before liquidation)
+- Stop loss / take profit geometry: for long, SL < entry < TP; for short, TP < entry < SL; TP non-null and above fee hurdle; entry within ~0.5% of current heartbeat price; reward:risk ≥ 0.5
 - Maximum leverage: 10× hard cap (configurable lower per agent or desk-wide)
 - Maximum position size: 20% of account per trade (configurable lower)
+- Maximum notional exposure: size × leverage capped at desk-defined limit (replaces separate size/leverage caps)
 - Maximum concurrent open positions per agent: 3
 - Drawdown kill: if agent account drops >15% from peak, all positions closed, agent suspended
-- Competing position: agents may hold positions in the same asset as other agents (including opposing directions) — competing positions are valid signal and naturally hedge the desk
 
 No exceptions. Not for high-confidence trades. Not for "exceptional" market conditions.
 
@@ -192,8 +253,9 @@ class TradingBridge(ABC):
     def get_account(self) -> AccountState: ...
 
 class PaperBridge(TradingBridge):
-    # Simulates fill using real Hyperliquid bid/ask at time of decision
-    # Updates paper account in SQLite
+    # Simulates fill: price ± spread/2 ± slippage_estimate by side
+    # Accrues funding on open positions; writes duration_minutes
+    # Paper is pessimistic — the promotion decision depends on it
 
 class LiveBridge(TradingBridge):
     # Submits real orders to Hyperliquid mainnet API
@@ -226,8 +288,8 @@ You are evaluated on:
   Avg win / avg loss    (target: >1.2)
   Weekly return         (target: positive)
   Max drawdown          (hard limit: 15%)
-  Sharpe ratio          (target: >1.5)
-  Trade frequency       (target: 3–15 per day)
+  Sharpe ratio          (target: >1.0)
+  Trade frequency       (target: 3–15 per day
 
 You think in expected value. A 40% win rate with 3:1 avg win/loss is 
 profitable. A 70% win rate with 0.5:1 win/loss is a slow bleed. You know 
@@ -245,7 +307,11 @@ let it compound.
 
 The agent's full living strategy document.
 
-**2. Its aggregate performance**
+**2. Its strategy spec (executable shadow)**
+
+A constrained JSON/YAML artifact derived from the thesis: entry conditions as weighted evidence terms, exit rules, sizing curve, regime filters, max hold, per-asset scope. The compiled agent body evaluates this spec mechanically at each heartbeat.
+
+**3. Its aggregate performance**
 
 ```
 PERFORMANCE SUMMARY — jade_hawk — thesis_v9
@@ -270,17 +336,21 @@ BY REGIME:
   range_low_vol:  48% WR (31 trades)  ← underperforming
   trending_bear:  55% WR (18 trades)
   range_high_vol: 60% WR (10 trades)
+
+VS NULL MODEL:
+  random_walk:  50% WR (Sharpe 0.00) — agent +0.71 Sharpe
+  btc_hold:     +3.2% return — agent +4.7% return
 ```
 
-**3. Last 10 closed trades (with outcomes and postmortems)**
+**4. Last 10 closed trades (with outcomes and postmortems)**
 
 Asset, direction, entry, exit, P&L%, duration, thesis version, the hypothesis text at entry, outcome, and the agent's own one-sentence postmortem.
 
-**4. Current open positions (own)**
+**5. Current open positions (own)**
 
 Entry price, current P&L, distance to SL/TP, time open.
 
-**5. Desk positions (all other active agents)**
+**6. Desk positions (all other active agents)**
 
 ```
 DESK POSITIONS (other traders):
@@ -292,17 +362,18 @@ DESK POSITIONS (other traders):
 
 Agents may hold positions in the same asset as other agents, including opposing directions. Competing positions represent divergent theses and provide natural portfolio hedging.
 
-**6. Current market state**
+**7. Current market state**
 
-- OHLCV: last 40 candles of primary timeframe for all 15 assets
-- Funding rates: current + last 24h per asset
+- OHLCV: last 40 candles of primary timeframe for all 15 assets (from market_history store)
+- Funding rates: current + last 24h per asset (z-score vs 14d baseline)
 - Open interest: 24h change per asset
-- Liquidation volume: last 4h per asset
+- Liquidation volume: last 4h per asset (from real feed, not proxy)
 - BTC dominance
 - 20-period correlation matrix across the universe
 - Current market regime tag
+- Event calendar: next macro event within 48h
 
-**7. Decision prompt**
+**8. Decision prompt**
 
 ```
 Based on your thesis, your performance record, and current market conditions, 
@@ -316,6 +387,12 @@ If entering, explain your reasoning in terms of your thesis, the specific
 conditions that make this setup compelling, and your expected value estimate.
 Output JSON.
 ```
+
+### Model Attribution: Pinned Models
+
+Each agent has one pinned model, recorded as part of agent config. Fallback only *within* the same model (retry), never *across* models for trading decisions. The local Qwen server (12–20s/decision with reasoning off) is the right default body for compiled agents. Frontier-model budget (Claude) is reserved for the reflection loop where per-call value is 100× higher. If model identity is interesting, make it an explicit experiment: same thesis × two models = two agents.
+
+Every decision logs `model`, `temperature`, and prompt hash.
 
 ### Internet Research During Reflection
 
@@ -338,6 +415,12 @@ During reflection, this query capability is central: "What conditions in the his
 
 The Head of Desk ensures no new seed thesis repeats a strategy that was previously terminated. The full graveyard is part of its institutional knowledge.
 
+### The Decisions Table
+
+The trade bank records only actions taken. The reflection loop will therefore learn from a censored sample — it can never discover "I skip too many good setups" or "my confidence is uncalibrated at 0.55–0.65" because the counterfactuals were discarded.
+
+A `decisions` table logs every heartbeat cycle: agent, timestamp, action (enter/wait/close/risk_blocked/error), reason, confidence, model, prompt hash, and top-N candidate assets considered. A nightly job fills in counterfactual outcomes for waits (what the entered-hypothetical would have returned at thesis-standard SL/TP). This turns every 5-minute cycle into training data instead of only the ~10% that trade.
+
 ---
 
 ## Trade Fingerprint Schema
@@ -349,6 +432,8 @@ The atomic unit of institutional memory. Written at entry, completed at close.
   "trade_id": "jade_hawk_20250629_143712_SOL",
   "agent_id": "jade_hawk",
   "thesis_version": "v9",
+  "spec_version": "spec_v3",
+  "model_used": "qwen3:35b",
   "account_balance_at_entry": 52340.00,
   "mode": "paper",
 
@@ -368,6 +453,7 @@ The atomic unit of institutional memory. Written at entry, completed at close.
     "ohlcv_1h_20_candles": [[ts, o, h, l, c, v], ...],
     "ohlcv_4h_10_candles": [[ts, o, h, l, c, v], ...],
     "funding_rate_current": -0.042,
+    "funding_z_score_14d": -2.3,
     "funding_rate_8h_history": [-0.038, -0.041, -0.042],
     "open_interest_usd": 420000000,
     "open_interest_24h_change_pct": -3.2,
@@ -440,6 +526,14 @@ Every fingerprint is tagged with market regime (derived from BTC 30-day volatili
 
 Reflection always shows win rate broken down by regime. An agent whose thesis doesn't mention regime but whose wins cluster in one regime is explicitly flagged.
 
+### 8. Walk-Forward Validation (M7+)
+
+The backtester enforces train/validate/test windows. Overfit metrics include deflated Sharpe ratio and parameter-sensitivity sweeps. Anti-overfit gates are *code*, wrapping the rules above around the backtester: min-trades, holdout, cross-agent validation, throttle, pattern persistence, adversarial pass (second LLM call attacking the spec), regime flags.
+
+### 9. Calibration
+
+Per-agent confidence vs realized win-rate curves are tracked and reported. The `confidence` column in the decisions table enables this: an agent that says "90% confidence" 80% of the time but wins 60% of the time is miscalibrated, and that calibration error is visible in the reflection log.
+
 ---
 
 ## Agent Lifecycle
@@ -450,29 +544,29 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
               ▼
          EVALUATION (every 30 trades, by meta-controller)
               │
-     ┌────────┴────────┐
-     ▼                 ▼
-  ACTIVE          SUSPENDED
-  (metrics pass)  (borderline)
-     │                 │
-     │           REVIEW (Head of Desk)
-     │                 │
-     │         ┌───────┴───────┐
-     │         ▼               ▼
-     │    REACTIVATE       TERMINATE
-     │                         │
-     │                   HARVEST: 5 best fingerprints
-     │                   → seed next spawn
-     │                   → permanent graveyard record
-     ▼
-  PROMOTED
-  (Sharpe > 2.0, 100+ trades, human review)
-     │
-     ▼
-  SHADOW (paper + live simultaneously, 10 days)
-     │
-     ▼
-  LIVE TRADING
+      ┌────────┴────────┐
+      ▼                 ▼
+   ACTIVE          SUSPENDED
+   (metrics pass)  (borderline)
+      │                 │
+      │           REVIEW (Head of Desk)
+      │                 │
+      │         ┌───────┴───────┐
+      │         ▼               ▼
+      │    REACTIVATE       TERMINATE
+      │                         │
+      │                   HARVEST: 5 best fingerprints
+      │                   → seed next spawn
+      │                   → permanent graveyard record
+      ▼
+   PROMOTED
+   (beats null model at 95%, 100+ trades, calibrated confidence, human review)
+      │
+      ▼
+   SHADOW (paper + live simultaneously, 10 days)
+      │
+      ▼
+   LIVE TRADING
 ```
 
 **Culling triggers:**
@@ -487,6 +581,19 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
 
 **Names:** Each agent is assigned a unique two-word name (adjective + animal: `jade_hawk`, `silver_basin`, `iron_moth`). Names persist through thesis versions and into the graveyard. This makes performance discussions human-readable.
 
+**Evaluation cadence in trades, not days:** Statistics respect small samples. Compare each agent to the null distribution. Probation before termination.
+
+---
+
+## Benchmark Agents
+
+Two permanent benchmark agents are seeded alongside all trading agents:
+
+- `random_walk` — coin-flip entries, thesis-standard SL/TP and sizing, same risk gate. Establishes the floor.
+- `btc_hold` — buy and hold BTC. Establishes the directional benchmark.
+
+Every leaderboard metric is displayed *relative to the null distribution*. An agent is only "working" when it clears the random agent's 95th percentile over ≥100 trades.
+
 ---
 
 ## Seeding the First Cohort
@@ -496,13 +603,14 @@ SPAWN ──► ROOKIE (< 30 trades, no evaluation)
 | `iron_moth` | Cross-sectional Momentum | Ranks all assets on multi-horizon returns (30m, 2h, 12h, 24h); enters top-ranked when momentum acceleration and volatility-adjusted returns confirm. Sector-relative momentum avoids beta crowding. |
 | `silver_basin` | Funding Dislocation | Studies only funding rates: z-score vs 14d history, trend, predicted funding from OI, acceleration. Enters when funding is statistically irrational; exits on normalisation. Ignores price. |
 | `copper_vane` | Open Interest Intelligence | OI×Price regime matrix: rising price + rising OI = genuine trend (go with); rising price + falling OI = short squeeze (fade); falling price + rising OI = new shorts (join); falling price + falling OI = capitulation (wait). |
-| `gray_finch` | Order Book Microstructure | Predicts next 5-20m price moves from bid/ask imbalance, liquidity gaps, resting walls, spread width, queue dynamics. No OHLCV, no funding. Enters on clear directional imbalance with minimal resistance. |
-| `amber_wolf` | Trade Flow | Analyses every execution: aggressive buy vs sell volume, VWAP vs mid, buy pressure ratio, average trade size (block trades vs retail), cumulative delta. Enters on overwhelmingly one-sided institutional-quality flow. |
 | `steel_crane` | Liquidation Hunter | Monitors liquidation clusters, cascade history, leverage estimates, funding rates, OI changes. Enters when cascading liquidations and extreme leverage make a squeeze imminent — fades the cascade. |
 | `onyx_heron` | Relative Value | Trades only spreads: SOL vs ETH, BTC vs ETH, AI-tokens vs L1 basket. Uses z-score, correlation, cointegration to identify cheap/rich legs. Long cheap, short rich — naturally beta-neutral. |
 | `jade_hawk` | VWAP Mean Reversion | Fades price extremes relative to VWAP across 15m/1h/4h timeframes. Enters short when price > VWAP(1h) + 2*ATR, long when price < VWAP(1h) - 2*ATR. Opposite paradigm to the desk's momentum strategies. |
 | `violet_lion` | Volatility Regime Trader | Trades volatility regime transitions. In compressed vol (coiling), enters breakout direction with microstructure confirmation. In expanded vol, fades the emotional extreme. Produces directional trades from vol state changes. |
 | `crimson_fox` | Session Pattern Arbitrage | Exploits predictable intraday patterns across global sessions (US Open, US Reversal, Asian Drift, weekly patterns, pre-settlement windows). Low edge per trade but highly reliable compounding. Uses time, not price/volume/OI, as primary signal. |
+| `event_hunter` | Event/Unlock Positioning | NEW: Monitors token unlock schedules, exchange listings, and macro events. Each event has idiosyncratic structure perfect for LLM reasoning at slow cadence with mechanical execution. |
+
+**Retired:** `gray_finch` (order book microstructure) and `amber_wolf` (trade flow) — microstructure at 5-min LLM cadence is structurally unwinnable; the slot is better spent on an event/unlock agent.
 
 ---
 
@@ -514,7 +622,7 @@ Single web application at `localhost:8000`. Started automatically with `python f
 
 **/ — Desk Overview**
 - Portfolio aggregate: total equity, MTD return, portfolio max DD, weighted Sharpe
-- Active agent leaderboard: sortable by any metric (win rate, Sharpe, PF, return, drawdown)
+- Active agent leaderboard: sortable by any metric (win rate, Sharpe, PF, return, drawdown); shows "vs null" column
 - Live positions panel: all open positions across all agents, current P&L (updates via WebSocket)
 - System health bar: exchange connectivity, LLM status, last wakeup times per agent
 
@@ -525,7 +633,9 @@ Single web application at `localhost:8000`. Started automatically with `python f
 - Open positions with live P&L
 - Trade history table: filterable, sortable, click to expand full fingerprint
 - Thesis tab: current thesis + version history + diff view between versions
+- Spec tab: current executable strategy spec + version history
 - Reflection log: each reflection's evidence, research findings, proposed changes, adversarial critique, outcome
+- Calibration report: per-agent confidence vs realized win-rate curve
 - "Reflect Now" button: triggers reflection cycle immediately
 - "Promote to Shadow" / "Go Live" buttons (with confirmation dialog)
 
@@ -540,6 +650,11 @@ Single web application at `localhost:8000`. Started automatically with `python f
 - Click to expand full fingerprint including OHLCV chart
 - SQL query builder for ad-hoc analysis
 
+**/decisions — Decision Log**
+- Every heartbeat cycle: enter/wait/close/risk_blocked/error
+- Counterfactual outcomes filled in nightly
+- Enables calibration analysis and reflection loop training data
+
 **/chat — Head of Desk**
 - Chat interface with the Head of Desk LLM
 - Head of Desk has full access to all agent data, all trade history, all thesis versions, graveyard
@@ -552,6 +667,7 @@ Single web application at `localhost:8000`. Started automatically with `python f
   - Number of active traders (target)
   - Maximum leverage per trade
   - Maximum position size (% of account)
+  - Maximum notional exposure (size × leverage)
   - Wake cadence (minutes between agent wakeups)
   - Reflection trigger (every N trades / every N days / manual only)
   - Starting account balance for new agents
@@ -567,15 +683,17 @@ Single web application at `localhost:8000`. Started automatically with `python f
 ```
 Language:         Python 3.11+
 Exchange / data:  Hyperliquid REST API (direct, no library required — clean REST)
-Local inference:  Ollama + Qwen3.6-35B (agent decisions, reflection, adversarial pass)
-API inference:    Claude claude-sonnet-4-6 (Head of Desk synthesis, complex analysis)
+Local inference:  Ollama + Qwen3.6-35B (compiled agent decisions, risk officer)
+API inference:    Claude claude-sonnet-4-6 (reflection loop, head of desk synthesis)
 Web research:     Brave Search API or SerpAPI (reflection cycles only)
-Persistence:      SQLite (single file, no server, committed to git)
+Persistence:      SQLite (forge.db + market_history.db, no server)
+Backtest engine:  Replay history through spec interpreter + fee/slippage model
 Web backend:      FastAPI + Jinja2 + WebSocket
 Web frontend:     Vanilla HTML/CSS/JS (no build step, no npm)
 Charts:           uPlot (lightweight, no dependencies, served as static file)
 Scheduling:       APScheduler (in-process, no external scheduler)
 Config:           YAML (desk-wide) + SQLite settings table (runtime-editable)
+Strategy spec:    JSON/YAML DSL over heartbeat feature vocabulary
 Entrypoint:       python forge.py (starts all agents + web server in one process)
 ```
 
@@ -593,13 +711,14 @@ forge/
 │
 ├── data/
 │   ├── forge.db                  ← SQLite (committed to git)
+│   ├── market_history.db         ← candles, funding, OI, liqs, events
 │   └── schema.sql                ← table definitions + migrations
 │
 ├── agents/
 │   ├── runtime.py                ← agent async loop (wake → decide → execute)
 │   ├── decision_loop.py          ← fetch market data → build prompt → call LLM → parse
 │   ├── prompt_builder.py         ← assembles full decision prompt from all context
-│   ├── reflection.py             ← thesis update loop with all safeguards
+│   ├── reflection.py             ← thesis + spec update loop with all safeguards
 │   ├── persona.py                ← system prompt constructor
 │   └── theses/
 │       ├── jade_hawk_v1.md       ← thesis versions committed to git
@@ -611,27 +730,35 @@ forge/
 │   ├── stub.py                   ← StubMarket async class + get_market_state() (deterministic data)
 │   ├── hyperliquid.py            ← HyperliquidClient: REST, circuit breaker, rate-limit retry
 │   ├── regime.py                 ← market regime classifier
-│   └── web_research.py           ← search API client (reflection only)
+│   ├── web_research.py           ← search API client (reflection only)
+│   └── history.py                ← market_history store: append + query for backtest
 │
 ├── risk/
-│   └── gate.py                   ← stateless validator, non-bypassable
+│   └── gate.py                   ← stateless validator, non-bypassable (hardened)
 │
 ├── execution/
 │   ├── bridge.py                 ← TradingBridge ABC
-│   ├── paper_bridge.py           ← simulate fills vs real HL prices
+│   ├── paper_bridge.py           ← simulate fills: price ± spread/2 ± slippage
 │   └── live_bridge.py            ← real Hyperliquid order submission
+│
+├── backtest/
+│   ├── interpreter.py            ← strategy spec DSL interpreter over heartbeat features
+│   ├── engine.py                 ← replay history through interpreter + fee/slippage model
+│   └── walk_forward.py           ← train/validate/test harness + overfit metrics
 │
 ├── store/
 │   ├── db.py                     ← SQLite connection + CRUD helpers
 │   ├── fingerprint.py            ← write/query/update trade fingerprints
-│   ├── performance.py            ← rolling metric calculation from SQLite
-│   ├── positions.py              ← desk position registry (all open positions across the desk)
-│   └── query.py                  ← structured query builder for trade bank
+│   ├── performance.py            ← rolling metric calculation (daily equity Sharpe, etc.)
+│   ├── positions.py              ← desk position registry (all open positions)
+│   ├── query.py                  ← structured query builder for trade bank
+│   └── decisions.py              ← decisions table: every heartbeat cycle
 │
 ├── meta/
-│   ├── controller.py             ← evaluation loop (every 6h): assess, cull, spawn
-│   ├── evaluator.py              ← per-agent metric assessment + culling decisions
+│   ├── controller.py             ← evaluation loop + cull/spawn/graveyard
+│   ├── evaluator.py              ← per-agent metric assessment vs null model
 │   ├── spawner.py                ← new agent creation from seeds or harvested fingerprints
+│   ├── risk_officer.py           ← mid loop: regime, exposure throttle, kill flags
 │   └── head_of_desk.py           ← synthesis LLM: chat, analysis, spawn guidance
 │
 ├── web/
@@ -642,6 +769,7 @@ forge/
 │   │   ├── agent_detail.html
 │   │   ├── graveyard.html
 │   │   ├── trade_bank.html
+│   │   ├── decisions.html
 │   │   ├── chat.html
 │   │   └── settings.html
 │   └── static/
@@ -650,7 +778,7 @@ forge/
 │       └── uplot.min.js
 │
 └── scripts/
-    ├── fresh_start.py            ← initialize clean DB, seed all 10 agents
+    ├── fresh_start.py            ← initialize clean DB, seed all agents
     ├── spawn_agent.py            ← CLI: manually create a new agent
     └── promote_agent.py          ← CLI: move agent to shadow or live mode
 ```
@@ -661,11 +789,9 @@ Everything lives in one GitHub repo. No external services required beyond the ex
 
 ## Development Plan
 
-Each milestone is independently demonstrable. You can start Forge after any milestone and observe meaningful behavior. Tasks within each milestone are ordered by dependency and written to be executed autonomously by an agentic developer (Firstmate) without further guidance.
+Each milestone is independently demonstrable. You can start Forge after any milestone and observe meaningful behavior.
 
----
-
-### Milestone 1 — Walking Skeleton
+### M1 — Walking Skeleton
 
 **Goal:** The complete system structure exists. One agent wakes on a schedule, makes a trade decision using stub data and a stub LLM, records the fingerprint to SQLite, updates a paper account, and the web UI shows it happening. Nothing is real yet — but every seam in the architecture is proven.
 
@@ -674,11 +800,11 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 **Tasks:**
 1. Initialize git repository with full directory structure per the repo layout above; add `.gitignore` (exclude `.env`, `*.pyc`, `__pycache__`)
 2. Write `config.yaml` with desk defaults: universe (15 assets), max leverage (10), max position size (0.20), wake interval (60s), starting balance (50000), target agent count (10)
-3. Write `data/schema.sql` defining all SQLite tables: `agents`, `theses`, `trades`, `accounts`, `positions`, `reflections`, `evaluations`, `settings`, `chat_history`
+3. Write `data/schema.sql` defining all SQLite tables: `agents`, `theses`, `trades`, `accounts`, `positions`, `reflections`, `evaluations`, `settings`, `chat_history`, `decisions`
 4. Implement `store/db.py`: SQLite connection (WAL mode), schema initialization on first run, parameterized CRUD helpers for each table
 5. Implement `market/stub.py`: returns hardcoded realistic OHLCV arrays, funding rates (-0.01 to +0.03), OI values, and liquidation volumes for all 15 assets — deterministic but plausible
-6. Implement `risk/gate.py`: validates order dict (stop loss present, leverage ≤ cap, size ≤ cap, liquidation price check); raises `RiskViolation` with reason string on failure
-7. Implement `execution/paper_bridge.py`: accepts validated order, simulates fill at stub mid price, writes trade to `trades` table with status='open', updates `positions` table, updates `accounts` table balance
+6. Implement `risk/gate.py`: validates order dict (SL/TP geometry: long SL < entry < TP, short TP < entry < SL; TP non-null; entry within 0.5% of heartbeat price; R:R ≥ 0.5; notional exposure cap); raises `RiskViolation` with reason string on failure
+7. Implement `execution/paper_bridge.py`: accepts validated order, simulates fill at stub mid price ± spread/2, writes trade to `trades` table with status='open', updates `positions` table, updates `accounts` table balance
 8. Implement `agents/persona.py`: builds system prompt string from agent name + config + evaluation targets (as shown in The Trader-Agent section)
 9. Implement `llm/stub.py`: returns a hardcoded valid trade decision JSON (action: "enter", SOL long, with all required fields) — no LLM call, purely for skeleton testing
 10. Implement `agents/prompt_builder.py`: assembles decision prompt from thesis text + stub performance summary + empty trade history + empty positions + stub market state; returns string
@@ -692,7 +818,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### Milestone 2 — Real Market Data
+### M2 — Real Market Data
 
 **Goal:** Agents pull live market data from the Hyperliquid API. All 15 assets are priced in real time. The paper bridge simulates fills against real Hyperliquid bid/ask. The web UI shows live prices updating.
 
@@ -704,7 +830,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 3. Implement rate limit handling in `market/hyperliquid.py`: exponential backoff on 429, circuit breaker after 5 consecutive failures (marks exchange as unavailable)
 4. Implement `market/provider.py`: unified interface with `stub` and `hyperliquid` backends, selected by `config.yaml` flag `data_source`
 5. Update `agents/prompt_builder.py` to pull real market state from provider (OHLCV + funding + OI + liquidations for all 15 assets)
-6. Update `execution/paper_bridge.py` to fetch real Hyperliquid bid/ask at fill time and use mid-price for paper fill simulation
+6. Update `execution/paper_bridge.py` to fetch real Hyperliquid bid/ask at fill time and use mid-price ± spread/2 for paper fill simulation
 7. Implement `market/regime.py`: derives market regime tag from BTC 30-day OHLCV (trend direction + ATR percentile) → returns one of five regime strings; add regime field to all new fingerprints
 8. Add `/api/prices` WebSocket endpoint to `web/app.py`: broadcasts current prices for all 15 assets every 3 seconds using Hyperliquid order book
 9. Update `web/templates/base.html` to include a live price ticker bar at the top (updates via WebSocket)
@@ -716,31 +842,32 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### Milestone 3 — Real LLM Decisions
+### M3 — Real LLM Decisions
 
-**Goal:** Replace the stub LLM with a real local Qwen3.6-35B. One agent runs autonomously for 24+ hours making genuine trading decisions based on real market data. Every decision is logged with the agent's full reasoning text.
+**Goal:** Replace the stub LLM with a real local Qwen3.6-35B. One agent runs autonomously for 24+ hours making genuine trading decisions based on real market data. Every decision is logged with the agent's full reasoning text. Model is pinned; fallback only within same model.
 
 **You can verify:** Read the agent's reasoning in the trade log. See it skip trades when the market doesn't fit its thesis. See it reference specific funding rate values and price levels from real data.
 
 **Tasks:**
 1. Add Ollama setup instructions to README: install Ollama, `ollama pull qwen3:35b`, verify with `ollama run qwen3:35b`
 2. Implement `llm/ollama_client.py`: async POST to `localhost:11434/api/chat`, streams response, extracts JSON payload from response, handles timeout (30s hard limit → return None → agent logs "LLM timeout, skipping cycle")
-3. Implement `llm/client.py`: unified interface dispatching to `stub` or `ollama` based on config flag
+3. Implement `llm/client.py`: unified interface dispatching to `stub` or `ollama` based on config flag; reads pinned model per agent from config
 4. Implement `agents/prompt_builder.py` performance section: calculate and format all metrics from SQLite (win rate, PF, avg win/loss, Sharpe, by-regime breakdown) using `store/performance.py`
-5. Implement `store/performance.py`: all metric calculations from raw trades table (win rate, profit factor, avg win, avg loss, Sharpe of equity curve, max drawdown, by-regime breakdown)
+5. Implement `store/performance.py`: all metric calculations from raw trades table (win rate, profit factor, avg win, avg loss, daily equity Sharpe, max drawdown, by-regime breakdown)
 6. Add last 10 closed trades section to decision prompt (query `trades` table, format each with asset, direction, PnL%, duration, hypothesis excerpt, outcome, postmortem)
 7. Add current open positions section to decision prompt (query `positions` table for this agent)
 8. Implement structured JSON response parser: validates all required fields exist in LLM output; if malformed, re-prompts with error message (max 2 retries before treating as "do nothing")
-9. Implement "do nothing" path: LLM can return `{"action": "wait", "reason": "..."}` — logged to SQLite as a decision record (not a trade), included in next wake's context as recent activity
+9. Implement "do nothing" path: LLM can return `{"action": "wait", "reason": "..."}` — logged to `decisions` table as a decision record (not a trade), included in next wake's context as recent activity
 10. Implement "close early" path: LLM can return `{"action": "close", "position_id": "...", "reason": "..."}` — passes through risk gate minimum check, closes via paper bridge
 11. Implement postmortem call: when a position closes (SL/TP hit or early close), make a second LLM call asking agent to write one-sentence postmortem; store in trade record
-12. Run `jade_hawk` for 24 hours on real Hyperliquid data with real Qwen decisions; review: does the reasoning reference specific market conditions? Does it sometimes wait? Are stop losses always present?
+12. Log every decision with model name, temperature, and prompt hash
+13. Run `jade_hawk` for 24 hours on real Hyperliquid data with real Qwen decisions; review: does the reasoning reference specific market conditions? Does it sometimes wait? Are stop losses always present?
 
-**Done when:** 24h run produces 30+ trades with coherent reasoning text, some "wait" decisions, and all risk gate rules observed.
+**Done when:** 24h run produces 30+ trades with coherent reasoning text, some "wait" decisions, all risk gate rules observed, and every decision logged with model attribution.
 
 ---
 
-### Milestone 4 — Trade Fingerprint Store
+### M4 — Trade Fingerprint Store
 
 **Goal:** Every trade is stored as a full fingerprint including OHLCV snapshot, funding context, regime tag, reasoning, and postmortem. Agents can query the historical bank. Cross-agent queries return results.
 
@@ -762,7 +889,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### Milestone 5 — Multi-Agent Desk
+### M5 — Multi-Agent Desk
 
 **Goal:** All 10 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
 
@@ -787,124 +914,97 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### Milestone 6 — Thesis Evolution
+### M6 — Truth ("the numbers mean what they say")
 
-**Goal:** Agents self-reflect, do web research, update their theses with anti-overfitting safeguards. Full thesis version history is browsable in the UI. Manual reflection trigger works.
+**Goal:** Fix measurement integrity. Today's results are contaminated by a risk-gate hole (wrong-side SL/TP fills booking phantom profits) and randomized model attribution. No learning can happen on corrupted signal.
 
-**You can verify:** Trigger a reflection on an agent. Watch it query its trade history, do web research, propose a thesis update, run the adversarial pass. See the new thesis version in the UI with diff highlighted.
+**You can verify:** A week of runtime produces a leaderboard where every number is defensible, and the null agent's band is visible on it.
 
 **Tasks:**
-1. Implement reflection trigger logic in `agents/runtime.py`: fire reflection when (a) N trades completed since last reflection (configurable, default 30), (b) N days elapsed since last reflection (default 14), or (c) manual trigger via API
-2. Implement `market/web_research.py`: `search(query: str) -> list[str]` — calls Brave Search API (or SerpAPI), returns top 5 result summaries; requires `SEARCH_API_KEY` in `.env`
-3. Implement `agents/reflection.py` main flow: (a) load evidence window + holdout window from SQLite, (b) fetch regime distribution, (c) call web research for 2-3 thesis-relevant queries, (d) build reflection prompt, (e) call LLM for updated thesis, (f) run adversarial pass, (g) run holdout validation, (h) if valid: write new thesis version; if invalid: log failure and set next reflection threshold +10 trades
-4. Implement cross-agent validation in reflection: query trade bank for similar conditions from other agents; include win rate evidence in reflection prompt
-5. Implement minimum trade threshold gate: hard block if < 20 trades since last reflection (return immediately with logged reason)
-6. Implement thesis update throttle: hard block if < 14 days AND < 30 trades since last update
-7. Implement thesis versioning: each update writes a new `agents/theses/{name}_v{N}.md` file AND a record in the `theses` SQLite table with version number, date, change summary, adversarial critique
-8. Implement `POST /api/agents/{name}/reflect` endpoint: triggers reflection immediately regardless of schedule
-9. Add "Reflect Now" button to agent detail page that calls this endpoint; show a progress indicator while reflection runs (WebSocket event when complete)
-10. Add Thesis tab to agent detail page: current thesis text, dropdown to view any historical version, diff view between selected versions (highlight additions in green, removals in red)
-11. Add Reflection Log tab to agent detail page: table of all past reflections with date, trades at time, evidence window summary, research queries and findings, proposed changes, adversarial critique, validation result (accepted/rejected), reason
-12. Run a full reflection cycle on `jade_hawk` after 30 trades; verify: web research is called, adversarial pass produces meaningful critique, thesis version is saved, holdout validation runs
+1. Harden `risk/gate.py`: SL/TP side validation (long: SL < entry < TP; short: TP < entry < SL), TP non-null and above fee hurdle, entry within 0.5% of heartbeat price, R:R ≥ 0.5, notional exposure cap (size × leverage); tests for each
+2. Void the six corrupted trades; rebuild affected account curves; annotate in DB (never delete — graveyard ethos)
+3. Realistic paper fills: spread + slippage-estimate applied by side; accrue funding on open positions in `update_position_pnl`; write `duration_minutes` on close
+4. Pin one model per agent (config), retry-within-model only; log `model`, `temperature`, prompt hash on every decision
+5. `decisions` table + nightly counterfactual filler for waits (what the entered-hypothetical would have returned at thesis-standard SL/TP)
+6. Metrics rewrite: daily equity Sharpe/Sortino, capped PF (no `inf` with zero losses), exposure-adjusted returns; leaderboard shows "vs null"
+7. Seed `random_walk` + `btc_hold` benchmark agents
+8. Config hygiene: single source of truth for starting balance/universe; remove `forge.py`'s divergent seed list and duplicated main block
 
-**Done when:** End-to-end reflection cycle completes on a live agent. New thesis version visible in UI with diff. Holdout validation pass/fail logged.
+**Done when:** Every metric is defensible. The null agent's performance band is visible on the leaderboard.
 
 ---
 
-### Milestone 7 — Meta-Controller and Head of Desk
+### M7 — Memory & the Backtest Engine (the strategic unlock)
 
-**Goal:** Automatic evaluation, culling, and spawning. The Head of Desk can answer questions about the desk via chat. Graveyard tracks terminated agents permanently.
+**Goal:** A market-history store plus a backtest engine converts evolution from months-per-generation to minutes-per-generation. This is the single highest-leverage build.
 
-**You can verify:** Let underperforming agents run until cull thresholds are hit. Watch the meta-controller suspend one automatically. Ask the head of desk "what's working?" and get a meaningful synthesis. Visit the graveyard.
+**You can verify:** `backtest(spec, 2025-07→2026-06)` returns an equity curve + overfit report in under a minute, and three seed specs have known historical profiles.
 
 **Tasks:**
-1. Implement `meta/evaluator.py`: given an agent ID, compute all evaluation metrics from SQLite and compare against thresholds; return decision enum (PASS / SUSPEND / TERMINATE) with reason string
-2. Implement `meta/controller.py`: APScheduler job running every 6h; iterates all ACTIVE agents (with >= 30 trades); calls evaluator; applies decision; logs to `evaluations` table
-3. Implement agent suspension: sets status to SUSPENDED in SQLite, removes from scheduler, posts notification to WebSocket
-4. Implement agent termination: sets status to TERMINATED, records final metrics + termination reason, marks all open positions closed at last known price, extracts 5 best-performing fingerprints as `harvest_seeds` JSON in agent record
-5. Implement `meta/spawner.py` full version: accepts seed (harvest fingerprints or human-written), checks against graveyard for thesis similarity (LLM similarity check), generates new agent name, writes initial thesis using seed context, registers in scheduler
-6. Implement weekly diversity spawn job (APScheduler): every 7 days, spawn 1 naive agent (blank thesis) + 1 near-clone of highest-Sharpe active agent (thesis copy with "explore variations" instruction)
-7. Implement `meta/head_of_desk.py`: LLM agent (Claude claude-sonnet-4-6) with system prompt giving it full access to all desk data; tools: `query_trades(filters)`, `get_agent_summary(name)`, `get_all_agent_summaries()`, `search_graveyard()`
-8. Implement `POST /api/chat` endpoint: receives user message, appends to `chat_history`, calls head-of-desk LLM with full context, streams response back via Server-Sent Events
-9. Implement `/chat` page: clean chat interface, message input, streaming response display, persistent history from SQLite (loads last 20 messages on page open)
-10. Add `/graveyard` page: grid of terminated agents (name, spawn date, terminate date, reason, final win rate, Sharpe, total trades, best trade); click into any for full read-only detail view
-11. Add `/meta-log` page: chronological log of all meta-controller evaluation decisions, with agent name, metrics at time of decision, decision made, reason
-12. Test: manually set an agent's drawdown past cull threshold in SQLite → trigger meta-controller evaluation → confirm suspension → confirm graveyard entry
+1. `market_history` store: SQLite file with 1h candles + funding (≥ 12 months backfill from Hyperliquid API), 5m candles (≥ 90 days), OI/liq data (from Coinalyze or accumulate live), event tables (FOMC/CPI, token unlocks)
+2. Fix z-score windows to match thesis definitions (14d funding baseline, etc.)
+3. Event tables: funding settlements, macro calendar, **token unlocks**
+4. Strategy-spec DSL: schema + validator + interpreter over heartbeat features (entry conditions as weighted evidence terms, exit rules, sizing curve, regime filters, max hold, per-asset scope)
+5. Backtester: replay history through the same interpreter + fee/slippage model as paper; walk-forward harness (train/validate/test windows); overfit metrics (deflated Sharpe, parameter-sensitivity sweep)
+6. Hand-compile 3 seed specs from existing theses (silver_basin, steel_crane, iron_moth) and backtest them — this is also the first honest evidence about whether these theses have any historical edge at all
+7. Liquidation feed (WS flag or Coinalyze) replacing the proxy for steel_crane's family
 
-**Done when:** Auto-cull fires on a real agent. Graveyard populated. Head of desk chat returns substantive answers referencing real desk data.
+**Done when:** Backtest returns in under a minute. Three seed specs have known historical profiles.
 
 ---
 
-### Milestone 8 — Settings and Operational Robustness
+### M8 — Evolution (the actual product)
 
-**Goal:** All settings are configurable from the web UI and take effect immediately. The system handles exchange API failures and LLM timeouts gracefully. It recovers cleanly from a restart with no lost state.
+**Goal:** The reflection loop that turns Forge from a trading system into an evolutionary system — agents that produce and validate new strategies faster than old ones decay.
 
-**You can verify:** Change max leverage from 10 to 5 via Settings, hit Save, watch next agent decisions respect the new limit. Kill and restart `forge.py`, confirm agents resume from existing state with no duplicate trades.
+**You can verify:** An agent completes reflection → spec revision → backtest validation → hot deploy with zero human touches, and a rejected overfit revision is visible in the reflection log.
 
 **Tasks:**
-1. Implement `settings` table fully: all desk-wide params with current value, data type, min/max, label for UI; pre-populate with defaults on schema init
-2. Implement `GET /api/settings` and `PATCH /api/settings` endpoints; PATCH validates types and ranges before writing
-3. Build `/settings` page with form fields for all configurable params; "Save" button calls PATCH endpoint; success/error toast notification; fields update without page reload
-4. Implement live settings propagation: all agent runtimes read settings from SQLite at the start of each wake cycle (not cached in memory) so changes take effect on next wake
-5. Implement graceful restart: on `forge.py` startup, read all ACTIVE/ROOKIE/SHADOW agents from SQLite and register them in the scheduler; read all OPEN positions from `positions` table and load into in-memory position registry (no positions are lost across restarts)
-6. Implement exchange error handling in `market/hyperliquid.py`: 429 → wait `Retry-After` seconds; 5xx → exponential backoff (1s, 2s, 4s, max 60s); 3 consecutive failures → mark asset as stale, agent skips asset in this cycle
-7. Implement LLM timeout handling: 30s hard timeout on Ollama call; on timeout, log "LLM_TIMEOUT" event to SQLite, agent does nothing this cycle, continues next scheduled wake
-8. Implement position monitor: separate APScheduler task running every 5 minutes; for each open position, fetches current price and checks if SL or TP has been breached; if so, closes position via bridge (handles slippage past price target)
-9. Implement emergency stop: `POST /api/emergency_stop` — closes all open positions at market (paper: mark closed at current price; live: submit market close orders); logs EMERGENCY_STOP event
-10. Add emergency stop button to settings page with red styling and double-confirmation dialog
-11. Implement structured logging to `logs/forge_{date}.log` with daily rotation; log format: timestamp, level, agent_id (if applicable), event_type, message; keep 14 days of logs
-12. Test restart scenario: run system for 1h with open positions, kill process, restart, verify positions reload correctly and no duplicate trades created
+1. Reflection pipeline (frontier LLM): inputs = trade bank + decisions/counterfactuals + regime breakdown + backtest tools + (optional) web research; output = revised thesis + revised spec + self-declared invalidation conditions
+2. Anti-overfit gates as *code*, wrapping the proposal's rules 1–7 around the backtester: min-trades, holdout, cross-agent validation, throttle, pattern persistence, adversarial pass (second LLM call attacking the spec), regime flags
+3. Deploy pipeline: validated spec → versioned file + DB row → fast loop hot-reloads; full diff view in UI
+4. Convert the desk: 6–7 compiled agents + 2–3 pure-LLM control-arm agents (temp 0, pinned local model). Retire gray_finch/amber_wolf; spawn event/unlock agent.
+5. Calibration report: per-agent confidence vs realized win-rate curves (data already exists in `confidence` column)
 
-**Done when:** Settings change takes effect on next agent wake. System restarts cleanly. Exchange downtime (simulated by blocking API) doesn't crash the process.
+**Done when:** End-to-end reflection cycle completes on a live agent. Rejected overfit revision visible in reflection log.
 
 ---
 
-### Milestone 9 — Live Trading
+### M9 — Selection
 
-**Goal:** Top-performing agents can be promoted to shadow mode (paper + live simultaneously) and then to full live trading on Hyperliquid mainnet. Full audit trail. Emergency controls work.
+**Goal:** The meta-controller that manages agent lifecycle with statistics that respect small samples.
 
-**You can verify:** Promote a well-performing paper agent to shadow mode. Watch it place both paper and real orders simultaneously. Compare fills. See real P&L in the UI.
+**You can verify:** The desk runs 2+ weeks unattended: evaluated, culled, spawned, throttled — with a coherent morning summary in the chat.
 
 **Tasks:**
-1. Implement `execution/live_bridge.py`: connects to Hyperliquid mainnet using wallet private key from `.env`; implements same `TradingBridge` interface as paper bridge; submits real limit orders with limit price = current ask (for longs) to minimize slippage; polls for fill confirmation
-2. Implement shadow mode: agent carries both a `PaperBridge` and `LiveBridge`; every decision is executed on both; fill details from both are recorded in `trades` table under `paper_fill` and `live_fill` columns respectively
-3. Implement shadow comparison metrics in `store/performance.py`: slippage (live vs paper price), fill time (latency), partial fill rate — computed per agent in shadow mode
-4. Add shadow comparison panel to agent detail page: side-by-side paper vs live fills for each trade, slippage distribution chart
-5. Implement promotion workflow state machine: ACTIVE → SHADOW (requires human click + confirmation) → LIVE (requires human click + confirmation after minimum 10 shadow days)
-6. Add "Promote to Shadow" button on agent detail page (only visible when agent is ACTIVE and Sharpe > 1.5 and trade count > 100); requires confirmation dialog with current metrics shown
-7. Add "Go Live" button on agent detail page (only visible when agent is SHADOW and shadow period >= 10 days); shows shadow slippage stats in confirmation dialog
-8. Implement separate live account balance tracking: `accounts` table distinguishes `paper` and `live` balance rows per agent; live balance initialized from real Hyperliquid account value at promotion time
-9. Implement live position sizing: live positions use same `position_size_pct` as paper but applied to real live account balance
-10. Implement live audit log: separate append-only `live_trades` table; entries are never updated or deleted; immutable record of all real money trades
-11. Implement live emergency stop: `POST /api/emergency_stop?mode=live` submits market-close orders for all open live positions via Hyperliquid API
-12. Implement trade alert: on live position open/close or live DD > 5%, send notification via webhook (configurable URL in `.env`; payload is JSON trade summary) — webhook enables Discord/Slack/email via Zapier or similar
-13. Test: promote a paper agent to shadow for 24h, review fill comparison report, confirm live orders are visible in Hyperliquid UI
+1. Meta-controller evaluation job with statistics that respect small samples: compare each agent to the null distribution, probation before termination, evaluation cadence in *trades* not days
+2. Cull/spawn/graveyard + harvest seeds; head-of-desk chat (frontier LLM with query tools over the bank) — daily briefing interface
+3. Desk risk officer (mid loop): hourly regime memo, gross-exposure throttle, event blackout windows (no new entries 2h pre-FOMC etc.), kill-switch authority. Constraint: it can only *reduce* risk, never add.
+4. Diversity maintenance: spawn thesis-similarity check (embedding or LLM compare against graveyard)
 
-**Done when:** First agent in shadow mode with real orders visible on Hyperliquid. Paper vs live comparison report shows reasonable slippage numbers.
+**Done when:** The desk runs 2+ weeks unattended with coherent morning summary.
 
 ---
 
-### Milestone 10 — Production Hardening
+### M10 — Live, Small
 
-**Goal:** Forge runs unattended for weeks. Setup from scratch takes under 30 minutes on a new machine. Docker available for clean deployment.
+**Goal:** The first real-money trades — small, controlled, and only after clearing the null-model gauntlet.
 
-**You can verify:** Follow the README setup steps on a clean machine (or VM) from git clone to running system in < 30 minutes.
+**You can verify:** First agent in shadow mode with real orders visible on Hyperliquid. Paper vs live comparison report shows reasonable slippage numbers.
 
 **Tasks:**
-1. Write comprehensive `README.md`: prerequisites (Python 3.11+, Ollama, Hyperliquid account), step-by-step install, `.env` configuration guide, first run walkthrough, how to add/remove agents, how to promote to live, FAQ
-2. Write `docs/ops.md`: operations playbook — how to: add a new agent manually, cull an agent manually, recover from SQLite corruption, check system health, interpret logs, handle exchange downtime, interpret culling decisions
-3. Implement startup self-check in `forge.py`: before starting any agents, verify (a) Hyperliquid API reachable, (b) Ollama running and Qwen model loaded, (c) SQLite readable/writable, (d) all required `.env` vars present — print clear error message and exit if any check fails
-4. Create `Dockerfile`: Python 3.11 base, install requirements, set entrypoint to `python forge.py`
-5. Create `docker-compose.yml`: `forge` service (Dockerfile), `ollama` service (official Ollama image with Qwen model volume); services start in correct order; port 8000 exposed for web UI
-6. Add `data/backups/` directory (git-ignored): implement daily SQLite backup job in APScheduler (`cp data/forge.db data/backups/forge_{date}.db`), retain 30 days
-7. Implement SQLite database migrations: `data/migrations/` directory with numbered `.sql` files; on startup, check current schema version and apply any pending migrations; prevents manual DB surgery on updates
-8. Load test: simulate 10 agents all waking within the same second (set all wake intervals to 1s for 60s); verify no SQLite lock contention, no duplicate fingerprints, response times acceptable
-9. Security audit: confirm no secrets appear in any log file; confirm `.env` is in `.gitignore` (`data/forge.db` is intentionally committed, per the design above); confirm `.env.example` has all required keys with placeholder values and comments
-10. Create `scripts/fresh_start.py`: wipes existing `forge.db` (with confirmation prompt), re-runs schema init, seeds all 10 initial agents with their thesis files, prints "Ready. Run: python forge.py"
-11. Add system metrics to `/health` endpoint: CPU usage, memory usage, SQLite file size, agent wake success rate (last hour), LLM response time (p50/p95 last hour), exchange API latency (p50/p95 last hour)
-12. Add metrics panel to Settings page pulling from `/health`: green/yellow/red status indicators for each subsystem with last-check timestamp
+1. Live-bridge hardening: exchange-native trigger orders for SL/TP (never rely on the 5-min local loop for real stops), asset-specific size/price decimals (szDecimals), partial-fill and IOC-miss handling, position reconciliation against exchange state on every heartbeat
+2. Shadow mode (paper + live simultaneously): slippage report, fill comparison
+3. Promotion gate: ≥ 100 paper trades, beats null at 95%, positive after modeled costs, calibrated confidence, human click. Start with $500–1,000 on ONE agent (likely a funding-family agent).
+4. Live audit log, webhook alerts, live emergency stop; daily automated paper-vs-live divergence report
 
-**Done when:** Fresh git clone on a new machine, following README, produces a running system with all 10 agents active within 30 minutes. Docker Compose brings up the full stack with one command.
+---
+
+### M11 — Compounding Operations (ongoing)
+
+1. Capital allocation across live agents ∝ shrunk Sharpe (fractional-Kelly capped); weekly rebalance by meta-controller, human-approved.
+2. Ops hardening: settings UI completion, restart recovery tests, DB backups, Docker, health metrics.
+3. Research flywheel: monthly "strategy review" reflection at desk level — retire crowded edges, propose new families (this is where LLM creativity compounds into robustness-over-time).
 
 ---
 
@@ -912,15 +1012,32 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 | Risk | Mitigation |
 |---|---|
-| Agents overfit to recent noise | 7-layer anti-overfitting system in thesis loop |
+| Overfitting via the reflection loop | M7's walk-forward + deflated-Sharpe machinery and the null-agent floor; anti-overfit gates are the most important code in the repo |
 | All agents converge on same thesis | Competing positions provide signal when theses diverge; diversity spawns maintain breadth; Head of Desk flags thesis convergence |
 | Regime shift breaks all agents simultaneously | Regime tagging surfaces regime-specific strategies; meta-controller suspends agents failing in new regime |
 | Hyperliquid API downtime | Circuit breaker; agents skip cycle on unavailability; positions monitored by separate process |
 | Qwen inference too slow for 15m cadence | 30s hard timeout; async execution; "do nothing" fallback preserves account safety |
 | Live order submission failure | Paper bridge always succeeds; live bridge failure logs and alerts but does not corrupt paper state |
 | SQLite file grows too large for git | OHLCV compressed with msgpack; archiving job compresses old fingerprints; 10,000 trades ≈ 100MB |
-| Hyperliquid regulatory status changes for US | All agent logic is exchange-agnostic; bridge can swap to Kraken Futures or similar with one config change |
+| Market-history backfill incomplete | Backfill from Hyperliquid's API (candles + funding history reach back far enough); OI/liq accumulate live |
+| Big pickle / free-tier model unreliability | Pinned models per agent; frontier-model budget reserved for reflection where per-call value is 100× higher |
+| Capacity limits at scale | These edges hold at $10k–$1M; not a problem worth solving yet |
 
 ---
+
+## Honest Expectations
+
+- **Calibrate the targets.** The original 25–45%/agent with Sharpe > 1.5 is aspirational; a realistic v1 success is: *funding-carry book yielding 10–25% annualized on small capital with max DD < 10%, plus optionality from event/cascade agents* — and, more importantly, a machine that produces and validates new strategies faster than old ones decay. That second thing is the actual asset being built.
+- **Capacity is real but fine at this scale.** These edges hold at $10k–$1M; they will not hold at $100M. That is not a problem worth solving yet.
+- **Biggest technical risk:** overfitting via the reflection loop — the system optimizing its specs into historical noise. Mitigation is M7's walk-forward + deflated-Sharpe machinery and the null-agent floor; treat the anti-overfit gates as the most important code in the repo.
+- **Biggest operational risk:** live stops living in a 5-minute local loop. Exchange-native triggers are non-negotiable before real money (M10.1).
+- **Biggest strategic risk:** spending the next quarter polishing the fast loop (more features, more agents, more UI) instead of building M7–M8. The fast loop is done enough. The moat is the slow loop.
+- **Regulatory:** unchanged from the original proposal — non-custodial DeFi, US person, consult counsel before scaling live capital.
+
+---
+
+## Summary
+
+Forge's ecosystem premise is right; its current LLM placement is one level too low. Fix measurement integrity first — today's results are contaminated by a risk-gate hole and randomized model attribution, and no learning can happen on corrupted signal. Reverse the no-history decision: a market-history store plus a backtest engine converts evolution from months-per-generation to minutes-per-generation, and it is the single highest-leverage build. Rebuild agents as LLM-authored, mechanically-executed, backtest-validated strategy specs — keeping a pure-LLM control arm so the arena itself answers the paradigm question. Concentrate the book on structural perp edges (funding, liquidations, events) where the market pays you for a mechanism rather than a prediction, and go live only through the null-model gauntlet, small.
 
 *Forge is not a prediction machine. It is an evolutionary system that puts AI traders under genuine competitive pressure, gives them the tools to learn from the communal record of every trade ever made, and gets out of the way. The market decides who has edge. The desk decides who gets capital.*

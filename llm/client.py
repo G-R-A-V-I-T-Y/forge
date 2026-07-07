@@ -27,15 +27,39 @@ def decide(system_prompt: str, decision_prompt: str, config: dict | None = None)
 
 
 def _ollama_decide(system_prompt: str, decision_prompt: str, config: dict | None = None) -> dict:
-    """Sync wrapper around async Ollama client."""
+    """Sync wrapper around async Ollama client.
+
+    Callers are almost never at module scope: agents/agent_runner.py's
+    main() drives everything via asyncio.run(_run_once(...)), and this
+    function is reached synchronously from inside that running loop (see
+    agents/decision_loop.py's _call_llm_with_retry(), which calls llm_fn()
+    directly rather than awaiting it). A plain `asyncio.run(...)` here
+    would always raise "asyncio.run() cannot be called from a running
+    event loop" in that situation — confirmed live, where it silently
+    degraded to "no model available" for real trading decisions even
+    though Ollama was healthy and never received the request. Running the
+    coroutine on a dedicated thread with its own fresh event loop works
+    whether or not the calling thread already has one running.
+    """
     import asyncio
+    import threading
     from llm.ollama_client import decide as ollama_decide
 
-    try:
-        result = asyncio.run(ollama_decide(system_prompt, decision_prompt, config))
-        if result is not None:
-            return result
-    except Exception as exc:
-        logger.error("Ollama decide error: %s", exc)
+    box: dict = {}
+
+    def runner() -> None:
+        try:
+            box["result"] = asyncio.run(ollama_decide(system_prompt, decision_prompt, config))
+        except Exception as exc:  # noqa: BLE001 - reported via box, not raised across threads
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner)
+    thread.start()
+    thread.join()
+
+    if "error" in box:
+        logger.error("Ollama decide error: %s", box["error"])
+    elif box.get("result") is not None:
+        return box["result"]
 
     return {"action": "wait", "reason": "LLM unavailable or timed out"}
