@@ -63,8 +63,9 @@ And because the question deserves an empirical answer rather than an architectur
 │  risk gate (hardened) → paper/live bridge → fingerprints           │
 └────────────────────────────────────────────────────────────────────┘
         ▲                                    │
-        │   market_history store  ◄──────────┘ every heartbeat appends
-        │   (candles, funding, OI, liqs, events — backtest substrate)
+        │   git-native ledger  ◄──────────────┘ every heartbeat appends
+        │   (candles, funding, OI, liqs, decisions — backtest substrate,
+        │    committed to git every cycle — see Data Layer & Ledger below)
 ```
 
 **The strategy spec is the pivotal new artifact.** Not free code (unsafe, unverifiable) and not a rigid config (kills expressiveness): a constrained JSON/YAML DSL over the heartbeat's feature vocabulary — entry conditions as weighted evidence terms (the theses already use exactly this shape!), exit rules, sizing curve, regime filters, max hold, per-asset scope. The existing thesis markdown remains the human-readable "why"; the spec is its executable shadow. The LLM writes both; the backtester referees; only validated specs deploy.
@@ -106,11 +107,11 @@ Forge is built on **Hyperliquid** as the single exchange for data, paper trading
 
 ### Trading Universe
 
-**15 assets (updated quarterly by Head of Desk):**
+**20 assets (config.yaml `universe`, updated by Head of Desk):**
 
-BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK, ARB, OP, SUI, TON, PEPE, WIF, + one rotating slot
+BTC, ETH, SOL, SUI, AVAX, LINK, AAVE, BNB, ARB, OP, TAO, FET, RENDER, XRP, XLM, TIA, HYPE, LTC, BCH, ADA
 
-Large enough to support dozens of distinct, non-overlapping strategies. Small enough to monitor quality signals across all assets without meaningful API cost.
+Large enough to support dozens of distinct, non-overlapping strategies. Small enough to monitor quality signals across all assets without meaningful API cost. Sector grouping (L1, L2, Modular/DA, DeFi/Oracle, AI, Exchange, Legacy Payments) is defined in `market/heartbeat.py`'s `SECTORS` map and used for sector-relative-strength theses (`iron_moth`) and cross-sectional breadth.
 
 ### Most Likely Money-Making Paradigms
 
@@ -175,9 +176,14 @@ The target numbers are aspirational, not engineering requirements. The system fi
               │
               ▼
      ┌─────────────────┐
-     │  SQLITE DATABASE│  ← forge.db + market_history store
-     │  trades, theses,│
-     │  accounts, state│
+     │  forge.db (local,│  ← disposable, gitignored, fast read/write cache
+     │  disposable)     │     rebuildable from the ledger at any time
+     └────────┬────────┘
+              │ append_ledger_record() on every decision/candle/trade/close
+              ▼
+     ┌─────────────────┐
+     │  ledger/ + state/│  ← git-tracked, committed + pushed every cycle
+     │  (source of truth)│    system of record — see Data Layer & Ledger below
      └────────┬────────┘
               │
               ▼
@@ -197,32 +203,72 @@ The target numbers are aspirational, not engineering requirements. The system fi
      └─────────────────┘
 ```
 
-### Data Layer: Market History Store
+### Data Layer & Ledger: What Gets Stored, How, and Why
 
-**There is a local market data store.** The proposal's original "API-on-demand, no local store" decision must be reversed. Without stored history: no backtesting (kills the compiled-strategy paradigm), z-scores computed on degenerate baselines, pattern-persistence checks impossible.
+**Hard constraint: everything — code and data — fits in one git repo. No external database server, no cloud data warehouse.** A burned laptop, replaced and `git pull`ed, resumes exactly where it left off. This is a real engineering constraint, not an aspiration: naively committing an ever-mutating SQLite file to git (the original plan) blows up repo size, because git can't delta-compress random page rewrites the way it deltas text. The resolution — implemented and running — is a **git-native, append-only ledger** that separates the local operational cache (fast, mutable, gitignored, disposable) from the git-tracked source of truth (append-only, git-friendly, durable). Full design rationale: `docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md`.
 
-The `market_history` store (SQLite or parquet, separate from forge.db): 5m/1h/1d candles, hourly funding, OI snapshots, liquidation events, and event calendar data for the full universe. Backfilled from Hyperliquid's API and appended from each heartbeat. Est. a few GB/year — trivial.
+**Two layers:**
+- **`data/forge.db`** — the local, gitignored, disposable SQLite cache. Fast reads/writes for the live trading loop. Never the system of record; can be deleted and rebuilt at any time.
+- **`ledger/` + `state/`** — the git-tracked source of truth, committed and pushed every heartbeat cycle by `store/git_sync.py` (best-effort, non-blocking — a failed push just retries next cycle, since git push always carries every unpushed commit forward).
 
-**Additional data sources:**
-- **Real liquidation feed** (WS flag or Coinalyze): the single highest-value feed for liquidation-cascade strategies
-- **Event calendar**: FOMC/CPI datetimes (static quarterly file), **token unlock schedules** (predictable forced supply), exchange listing announcements
+**What's captured every heartbeat cycle, and why raw (not derived):** only raw inputs are stored — computed indicators (z-scores, correlations, regime tags) are recomputed from raw inputs at read time by the backtester, never trusted as frozen historical fact. This matters for correctness, not just size: a later bug fix to a feature calculation would otherwise silently corrupt every backtest replaying "history" through the old, wrong values. The one deliberate exception is the **decisions** stream, which must capture exactly what the agent saw and acted on — warts included — because the goal there is calibrating the agent, not re-deriving a cleaner version of history.
+
+| Ledger stream | Cadence | Why raw (not recomputed) | Size / 90 days |
+|---|---|---|---|
+| `candles_5m` | 5 min × 20 assets | Re-fetchable from the exchange, but a local copy makes backtests self-contained | ~10MB |
+| `funding` | hourly × 20 | Same | ~0.5MB |
+| `oi` (open interest) | 5 min × 20 | **Not retroactively available** — miss it live, it's gone | ~7MB |
+| `liquidations` | event-driven | Same — proxy/live-only unless paying for Coinalyze | ~0.4MB |
+| `decisions` | 5 min × every agent, **wait included, not just enter** | The selection-bias fix: a "wait" decision carries the same structured `confidence`/`evidence_strength` as an "enter", so the reflection loop can calibrate on the full sample, not just the ~10% of cycles that traded | ~39MB (dominant stream — structured evidence, not prose) |
+| `trades` | per closed trade | Full entry+exit fingerprint (OHLCV/funding blobs excluded — redundant with `candles_5m`/`funding`, and raw bytes don't round-trip through JSON) | ~4MB |
+| `accounts` | per trade close | Balance/peak snapshot | negligible |
+| **Total** | | | **~63MB / 90 days ≈ 250MB/year** |
+
+At this rate, 5 years of continuous operation is ≈1.3GB — comfortably inside GitHub's practical range. If it ever grows faster than expected (verbose reasoning creeping back into `decisions`, universe size growing 10×), the escalation ladder, in order: tighten retention on the biggest stream first (decisions); resolution-decay old `candles_5m`/`oi` to hourly beyond a rolling window (already implemented, default 12 months); shard by year into separate repos; Git LFS as a last resort for any single partition risking GitHub's 100MB/file hard limit.
+
+**Storage method — hot JSONL, cold Parquet:**
+```
+ledger/
+  decisions/2026-07.jsonl        ← hot: current month, appended every cycle (pure byte-level
+                                     append — the most git-friendly write pattern there is)
+  decisions/2026-06.parquet      ← cold: closed month, compacted (columnar, 3-5× smaller)
+  candles_5m/, candles_1h/, candles_4h/, funding/, oi/, liquidations/, trades/, accounts/
+  events.jsonl                   ← event calendar, small, never partitioned
+state/
+  current.json                   ← open positions, live balances, agent status — small,
+                                     overwritten + committed every cycle (NOT history —
+                                     "right now", so a fresh clone restores the exact last
+                                     heartbeat's state, not "state as of last commit")
+data/forge.db                    ← gitignored, disposable local cache — never the system of record
+```
+`scripts/compact_ledger.py` runs monthly (scheduled in `forge.py`, cron `day=1, hour=3 UTC`): converts the prior month's closed JSONL to Parquet, downsamples `candles_5m`/`oi` older than 12 months to hourly, and is idempotent and fault-isolated per file (one malformed partition doesn't abort the batch).
+
+**Example ledger record shapes:**
+```json
+// ledger/decisions/2026-07.jsonl — one line per agent per cycle
+{"ts":"2026-07-06T19:35:00Z","agent":"sage_turtle","action":"wait",
+ "confidence":0.35,"evidence_strength":{"unlock_size":0.0,"days_to_event":0.3},
+ "model":"qwen3.6-35b","reason":"days_to_event too far"}
+
+// ledger/candles_5m/2026-07.jsonl — one line per asset per cycle
+{"ts":"2026-07-06T19:35:00Z","asset":"BTC-PERP","o":64900.0,"h":65100.0,"l":64800.0,"c":65000.0,"v":12.5}
+```
+
+**Disaster recovery:** `python scripts/rebuild_local_cache.py` reconstructs `data/forge.db` from `ledger/` + `state/current.json` alone — agents, closed trades, account balances (state's snapshot wins as authoritative for "current," regardless of ledger completeness), and open positions (a minimal synthetic "open" trade row is derived from the position snapshot itself, since `execute_close` only ever ledger-exports on close). This is the literal proof of "burned laptop → git pull → back to normal." Deliberately **not** restored to the local cache: `decisions` and market-data history — they're analytical/calibration archives with no operational-hot-path consumer (the nightly counterfactual job and any decision-history UI aren't on the "must resume trading immediately" path), and the SQLite `decisions` table has no columns for `confidence`/`evidence_strength`/`model` to receive them anyway. That history isn't lost — it's queryable directly from the ledger files.
+
+**Additional data sources (not yet built — M7b):**
+- **Real liquidation feed** (WS flag or Coinalyze): the single highest-value feed for liquidation-cascade strategies; would land in the existing `liquidations` ledger stream
+- **Event calendar**: FOMC/CPI datetimes (static quarterly file), **token unlock schedules** (predictable forced supply), exchange listing announcements — would land in `ledger/events.jsonl`
 - **Cross-exchange context**: Binance/Bybit funding + basis for the same assets — dislocations between venues are cleaner mean-reversion signals than absolute levels
 
-### Persistence: SQLite
+### Persistence: SQLite tables (forge.db, disposable local cache)
 
-Two databases:
-- `data/forge.db` — all persistent state: trade records, thesis versions, performance metrics, agent state
-- `data/market_history.db` — candles, funding, OI, liquidations, events (the backtest substrate)
-
-A fresh `git clone` on a new laptop gives you the complete institutional memory of the desk (trade fingerprints compressed, OHLCV snapshots stored as compact binary arrays).
-
-**SQLite tables (forge.db):**
 - `agents` — agent registry (name, status, spawn date, cull date, config, pinned model)
 - `theses` — all thesis versions, all agents, including terminated ones
-- `trades` — full fingerprint for every trade ever made
-- `decisions` — every heartbeat cycle: agent, timestamp, action (enter/wait/close/risk_blocked/error), reason, confidence, model, prompt hash, top-N candidate assets
-- `accounts` — per-agent account balance history (paper and live)
-- `positions` — currently open positions (all agents, for desk-wide position visibility)
+- `trades` — full fingerprint for every trade ever made (closed trades also ledger-exported)
+- `decisions` — every heartbeat cycle: agent, timestamp, action (enter/wait/close/risk_blocked/error), reason, confidence, model, prompt hash, top-N candidate assets (also ledger-exported, with `confidence`/`evidence_strength` — see Data Layer above)
+- `accounts` — per-agent account balance history (paper and live; also ledger-exported)
+- `positions` — currently open positions (all agents, for desk-wide position visibility; captured in `state/current.json` every cycle)
 - `reflections` — log of every thesis reflection: evidence, research, proposed changes, adversarial critique, outcome
 - `evaluations` — meta-controller evaluation results per agent per cycle
 - `settings` — desk-wide and per-agent settings (editable from web UI)
@@ -256,6 +302,8 @@ class PaperBridge(TradingBridge):
     # Simulates fill: price ± spread/2 ± slippage_estimate by side
     # Accrues funding on open positions; writes duration_minutes
     # Paper is pessimistic — the promotion decision depends on it
+    # close() ledger-exports the full closed trade + account snapshot
+    # (store/positions.py's execute_close — shared by paper and live)
 
 class LiveBridge(TradingBridge):
     # Submits real orders to Hyperliquid mainnet API
@@ -364,7 +412,7 @@ Agents may hold positions in the same asset as other agents, including opposing 
 
 **7. Current market state**
 
-- OHLCV: last 40 candles of primary timeframe for all 15 assets (from market_history store)
+- OHLCV: last 40 candles of primary timeframe for all 20 assets (heartbeat packet; historical continuity from the `ledger/candles_5m/` stream)
 - Funding rates: current + last 24h per asset (z-score vs 14d baseline)
 - Open interest: 24h change per asset
 - Liquidation volume: last 4h per asset (from real feed, not proxy)
@@ -526,7 +574,7 @@ Every fingerprint is tagged with market regime (derived from BTC 30-day volatili
 
 Reflection always shows win rate broken down by regime. An agent whose thesis doesn't mention regime but whose wins cluster in one regime is explicitly flagged.
 
-### 8. Walk-Forward Validation (M7+)
+### 8. Walk-Forward Validation (M7b+)
 
 The backtester enforces train/validate/test windows. Overfit metrics include deflated Sharpe ratio and parameter-sensitivity sweeps. Anti-overfit gates are *code*, wrapping the rules above around the backtester: min-trades, holdout, cross-agent validation, throttle, pattern persistence, adversarial pass (second LLM call attacking the spec), regime flags.
 
@@ -608,9 +656,9 @@ Every leaderboard metric is displayed *relative to the null distribution*. An ag
 | `jade_hawk` | VWAP Mean Reversion | Fades price extremes relative to VWAP across 15m/1h/4h timeframes. Enters short when price > VWAP(1h) + 2*ATR, long when price < VWAP(1h) - 2*ATR. Opposite paradigm to the desk's momentum strategies. |
 | `violet_lion` | Volatility Regime Trader | Trades volatility regime transitions. In compressed vol (coiling), enters breakout direction with microstructure confirmation. In expanded vol, fades the emotional extreme. Produces directional trades from vol state changes. |
 | `crimson_fox` | Session Pattern Arbitrage | Exploits predictable intraday patterns across global sessions (US Open, US Reversal, Asian Drift, weekly patterns, pre-settlement windows). Low edge per trade but highly reliable compounding. Uses time, not price/volume/OI, as primary signal. |
-| `event_hunter` | Event/Unlock Positioning | NEW: Monitors token unlock schedules, exchange listings, and macro events. Each event has idiosyncratic structure perfect for LLM reasoning at slow cadence with mechanical execution. |
+| `sage_turtle` | Event & Unlock Positioning | Thesis written (`agents/theses/sage_turtle_v1.md`); not yet in the active seed rotation. Monitors token unlock schedules, exchange listings, and macro events (unlock size vs. float, days-to-event window, recipient sell-propensity, pre-event funding/OI drift). Each event has idiosyncratic structure perfect for LLM reasoning at slow cadence with mechanical execution. Spawning it — alongside retiring `gray_finch`/`amber_wolf` — is an M8 "convert the desk" task, not yet done. |
 
-**Retired:** `gray_finch` (order book microstructure) and `amber_wolf` (trade flow) — microstructure at 5-min LLM cadence is structurally unwinnable; the slot is better spent on an event/unlock agent.
+**Retired (pending M8):** `gray_finch` (order book microstructure) and `amber_wolf` (trade flow) — microstructure at 5-min LLM cadence is structurally unwinnable; the slot is better spent on `sage_turtle`.
 
 ---
 
@@ -686,8 +734,10 @@ Exchange / data:  Hyperliquid REST API (direct, no library required — clean RE
 Local inference:  Ollama + Qwen3.6-35B (compiled agent decisions, risk officer)
 API inference:    Claude claude-sonnet-4-6 (reflection loop, head of desk synthesis)
 Web research:     Brave Search API or SerpAPI (reflection cycles only)
-Persistence:      SQLite (forge.db + market_history.db, no server)
-Backtest engine:  Replay history through spec interpreter + fee/slippage model
+Persistence:      SQLite (forge.db — local, disposable cache, no server) +
+                  git-native ledger (ledger/ + state/ — committed/pushed every
+                  heartbeat cycle, the actual system of record; see Data Layer & Ledger)
+Backtest engine:  Replay history through spec interpreter + fee/slippage model (M7b, not yet built)
 Web backend:      FastAPI + Jinja2 + WebSocket
 Web frontend:     Vanilla HTML/CSS/JS (no build step, no npm)
 Charts:           uPlot (lightweight, no dependencies, served as static file)
@@ -710,9 +760,19 @@ forge/
 ├── README.md
 │
 ├── data/
-│   ├── forge.db                  ← SQLite (committed to git)
-│   ├── market_history.db         ← candles, funding, OI, liqs, events
+│   ├── forge.db                  ← SQLite (gitignored — local, disposable cache,
+│   │                                 rebuildable via scripts/rebuild_local_cache.py)
 │   └── schema.sql                ← table definitions + migrations
+│
+├── ledger/                       ← git-tracked, append-only source of truth
+│   ├── decisions/{YYYY-MM}.{jsonl,parquet}
+│   ├── candles_5m/, candles_1h/, candles_4h/, funding/, oi/, liquidations/
+│   ├── trades/, accounts/
+│   └── events.jsonl              ← event calendar (not yet built, M7b)
+│
+├── state/
+│   └── current.json              ← git-tracked, overwritten + committed every cycle
+│                                     (open positions, live balances, agent status)
 │
 ├── agents/
 │   ├── runtime.py                ← agent async loop (wake → decide → execute)
@@ -729,9 +789,11 @@ forge/
 │   ├── provider.py               ← MarketProvider facade; selects stub or hyperliquid via config
 │   ├── stub.py                   ← StubMarket async class + get_market_state() (deterministic data)
 │   ├── hyperliquid.py            ← HyperliquidClient: REST, circuit breaker, rate-limit retry
+│   ├── heartbeat.py              ← generates the shared heartbeat packet; export_heartbeat_to_ledger()
+│   │                                 writes lean candles/funding/oi/liquidations to ledger/ every cycle
 │   ├── regime.py                 ← market regime classifier
-│   ├── web_research.py           ← search API client (reflection only)
-│   └── history.py                ← market_history store: append + query for backtest
+│   ├── features.py               ← FEATURE_REGISTRY plugin pattern for derived indicators
+│   └── web_research.py           ← search API client (reflection only)
 │
 ├── risk/
 │   └── gate.py                   ← stateless validator, non-bypassable (hardened)
@@ -750,9 +812,14 @@ forge/
 │   ├── db.py                     ← SQLite connection + CRUD helpers
 │   ├── fingerprint.py            ← write/query/update trade fingerprints
 │   ├── performance.py            ← rolling metric calculation (daily equity Sharpe, etc.)
-│   ├── positions.py              ← desk position registry (all open positions)
+│   ├── positions.py              ← desk position registry; execute_close() ledger-exports
+│   │                                 the closed trade + account snapshot on every close
+│   ├── ledger.py                 ← append_ledger_record(): the core git-native ledger writer
+│   ├── git_sync.py               ← best-effort commit + push of ledger/ + state/ every cycle
+│   ├── state_snapshot.py         ← write_current_state(): state/current.json every cycle
 │   ├── query.py                  ← structured query builder for trade bank
-│   └── decisions.py              ← decisions table: every heartbeat cycle
+│   └── decisions.py              ← decisions table: every heartbeat cycle (also ledger-exported
+│                                     via agents/decision_loop.py's log_decision)
 │
 ├── meta/
 │   ├── controller.py             ← evaluation loop + cull/spawn/graveyard
@@ -778,12 +845,14 @@ forge/
 │       └── uplot.min.js
 │
 └── scripts/
-    ├── fresh_start.py            ← initialize clean DB, seed all agents
-    ├── spawn_agent.py            ← CLI: manually create a new agent
-    └── promote_agent.py          ← CLI: move agent to shadow or live mode
+    ├── fresh_start.py            ← wipe local + legacy data, seed all agents
+    ├── compact_ledger.py         ← monthly JSONL→Parquet compaction + resolution decay
+    ├── rebuild_local_cache.py    ← disaster recovery: rebuild forge.db from ledger/ + state/
+    ├── spawn_agent.py            ← CLI: manually create a new agent (not yet built)
+    └── promote_agent.py          ← CLI: move agent to shadow or live mode (not yet built)
 ```
 
-Everything lives in one GitHub repo. No external services required beyond the exchange API and Ollama (local). `git clone` → `pip install -r requirements.txt` → configure `.env` → `python forge.py` → system is running.
+Everything lives in one GitHub repo. No external services required beyond the exchange API and Ollama (local). `git clone` → `pip install -r requirements.txt` → configure `.env` → `python scripts/rebuild_local_cache.py` (reconstructs `data/forge.db` from the git-tracked `ledger/` + `state/current.json` — skip this on a genuinely fresh desk with no history yet) → `python forge.py` → system is running, exactly where it left off.
 
 ---
 
@@ -791,7 +860,7 @@ Everything lives in one GitHub repo. No external services required beyond the ex
 
 Each milestone is independently demonstrable. You can start Forge after any milestone and observe meaningful behavior.
 
-### M1 — Walking Skeleton
+### M1 — Walking Skeleton (DONE)
 
 **Goal:** The complete system structure exists. One agent wakes on a schedule, makes a trade decision using stub data and a stub LLM, records the fingerprint to SQLite, updates a paper account, and the web UI shows it happening. Nothing is real yet — but every seam in the architecture is proven.
 
@@ -818,7 +887,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M2 — Real Market Data
+### M2 — Real Market Data (DONE)
 
 **Goal:** Agents pull live market data from the Hyperliquid API. All 15 assets are priced in real time. The paper bridge simulates fills against real Hyperliquid bid/ask. The web UI shows live prices updating.
 
@@ -842,7 +911,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M3 — Real LLM Decisions
+### M3 — Real LLM Decisions (DONE)
 
 **Goal:** Replace the stub LLM with a real local Qwen3.6-35B. One agent runs autonomously for 24+ hours making genuine trading decisions based on real market data. Every decision is logged with the agent's full reasoning text. Model is pinned; fallback only within same model.
 
@@ -867,7 +936,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M4 — Trade Fingerprint Store
+### M4 — Trade Fingerprint Store (DONE)
 
 **Goal:** Every trade is stored as a full fingerprint including OHLCV snapshot, funding context, regime tag, reasoning, and postmortem. Agents can query the historical bank. Cross-agent queries return results.
 
@@ -889,7 +958,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M5 — Multi-Agent Desk
+### M5 — Multi-Agent Desk (DONE)
 
 **Goal:** All 10 initial agents run simultaneously. Competing positions are visible and allowed — divergent theses in the same asset provide signal and natural desk hedging. The leaderboard shows all agents.
 
@@ -914,7 +983,7 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M6 — Truth ("the numbers mean what they say")
+### M6 — Truth ("the numbers mean what they say") (DONE)
 
 **Goal:** Fix measurement integrity. Today's results are contaminated by a risk-gate hole (wrong-side SL/TP fills booking phantom profits) and randomized model attribution. No learning can happen on corrupted signal.
 
@@ -934,22 +1003,34 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### M7 — Memory & the Backtest Engine (the strategic unlock)
+### M7a — Git-Native Data Ledger (DONE)
 
-**Goal:** A market-history store plus a backtest engine converts evolution from months-per-generation to minutes-per-generation. This is the single highest-leverage build.
+**Goal:** Replace the gitignored, disposable `data/forge.db` as the system of record with a git-tracked, append-only ledger, so a fresh `git clone` reproduces the exact last-known state of the desk — the storage substrate M7b's backtester needs, built to satisfy the "everything fits in one git repo, no external database" constraint. Full design + implementation plan: `docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md`, `docs/superpowers/plans/2026-07-07-git-native-data-ledger.md`.
+
+**You can verify:** `python scripts/rebuild_local_cache.py` on a machine with only `ledger/` + `state/current.json` present (no `data/forge.db`) reconstructs a working local cache with the same agents, balances, closed trades, and open positions the original machine had.
+
+**What shipped:** the full Data Layer & Ledger design above — `store/ledger.py` (append-only JSONL writer, monthly-partitioned), lean market-data export from every heartbeat cycle (`market/heartbeat.py`, replacing the old verbose full-packet mirror), structured `confidence`/`evidence_strength` on **every** decision including "wait" (closing the selection-bias gap — see Anti-Overfitting §9, Calibration), trade-close + account-snapshot ledger export (`store/positions.py`), `state/current.json` written every cycle, best-effort git commit+push every heartbeat cycle (`store/git_sync.py`), monthly JSONL→Parquet compaction with resolution decay (`scripts/compact_ledger.py`), and the disaster-recovery rebuild script.
+
+**Explicitly out of scope for M7a** (M7b, below): the strategy-spec DSL, the backtester itself, the liquidation feed. M7a builds the substrate; M7b builds what reads it.
+
+---
+
+### M7b — Strategy-Spec DSL & Backtest Engine (the strategic unlock — not yet built)
+
+**Goal:** A backtest engine converts evolution from months-per-generation to minutes-per-generation. This is the single highest-leverage remaining build.
 
 **You can verify:** `backtest(spec, 2025-07→2026-06)` returns an equity curve + overfit report in under a minute, and three seed specs have known historical profiles.
 
 **Tasks:**
-1. `market_history` store: SQLite file with 1h candles + funding (≥ 12 months backfill from Hyperliquid API), 5m candles (≥ 90 days), OI/liq data (from Coinalyze or accumulate live), event tables (FOMC/CPI, token unlocks)
-2. Fix z-score windows to match thesis definitions (14d funding baseline, etc.)
-3. Event tables: funding settlements, macro calendar, **token unlocks**
-4. Strategy-spec DSL: schema + validator + interpreter over heartbeat features (entry conditions as weighted evidence terms, exit rules, sizing curve, regime filters, max hold, per-asset scope)
-5. Backtester: replay history through the same interpreter + fee/slippage model as paper; walk-forward harness (train/validate/test windows); overfit metrics (deflated Sharpe, parameter-sensitivity sweep)
-6. Hand-compile 3 seed specs from existing theses (silver_basin, steel_crane, iron_moth) and backtest them — this is also the first honest evidence about whether these theses have any historical edge at all
-7. Liquidation feed (WS flag or Coinalyze) replacing the proxy for steel_crane's family
+1. Fix z-score windows to match thesis definitions (14d funding baseline, etc.) — the ledger's `funding` stream now has real history to compute against
+2. Event tables: funding settlements, macro calendar, **token unlocks** (`ledger/events.jsonl`, per Data Layer & Ledger above)
+3. Strategy-spec DSL: schema + validator + interpreter over heartbeat features (entry conditions as weighted evidence terms, exit rules, sizing curve, regime filters, max hold, per-asset scope)
+4. Backtester: replay history by reading `ledger/{kind}/*.{jsonl,parquet}` directly (or via a materialized local cache built the same way `rebuild_local_cache.py` does) through the same interpreter + fee/slippage model as paper; walk-forward harness (train/validate/test windows); overfit metrics (deflated Sharpe, parameter-sensitivity sweep)
+5. Hand-compile 3 seed specs from existing theses (silver_basin, steel_crane, iron_moth) and backtest them — this is also the first honest evidence about whether these theses have any historical edge at all
+6. Liquidation feed (WS flag or Coinalyze) replacing the proxy for steel_crane's family — lands in the ledger's existing `liquidations` stream
+7. Statistical/Bayesian forecast feature (regime-conditioned empirical return distributions or a simple hierarchical/Bayesian regression by regime/asset), trained on the ledger's `candles_5m`/`funding`/`oi` streams via `scripts/build_training_dataset.py` (needs updating: it currently reads the retired `data/historical_data/*.jsonl` format — point it at the ledger instead). Output: expected forward return + credible interval, probability-of-up-move, injected as a new `FEATURE_REGISTRY` feature (`source=statistical`) alongside the existing `evidence_strength`/`confidence` fields agents already reason over. Explicitly NOT a deep-learning or LLM fine-tune — days-to-weeks of 5-minute-cadence data across 20 assets is too little and too noisy for a fine-tune to show real calibration gains; revisit only once this statistical feature has proven useful and history has grown to months, not days.
 
-**Done when:** Backtest returns in under a minute. Three seed specs have known historical profiles.
+**Done when:** Backtest returns in under a minute. Three seed specs have known historical profiles. The statistical forecast feature is contributing to agent decisions via `FEATURE_REGISTRY`.
 
 ---
 
@@ -1008,23 +1089,9 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ---
 
-### Milestone 11 — Historical Heartbeat Data
+### Historical note: heartbeat capture superseded by the git-native ledger
 
-**Goal:** Build a self-sustaining training dataset from heartbeat logs, enabling statistical feature engineering that doesn't depend on the LLM pipeline. Every heartbeat cycle produces a full packet (timestamp, per-asset fields including funding rate/zscore/acceleration, cross_asset, regime) written to `data/heartbeat.json` — this milestone adds continuous, append-only capture of every packet as it passes through `write_heartbeat()`.
-
-**You can verify:** After running the system for 48+ hours, `data/historical_data/` contains one JSONL file per UTC day, each with thousands of records. `scripts/build_training_dataset.py` processes the JSONL into a Parquet file with multi-horizon labels. `market/features.py` exposes statistical forecast features via `FEATURE_REGISTRY`.
-
-**Tasks:**
-
-1. ~~**Phase 1 — Historical heartbeat capture:**~~ **Phase 1 — Historical heartbeat capture (shipped):** `append_historical()` is already implemented in `market/heartbeat.py` (commit d2de878 / PR #24). Full heartbeat packets are appended as one JSON line per UTC day to `data/historical_data/YYYY-MM-DD.jsonl`, wrapped in try/except with logging-only error handling. `data/historical_data/` is already in `.gitignore`. No separate "outcome" recording is needed: because every packet has the same schema, a sample at time T joined with the heartbeat at T+2h (or any horizon) already contains the full realized price/funding trajectory. No fixed retention or rotation logic yet; deferred until it's an actual problem.
-2. ~~**Phase 2 — Label/dataset post-processing:**~~ **Phase 2 — Label/dataset post-processing (shipped):** `scripts/build_training_dataset.py` is implemented as an offline, read-only script that loads a date range of `data/historical_data/*.jsonl` files (`--start-date`/`--end-date`, inclusive, by filename) and, for each (asset, timestamp) sample, joins forward heartbeats in the same timeline to compute realized labels at multiple configurable horizons (`--horizons`, default 30m/2h/4h/24h): forward return, realized volatility over the horizon, max drawdown/runup, funding accrued, and an illustrative stop-loss/take-profit "which triggers first" label (`--sl-pct`/`--tp-pct`, default 2%/5%). A (sample, horizon) combination — not the whole row — is excluded (its label columns left null) whenever the timeline has a gap or doesn't yet extend far enough past a 2x-cadence (10 minute) staleness threshold. Output is a flat Parquet table (`--output`, default `data/historical_data/training_dataset.parquet`) of features + multi-horizon labels for model fitting. Requires `pyarrow` (added to `requirements.txt`). Not wired into `forge.py` or any scheduler yet (see task 4 below).
-3. **Phase 3 — Statistical/Bayesian forecast feature:** Implement a lightweight statistical or Bayesian model (e.g. regime-conditioned empirical return distributions, or a simple hierarchical/Bayesian regression by regime/asset) trained on Phase 2's dataset. Output: expected forward return + credible interval, expected funding accrual, a probability-of-up-move estimate. Explicitly NOT a deep-learning or LLM fine-tune — a few days to weeks of 5-minute-cadence data across ~20 assets is far too little and too noisy for a fine-tune to show real calibration gains. Compute the forecast once per heartbeat cycle and inject as a new feature via the existing `FEATURE_REGISTRY` plugin pattern in `market/features.py` (marking the feature with `source=statistical`), so it appears in the heartbeat packet as structured evidence alongside the existing `evidence_strength`/`confidence` fields that agents already reason over.
-
-4. Implement dataset refresh pipeline: add a cron job in `forge.py` that runs `scripts/build_training_dataset.py` weekly (or on-demand via `POST /api/refresh_dataset`); the new Parquet file replaces the old one atomically; old Parquet files are retained for 7 days in `data/training_dataset.parquet.bak.*`.
-
-**Defer — LLM Fine-Tuning (Future):** Fine-tuning the Qwen model directly on heartbeat-to-outcome pairs, or a thesis-reflection (M6-style) loop using this data, is explicitly deferred. The rationale: with only days to weeks of initial data, a statistical model is more data-efficient and interpretable than a fine-tune, and the LLM's job should stay "reason over well-calibrated evidence" rather than "learn market statistics from weights." Revisit fine-tuning only once Phase 3 has proven the forecast feature helps and historical data volume has grown to months, not days.
-
-**Done when:** After 48+ hours of system operation, the JSONL files contain thousands of records, the Parquet dataset has multi-horizon labels with gap detection, and statistical forecast features are actively contributing to agent decisions via `FEATURE_REGISTRY`.
+An earlier milestone ("Historical Heartbeat Data") built `append_historical()` (`market/heartbeat.py`) to mirror full heartbeat packets to `data/historical_data/*.jsonl`, and `scripts/build_training_dataset.py` to post-process them into a labeled Parquet dataset. Both shipped, but the capture mechanism was **retired and replaced** by M7a's git-native ledger: `append_historical()`/`HISTORICAL_DATA_DIR` no longer exist — `export_heartbeat_to_ledger()` writes the same underlying raw data (candles, funding, OI, liquidations), leaner and git-tracked, to `ledger/` instead of a gitignored local mirror. `scripts/build_training_dataset.py` still exists but needs a follow-up update to read from `ledger/` rather than the retired `data/historical_data/` format before it's usable again — tracked as M7b task 7 above, which also carries forward the still-relevant statistical-forecast-feature plan this milestone originally proposed.
 
 ---
 
@@ -1032,14 +1099,14 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 | Risk | Mitigation |
 |---|---|
-| Overfitting via the reflection loop | M7's walk-forward + deflated-Sharpe machinery and the null-agent floor; anti-overfit gates are the most important code in the repo |
+| Overfitting via the reflection loop | M7b's walk-forward + deflated-Sharpe machinery and the null-agent floor; anti-overfit gates are the most important code in the repo |
 | All agents converge on same thesis | Competing positions provide signal when theses diverge; diversity spawns maintain breadth; Head of Desk flags thesis convergence |
 | Regime shift breaks all agents simultaneously | Regime tagging surfaces regime-specific strategies; meta-controller suspends agents failing in new regime |
 | Hyperliquid API downtime | Circuit breaker; agents skip cycle on unavailability; positions monitored by separate process |
 | Qwen inference too slow for 15m cadence | 30s hard timeout; async execution; "do nothing" fallback preserves account safety |
 | Live order submission failure | Paper bridge always succeeds; live bridge failure logs and alerts but does not corrupt paper state |
-| SQLite file grows too large for git | OHLCV compressed with msgpack; archiving job compresses old fingerprints; 10,000 trades ≈ 100MB |
-| Market-history backfill incomplete | Backfill from Hyperliquid's API (candles + funding history reach back far enough); OI/liq accumulate live |
+| Ledger grows too large for git | Resolved by design, not just mitigated: append-only JSONL (hot) → Parquet (cold, monthly compaction) keeps growth to ≈250MB/year at current scale; escalation ladder (tighter retention → resolution decay → shard-by-year → Git LFS) if that ever changes. See Data Layer & Ledger. |
+| Market-history backfill incomplete | Backfill from Hyperliquid's API (candles + funding history reach back far enough); OI/liq accumulate live (not retroactively available from the exchange) |
 | Big pickle / free-tier model unreliability | Pinned models per agent; frontier-model budget reserved for reflection where per-call value is 100× higher |
 | Capacity limits at scale | These edges hold at $10k–$1M; not a problem worth solving yet |
 
@@ -1049,9 +1116,9 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 - **Calibrate the targets.** The original 25–45%/agent with Sharpe > 1.5 is aspirational; a realistic v1 success is: *funding-carry book yielding 10–25% annualized on small capital with max DD < 10%, plus optionality from event/cascade agents* — and, more importantly, a machine that produces and validates new strategies faster than old ones decay. That second thing is the actual asset being built.
 - **Capacity is real but fine at this scale.** These edges hold at $10k–$1M; they will not hold at $100M. That is not a problem worth solving yet.
-- **Biggest technical risk:** overfitting via the reflection loop — the system optimizing its specs into historical noise. Mitigation is M7's walk-forward + deflated-Sharpe machinery and the null-agent floor; treat the anti-overfit gates as the most important code in the repo.
+- **Biggest technical risk:** overfitting via the reflection loop — the system optimizing its specs into historical noise. Mitigation is M7b's walk-forward + deflated-Sharpe machinery and the null-agent floor; treat the anti-overfit gates as the most important code in the repo.
 - **Biggest operational risk:** live stops living in a 5-minute local loop. Exchange-native triggers are non-negotiable before real money (M10.1).
-- **Biggest strategic risk:** spending the next quarter polishing the fast loop (more features, more agents, more UI) instead of building M7–M8. The fast loop is done enough. The moat is the slow loop.
+- **Biggest strategic risk:** spending the next quarter polishing the fast loop (more features, more agents, more UI) instead of building M7b–M8. The fast loop is done enough. The moat is the slow loop.
 - **Regulatory:** unchanged from the original proposal — non-custodial DeFi, US person, consult counsel before scaling live capital.
 
 ---
