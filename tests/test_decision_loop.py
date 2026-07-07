@@ -1,16 +1,19 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from store.db import init_schema, insert_agent, insert_account_snapshot
+
 from agents.decision_loop import run_decision
 from agents.prompt_builder import build_decision_prompt
+from execution.paper_bridge import PaperBridge
+from llm.stub import decide
 from market.heartbeat import write_heartbeat
 from market.provider import MarketProvider
-from llm.stub import decide
-from execution.paper_bridge import PaperBridge
+from store.db import insert_account_snapshot, insert_agent
 
 AGENT_ID = "jade_hawk"
-THESIS = "Funding rate mean reversion: persistent negative funding signals short squeeze."
+THESIS = (
+    "Funding rate mean reversion: persistent negative funding signals short squeeze."
+)
 
 
 def _config(heartbeat_path: str) -> dict:
@@ -61,14 +64,17 @@ def _fresh_heartbeat_packet(timestamp: str | None = None) -> dict:
 
 def _bridge_factory(config):
     def bridge_factory(agent_id, conn, provider):
-        return PaperBridge(agent_id=agent_id, conn=conn, provider=provider, config=config)
+        return PaperBridge(
+            agent_id=agent_id, conn=conn, provider=provider, config=config
+        )
+
     return bridge_factory
 
 
 STUB_MODEL_LABEL = "Test Stub Model"
 
 
-def _stub_llm_fn(system_prompt, decision_prompt):
+def _stub_llm_fn(system_prompt, decision_prompt, **kwargs):
     """llm_fn now returns (decision_dict, model_display_name) — see
     llm/model_chain.py's decide(). Wraps llm.stub.decide() for tests that
     only care about the decision shape, not the fallback chain itself."""
@@ -98,15 +104,19 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
 
     assert result["action"] == "enter"
     from store.db import get_trades
+
     trades = get_trades(conn, AGENT_ID)
     assert len(trades) == 1
     # Fingerprint's categorical regime tag came from the heartbeat packet.
-    row = conn.execute("SELECT regime FROM trades WHERE id = ?", (trades[0]["id"],)).fetchone()
+    row = conn.execute(
+        "SELECT regime FROM trades WHERE id = ?", (trades[0]["id"],)
+    ).fetchone()
     assert row["regime"] == "range_high_vol"
 
     # The consolidated trade-thumbprint (portfolio + cross_asset + regime +
     # full per-asset heartbeat fields) was captured onto the trade row.
     from store.query import get_trade
+
     full = get_trade(conn, trades[0]["id"], decode_ohlcv=True)
     mc = full["market_context_json"]
     assert mc is not None
@@ -121,6 +131,7 @@ async def test_decision_loop_enter_creates_trade(conn, tmp_path):
     # agent row from the (decision, model_used) tuple returned by llm_fn.
     assert full["model_used"] == STUB_MODEL_LABEL
     from store.db import get_agent
+
     assert get_agent(conn, AGENT_ID)["last_model_used"] == STUB_MODEL_LABEL
 
 
@@ -129,7 +140,7 @@ async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def bad_llm(sys, prompt):
+    def bad_llm(sys, prompt, **kwargs):
         return {
             "action": "enter",
             "asset": "SOL-PERP",
@@ -164,6 +175,7 @@ async def test_decision_loop_risk_block_does_not_create_trade(conn, tmp_path):
 
     assert result["action"] == "risk_blocked"
     from store.db import get_trades
+
     assert get_trades(conn, AGENT_ID) == []
 
 
@@ -172,8 +184,11 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def wait_llm(sys, prompt):
-        return {"action": "wait", "reason": "no setup fits thesis today"}, "Test Wait Model"
+    def wait_llm(sys, prompt, **kwargs):
+        return {
+            "action": "wait",
+            "reason": "no setup fits thesis today",
+        }, "Test Wait Model"
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
     write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
@@ -193,16 +208,20 @@ async def test_decision_loop_wait_does_not_create_trade(conn, tmp_path):
 
     assert result["action"] == "wait"
     from store.db import get_trades
+
     assert get_trades(conn, AGENT_ID) == []
 
     # "wait" cycles still update last_model_used — the captain wants "most
     # recently used model", not "model used for the last trade".
     from store.db import get_agent
+
     assert get_agent(conn, AGENT_ID)["last_model_used"] == "Test Wait Model"
 
 
 @pytest.mark.asyncio
-async def test_decision_loop_error_action_propagates_and_records_no_model_available(conn, tmp_path):
+async def test_decision_loop_error_action_propagates_and_records_no_model_available(
+    conn, tmp_path
+):
     """When llm_fn (llm/model_chain.py's decide()) exhausts every tier, it
     returns ({"action": "error", "reason": "no model available"}, None).
     run_decision() must surface that as an explicit error result (not a
@@ -211,7 +230,7 @@ async def test_decision_loop_error_action_propagates_and_records_no_model_availa
     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
-    def no_model_llm(sys, prompt):
+    def no_model_llm(sys, prompt, **kwargs):
         return {"action": "error", "reason": "no model available"}, None
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
@@ -232,6 +251,7 @@ async def test_decision_loop_error_action_propagates_and_records_no_model_availa
 
     assert result == {"action": "error", "detail": "no model available"}
     from store.db import get_agent, get_trades
+
     assert get_agent(conn, AGENT_ID)["last_model_used"] == "no model available"
     assert get_trades(conn, AGENT_ID) == []
 
@@ -259,6 +279,7 @@ async def test_decision_loop_missing_heartbeat_returns_wait(conn, tmp_path):
 
     assert result == {"action": "wait", "detail": "heartbeat unavailable or stale"}
     from store.db import get_trades
+
     assert get_trades(conn, AGENT_ID) == []
 
 
@@ -269,7 +290,9 @@ async def test_decision_loop_stale_heartbeat_returns_wait(conn, tmp_path):
     insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
 
     heartbeat_path = str(tmp_path / "heartbeat.json")
-    stale_ts = (datetime.now(timezone.utc) - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale_ts = (datetime.now(timezone.utc) - timedelta(seconds=1000)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     write_heartbeat(heartbeat_path, _fresh_heartbeat_packet(timestamp=stale_ts))
     config = _config(heartbeat_path)
 
@@ -289,7 +312,9 @@ async def test_decision_loop_stale_heartbeat_returns_wait(conn, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_decision_prompt_contains_heartbeat_sourced_data_and_cadence_notice(conn, tmp_path):
+async def test_decision_prompt_contains_heartbeat_sourced_data_and_cadence_notice(
+    conn, tmp_path
+):
     """End-to-end: heartbeat-sourced fields actually reach the decision
     prompt text built by build_decision_prompt (not just the reader
     function in isolation), and the 5-minute cadence language is present."""
@@ -298,8 +323,13 @@ async def test_decision_prompt_contains_heartbeat_sourced_data_and_cadence_notic
 
     packet = _fresh_heartbeat_packet()
     prompt = await build_decision_prompt(
-        AGENT_ID, THESIS, packet, conn, provider=None,
-        starting_balance=50000.0, universe=["SOL-PERP"],
+        AGENT_ID,
+        THESIS,
+        packet,
+        conn,
+        provider=None,
+        starting_balance=50000.0,
+        universe=["SOL-PERP"],
     )
 
     # Heartbeat-sourced per-asset field values reach the prompt text.

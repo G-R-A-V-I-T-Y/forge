@@ -42,6 +42,11 @@ which model actually answered. The chain is loaded from the `settings` DB on eve
 default chain if the DB is unavailable. See
 `docs/superpowers/specs/2026-07-01-model-fallback-chain-design.md` for the full design.
 
+**M6 model pinning:** `decide()` also accepts an `agent_id`. If that agent has a `pinned_model`
+(checked in its `agents.config_json`, then in the `settings` table under `agent_{agent_id}_model`),
+only that model is tried — no fallback chain — so the agent's decisions stay reproducible across
+runs. Agents without a pinned model keep using the ordered fallback chain as before.
+
 Independently, `llm/client.py` offers a simpler single-backend path selected via `config.yaml`,
 used mainly by older tests and scripts:
 
@@ -85,9 +90,38 @@ data_source: stub        # "stub" (default) or "hyperliquid"
 - `stub` — deterministic in-memory data via `StubMarket` (keeps all existing tests passing)
 - `hyperliquid` — live REST API via `HyperliquidClient` with circuit breaker and rate-limit retry
 
+`execution/paper_bridge.py`'s fill price applies half the heartbeat `spread` against the
+position's direction (long entries pay up, short entries pay down) plus a `slippage_estimate`
+in the same direction, for a more realistic paper fill than the raw heartbeat price.
+`store/positions.py` also records `duration_minutes` on every closed trade.
+
+## Risk Gate
+
+`risk/gate.py`'s `validate_order()` enforces 13 hard rules before an order reaches paper
+execution, raising `RiskViolation` on the first breach: SL/TP presence, SL/TP geometry bracketing
+the entry price, minimum SL distance (0.3%), minimum TP distance to clear the round-trip fee
+hurdle (0.5%), minimum reward:risk ratio (0.5), leverage cap, position-size cap, a notional
+exposure cap (`position_size_pct × leverage <= 2.0`), concurrent-positions cap, entry-price
+deviation from the live heartbeat price (max 0.5%, skipped if no heartbeat price is available),
+liquidation distance (>= 2x SL distance), and a confidence floor (>= 0.50 when present). Corrupted
+trades that predate these rules are voided rather than deleted: `store/db.py`'s
+`void_corrupted_trades()` sets `trades.voided = 1` and a `void_reason` (missing SL/TP, bad
+geometry, too-tight SL, or sub-fee-hurdle TP); `store/performance.py` excludes voided trades from
+all metrics.
+
 ## Performance Metrics
 
-`store/performance.py` computes rolling metrics from closed trades: win rate, profit factor, average win/loss %, Sharpe ratio, best/worst trade, last-20 performance, and last-7-day return. These are injected into the agent's decision prompt so the LLM can self-evaluate its recent track record.
+`store/performance.py` computes rolling metrics from closed, non-voided trades: win rate, profit
+factor (capped at 10 to keep leaderboards from being skewed by an infinite ratio), average
+win/loss %, an equity-curve Sharpe ratio, Sortino ratio (downside deviation), exposure-adjusted
+return (total PnL over mean notional exposure), a benchmark-vs-null figure (total PnL vs. a
+zero-return null strategy), best/worst trade, last-20 performance, and last-7-day return. These
+are injected into the agent's decision prompt so the LLM can self-evaluate its recent track
+record.
+
+`scripts/seed_benchmarks.py` seeds two benchmark agents for leaderboard comparison:
+`benchmark_random_walk` (random long/short decisions) and `benchmark_btc_hold` (BTC-only,
+holds indefinitely). Both compete on the same leaderboard as the AI agents.
 
 ## Trade Fingerprint Store
 
@@ -113,6 +147,20 @@ from the packet's timestamp), building a continuous market-data history for
 later research and backtesting. This capture path is failure-isolated: any
 error is logged and swallowed so it can never block or degrade the primary
 heartbeat write. The directory is gitignored.
+
+Run `scripts/build_training_dataset.py` to turn that JSONL history into a
+flat training dataset: `python scripts/build_training_dataset.py [--start-date
+YYYY-MM-DD] [--end-date YYYY-MM-DD] [--output PATH] [--horizons MIN [MIN ...]]
+[--sl-pct PCT] [--tp-pct PCT]`. It flattens each (asset, timestamp) sample and
+computes forward-looking labels at each horizon (default 30m/2h/4h/24h):
+return, realized volatility, max drawdown/run-up, funding accrued, and an
+illustrative stop-loss/take-profit "which triggers first" label (default
+2%/5%). A (sample, horizon) combination is excluded (labels left null, row
+kept) when the timeline has a gap or doesn't yet extend far enough past
+horizon. Output is written as Parquet (default
+`data/historical_data/training_dataset.parquet`; requires `pyarrow`). This is
+an offline, read-only batch job — it is not wired into `forge.py` or run on a
+schedule.
 
 ## Multi-Agent Desk
 
@@ -164,6 +212,17 @@ single agent), and `web/static/forge.js` opens a `WS /api/ws/desk` connection
 on page load that pushes the same desk summary every 30 seconds so the grid
 updates live without a page reload.
 
+A nightly APScheduler job (`forge.py`, cron 02:00 UTC) runs a counterfactual analysis for each
+agent's most recent `wait` decision: `agents/decision_loop.py`'s `run_counterfactual()` asks the
+LLM whether taking the trade would have been profitable and stores the result on the `decisions`
+row (`counterfactual_result`, `counterfactual_was_better`). Every decision is logged via
+`log_decision()` into the `decisions` table (`agent_id`, `timestamp`, `decision_action`,
+`decision_reason`, `decision_details_json`).
+
+`config.yaml`'s `desk.starting_balance` is the single source of truth for new-agent starting
+balance; `scripts/fresh_start.py` and `scripts/seed_benchmarks.py` both read it from there instead
+of hardcoding their own value.
+
 ## Milestones
 
 - **M1** (complete): Walking skeleton — stub LLM, stub market data, paper trading, web UI
@@ -171,4 +230,6 @@ updates live without a page reload.
 - **M3** (complete): Real LLM decisions (Qwen3.6-35B, now via the forge-managed llama-server) + performance metrics
 - **M4** (complete): Trade fingerprint store — OHLCV/funding/OI snapshots, `store/query.py`, `/trades` page, `/api/query`
 - **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard (LyteNyte Grid + sparklines) + agent detail pages, `/api/desk`, `/api/agents/balance-history`, `WS /api/ws/desk`
-- **M6-M10**: Full system
+- **M6** (complete): Truth — 13-rule risk gate, voided/corrupted-trade tracking, realistic paper fills (spread/slippage/duration), per-agent model pinning, `decisions` table + nightly counterfactual job, rewritten metrics (Sharpe/Sortino/exposure-adjusted/benchmark-vs-null), seeded benchmark agents, config hygiene
+- **M7-M10**: Full system
+- **M11** (Phases 1-2 complete): Historical heartbeat data — daily JSONL capture in `data/historical_data/`; offline `scripts/build_training_dataset.py` builds a multi-horizon labeled Parquet dataset; statistical forecast features (Phase 3) planned (see `docs/FORGE_PROPOSAL.md`)

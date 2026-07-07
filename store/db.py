@@ -47,6 +47,9 @@ _TRADES_MIGRATION_COLUMNS = {
     "model_used": "TEXT",
     "fees_paid": "REAL",
     "funding_paid": "REAL",
+    "duration_minutes": "REAL",
+    "voided": "INTEGER NOT NULL DEFAULT 0",
+    "void_reason": "TEXT",
 }
 
 # Columns added by the model-fallback-chain feature. Same rationale as
@@ -101,7 +104,9 @@ def get_agent(conn: sqlite3.Connection, agent_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def update_last_model_used(conn: sqlite3.Connection, agent_id: str, model_name: str | None) -> None:
+def update_last_model_used(
+    conn: sqlite3.Connection, agent_id: str, model_name: str | None
+) -> None:
     """Record which model produced (or failed to produce) an agent's most
     recent decision cycle — "most recently used model", not "model used for
     the last trade": called after every wait/close/enter/error cycle, per
@@ -173,3 +178,53 @@ def get_latest_account(
         (agent_id, mode),
     ).fetchone()
     return dict(row) if row else None
+
+
+def void_corrupted_trades(conn: sqlite3.Connection) -> int:
+    """Void trades that are structurally corrupted (missing SL/TP, wrong geometry, etc.)
+
+    Returns the number of trades voided.
+    """
+    # Find trades with missing SL or TP (both should be non-null)
+    cursor = conn.execute(
+        """UPDATE trades
+           SET voided = 1, void_reason = 'missing_stop_loss_or_take_profit'
+           WHERE (stop_loss_price IS NULL OR take_profit_price IS NULL)
+           AND voided = 0"""
+    )
+
+    # Find trades where SL/TP geometry is wrong for the direction
+    # Long: SL should be < entry < TP
+    # Short: TP should be < entry < SL
+    cursor = conn.execute(
+        """UPDATE trades 
+           SET voided = 1, void_reason = 'invalid_sl_tp_geometry'
+           WHERE voided = 0
+           AND (
+               (direction = 'long' AND (stop_loss_price >= entry_price OR entry_price >= take_profit_price))
+               OR
+               (direction = 'short' AND (take_profit_price >= entry_price OR entry_price >= stop_loss_price))
+           )"""
+    )
+
+    # Find trades where SL distance is < 0.3% (too tight)
+    cursor = conn.execute(
+        """UPDATE trades 
+           SET voided = 1, void_reason = 'stop_loss_too_tight'
+           WHERE voided = 0
+           AND ABS(entry_price - stop_loss_price) / entry_price < 0.003"""
+    )
+
+    # Find trades where TP distance is < 0.5% (below fee hurdle)
+    cursor = conn.execute(
+        """UPDATE trades 
+           SET voided = 1, void_reason = 'take_profit_below_fee_hurdle'
+           WHERE voided = 0
+           AND ABS(take_profit_price - entry_price) / entry_price < 0.005"""
+    )
+
+    conn.commit()
+
+    # Return count of voided trades
+    cursor = conn.execute("SELECT COUNT(*) FROM trades WHERE voided = 1")
+    return cursor.fetchone()[0]

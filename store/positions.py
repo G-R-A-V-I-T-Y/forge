@@ -3,9 +3,9 @@
 Reads from the existing `positions` table created by store/db.py.
 This is the desk-wide view, not per-agent position CRUD.
 """
-from datetime import datetime, timezone
-import time
 import logging
+import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,11 @@ def _calculate_funding(position, close_ts_unix, funding_history):
     duration_hours = (close_ts_unix - entry_ts) / 3600
 
     if duration_hours > 72 and samples < duration_hours * 0.5:
-        all_rates = [ev.get("fundingRate", 0.0) for ev in funding_history if ev.get("fundingRate") is not None]
+        all_rates = [
+            ev.get("fundingRate", 0.0)
+            for ev in funding_history
+            if ev.get("fundingRate") is not None
+        ]
         if all_rates:
             avg_rate = sum(all_rates) / len(all_rates)
             total_payment = position_size * avg_rate * duration_hours
@@ -104,7 +108,9 @@ def _parse_entry_ts(opened_at_str):
         return None
 
 
-def execute_close(conn, position_id, exit_price, reason, config, position_dict, funding_history):
+def execute_close(
+    conn, position_id, exit_price, reason, config, position_dict, funding_history
+):
     """Execute a position close: compute net PnL, update trades/accounts.
 
     config dict has taker_fee.
@@ -132,6 +138,12 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     close_ts = time.time()
 
+    # Calculate duration in minutes
+    entry_ts = _parse_entry_ts(position_dict.get("opened_at"))
+    duration_minutes = 0
+    if entry_ts is not None:
+        duration_minutes = max(0, int((close_ts - entry_ts) / 60))
+
     funding_pnl = _calculate_funding(position_dict, close_ts, funding_history)
 
     net_pnl_usd = gross_pnl_usd - entry_fee - exit_fee + funding_pnl
@@ -156,15 +168,30 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
         conn.execute(
             """UPDATE trades SET status='closed', exit_price=?, exit_timestamp=?,
                exit_reason=?, pnl_pct=?, pnl_usd=?, result=?,
-               fees_paid=?, funding_paid=? WHERE id=?""",
-            (exit_price, now, reason, net_pnl_pct, net_pnl_usd,
-             "win" if net_pnl_usd > 0 else "loss",
-             entry_fee + exit_fee, -funding_pnl, position_dict["trade_id"]),
+               fees_paid=?, funding_paid=?, duration_minutes=? WHERE id=?""",
+            (
+                exit_price,
+                now,
+                reason,
+                net_pnl_pct,
+                net_pnl_usd,
+                "win" if net_pnl_usd > 0 else "loss",
+                entry_fee + exit_fee,
+                -funding_pnl,
+                duration_minutes,
+                position_dict["trade_id"],
+            ),
         )
         conn.execute("DELETE FROM positions WHERE id = ?", (position_id,))
         conn.execute(
             "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, ?, ?, ?, ?)",
-            (position_dict["agent_id"], position_dict.get("mode", "paper"), new_balance, peak, now),
+            (
+                position_dict["agent_id"],
+                position_dict.get("mode", "paper"),
+                new_balance,
+                peak,
+                now,
+            ),
         )
 
     return {
@@ -174,6 +201,7 @@ def execute_close(conn, position_id, exit_price, reason, config, position_dict, 
         "pnl_usd": net_pnl_usd,
         "fees_paid": entry_fee + exit_fee,
         "funding_paid": -funding_pnl,
+        "duration_minutes": duration_minutes,
     }
 
 
@@ -281,7 +309,6 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
 
     Returns the number of positions closed.
     """
-    from market.heartbeat import DEFAULT_HEARTBEAT_PATH
 
     taker_fee = config.get("desk", {}).get("taker_fee", 0.00035)
 
@@ -328,7 +355,9 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
             gap_hours = (now_ts - entry_ts) / 3600 if entry_ts else 0
             if gap_hours > 25:
                 try:
-                    extra_candles = await _fetch_extra_candles(provider, asset, entry_ts, now_ts)
+                    extra_candles = await _fetch_extra_candles(
+                        provider, asset, entry_ts, now_ts
+                    )
                     seen_ts = {c[0] for c in candles}
                     for c in extra_candles:
                         if c[0] not in seen_ts:
@@ -363,7 +392,8 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
             logger.info(
                 "%s closed %s at %.2f (net pnl=%.2f%%, fees=%.4f, funding=%.4f)",
                 reason.replace("_", " ").title(),
-                result["trade_id"], exit_price,
+                result["trade_id"],
+                exit_price,
                 (result.get("pnl_pct") or 0) * 100,
                 result.get("fees_paid", 0),
                 result.get("funding_paid", 0),

@@ -5,16 +5,15 @@ from datetime import datetime, timezone
 
 import pytest
 
+from meta.spawner import check_against_graveyard, generate_agent_name, spawn_agent
+from risk.gate import RiskViolation, validate_order
 from store.db import (
-    insert_agent,
     insert_account_snapshot,
+    insert_agent,
     insert_position,
     insert_trade,
 )
 from store.positions import get_all_open_positions, get_desk_positions_summary
-from risk.gate import validate_order, RiskViolation
-from meta.spawner import generate_agent_name, spawn_agent, check_against_graveyard
-
 
 CONFIG = {
     "max_leverage": 10,
@@ -107,6 +106,7 @@ class TestCompetingPositions:
             "direction": "short",
             "entry_price": 150.00,
             "stop_loss_price": 152.00,
+            "take_profit_price": 148.00,  # For short: TP < entry < SL
         }
         validate_order(short_order, BALANCE, CONFIG, open_position_count=0)
 

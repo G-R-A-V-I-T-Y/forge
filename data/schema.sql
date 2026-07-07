@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS trades (
     funding_rate_current REAL,
     open_interest_24h_change_pct REAL,
     model_used TEXT,
+    voided INTEGER NOT NULL DEFAULT 0,
+    void_reason TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -138,6 +140,18 @@ CREATE TABLE IF NOT EXISTS chat_history (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    decision_action TEXT NOT NULL,
+    decision_reason TEXT,
+    decision_details_json TEXT,
+    counterfactual_result TEXT,
+    counterfactual_was_better INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
 -- INDEXES
