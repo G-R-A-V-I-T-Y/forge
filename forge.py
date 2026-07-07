@@ -28,12 +28,14 @@ from llm.llama_server import server_manager as llama_server
 from market import heartbeat
 from market.provider import MarketProvider
 from store.db import get_connection, init_schema, insert_account_snapshot, insert_agent
+from store.git_sync import sync_to_git
 from store.positions import (
     get_all_open_positions,
     reconcile_positions,
     update_position_pnl,
 )
 from store.settings import load_all as load_settings
+from store.state_snapshot import write_current_state
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -67,6 +69,7 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
             if closed:
                 logger.info("SL/TP reconciled %d position(s)", closed)
             update_position_pnl(conn, assets_data)
+            write_current_state(conn)
         except Exception:
             logger.warning(
                 "Failed to update position PnL from heartbeat", exc_info=True
@@ -305,6 +308,59 @@ async def main():
         replace_existing=True,
     )
     logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
+
+    # ------------------------------------------------------------------
+    # Ledger git sync -- commits + pushes ledger/ and state/ every cycle.
+    # Best-effort: a failed push just retries next cycle (see
+    # store/git_sync.py). Runs on the heartbeat cadence so it never lags
+    # more than one cycle behind what agents actually wrote.
+    # ------------------------------------------------------------------
+    async def _run_git_sync_job():
+        try:
+            committed = await asyncio.get_event_loop().run_in_executor(
+                None, sync_to_git, Path(__file__).resolve().parent
+            )
+            if committed:
+                logger.info("Ledger git sync: committed and pushed")
+        except Exception:
+            logger.warning("Ledger git sync job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_git_sync_job,
+        trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
+        id="ledger_git_sync",
+        replace_existing=True,
+    )
+    logger.info("Ledger git sync scheduler started -- runs every %ds", heartbeat_interval)
+
+    # ------------------------------------------------------------------
+    # Ledger compaction -- runs monthly, converts the PRIOR month's closed
+    # JSONL partitions to Parquet (with resolution decay for old
+    # candles_5m/oi). Without this, ledger_git_sync above commits an
+    # ever-growing current-month JSONL every cycle with no rollup ever
+    # firing -- compaction is load-bearing for repo-size control, not
+    # optional housekeeping. See scripts/compact_ledger.py.
+    # ------------------------------------------------------------------
+    async def _run_compaction_job():
+        try:
+            from scripts.compact_ledger import compact_ledger
+
+            written = await asyncio.get_event_loop().run_in_executor(None, compact_ledger)
+            if written:
+                logger.info("Ledger compaction: compacted %d file(s)", len(written))
+        except Exception:
+            logger.warning("Ledger compaction job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_compaction_job,
+        trigger="cron",
+        day=1,
+        hour=3,
+        minute=0,
+        id="ledger_compaction",
+        replace_existing=True,
+    )
+    logger.info("Ledger compaction job scheduled -- runs monthly on day 1 at 03:00 UTC")
 
     # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all

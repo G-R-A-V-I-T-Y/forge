@@ -82,7 +82,7 @@ git commit -m "feat(ledger): extend fresh_start.py to retire pre-ledger legacy c
 - Test: `tests/test_ledger.py`
 
 **Interfaces:**
-- Produces: `append_ledger_record(kind: str, record: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR) -> None`. Later tasks (3, 4, 5) import this exact signature.
+- Produces: `append_ledger_record(kind: str, record: dict, when: datetime | None = None, ledger_dir: str | None = None) -> None` — `ledger_dir` defaults to the current value of module-level `LEDGER_DIR`, resolved at call time. Later tasks (3, 4, 5) import this exact signature.
 - Produces: `LEDGER_DIR = "ledger"` module constant.
 
 - [ ] **Step 1: Write the failing tests**
@@ -185,18 +185,24 @@ def append_ledger_record(
     kind: str,
     record: dict,
     when: datetime | None = None,
-    ledger_dir: str = LEDGER_DIR,
+    ledger_dir: str | None = None,
 ) -> None:
     """Append one record as a JSON line to ledger/{kind}/{YYYY-MM}.jsonl.
 
     `kind` is the ledger stream name (e.g. "decisions", "candles_5m",
     "trades", "accounts"). `when` determines the month partition; defaults
-    to now (UTC). Failure is silently swallowed and logged -- this path
-    can never block or crash the caller.
+    to now (UTC). `ledger_dir` defaults to the CURRENT value of module-level
+    LEDGER_DIR, read at call time rather than bound into the signature at
+    def time -- Python evaluates default argument values once, at function
+    definition, so `ledger_dir: str = LEDGER_DIR` would silently ignore any
+    later `monkeypatch.setattr(store.ledger, "LEDGER_DIR", ...)` in tests
+    for every caller that relies on the default. Failure is silently
+    swallowed and logged -- this path can never block or crash the caller.
     """
     try:
         moment = when or datetime.now(timezone.utc)
-        path = _partition_path(kind, moment, ledger_dir)
+        effective_dir = ledger_dir if ledger_dir is not None else LEDGER_DIR
+        path = _partition_path(kind, moment, effective_dir)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -457,7 +463,7 @@ git commit -m "feat(ledger): capture confidence/evidence on wait decisions, wire
 
 **Interfaces:**
 - Consumes: `store.ledger.append_ledger_record` (Task 2).
-- Produces: `export_heartbeat_to_ledger(packet: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR) -> None` — a standalone, independently-testable function, called once at the end of `generate_heartbeat()`.
+- Produces: `export_heartbeat_to_ledger(packet: dict, when: datetime | None = None, ledger_dir: str | None = None) -> None` — a standalone, independently-testable function, called once at the end of `generate_heartbeat()`. Never raises; isolates failures per-asset.
 
 - [ ] **Step 1: Check nothing else depends on the function being removed**
 
@@ -531,7 +537,7 @@ Expected: FAIL with `ImportError: cannot import name 'export_heartbeat_to_ledger
 In `market/heartbeat.py`, add this import to the existing top-of-file import block (alongside `from market.regime import classify_regime`):
 
 ```python
-from store.ledger import LEDGER_DIR, append_ledger_record
+from store.ledger import append_ledger_record
 ```
 
 Then delete the entire `# Historical capture (append-only JSONL)` section (the `HISTORICAL_DATA_DIR` constant and `append_historical()` function, lines 787-815 in the current file), and replace it with:
@@ -547,55 +553,71 @@ Then delete the entire `# Historical capture (append-only JSONL)` section (the `
 # ---------------------------------------------------------------------------
 
 def export_heartbeat_to_ledger(
-    packet: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR,
+    packet: dict, when: datetime | None = None, ledger_dir: str | None = None,
 ) -> None:
     """Decompose one heartbeat packet into lean per-type ledger records.
 
-    Failure in any one record must not stop the others -- each
-    append_ledger_record() call is independently best-effort already, so
-    this function itself has no additional error handling to add.
+    `ledger_dir` defaults to None so it resolves store.ledger.LEDGER_DIR at
+    call time via append_ledger_record's own None-sentinel handling --
+    binding it to `= LEDGER_DIR` here would silently defeat test isolation
+    the same way store/ledger.py's own docstring warns against.
+
+    Never raises: a malformed timestamp, or one asset's malformed data,
+    must not stop export for the rest of the universe or propagate into
+    generate_heartbeat()'s hot path -- each asset is isolated so a single
+    bad entry degrades only that asset's records, not the whole cycle.
     """
-    ts = packet.get("timestamp")
-    if not ts:
+    try:
+        ts = packet.get("timestamp")
+        if not ts:
+            return
+        moment = when or datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.warning(
+            "export_heartbeat_to_ledger: bad timestamp %r", packet.get("timestamp"),
+            exc_info=True,
+        )
         return
-    moment = when or datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
     for asset, fields in (packet.get("assets") or {}).items():
-        candle = (fields.get("candles_5m") or [None])[-1]
-        if candle is not None:
-            append_ledger_record(
-                "candles_5m",
-                {"ts": ts, "asset": asset, "o": candle[1], "h": candle[2],
-                 "l": candle[3], "c": candle[4], "v": candle[5]},
-                moment, ledger_dir,
-            )
+        try:
+            candle = (fields.get("candles_5m") or [None])[-1]
+            if candle is not None:
+                append_ledger_record(
+                    "candles_5m",
+                    {"ts": ts, "asset": asset, "o": candle[1], "h": candle[2],
+                     "l": candle[3], "c": candle[4], "v": candle[5]},
+                    moment, ledger_dir,
+                )
 
-        if fields.get("funding") is not None:
-            append_ledger_record(
-                "funding", {"ts": ts, "asset": asset, "rate": fields["funding"]},
-                moment, ledger_dir,
-            )
+            if fields.get("funding") is not None:
+                append_ledger_record(
+                    "funding", {"ts": ts, "asset": asset, "rate": fields["funding"]},
+                    moment, ledger_dir,
+                )
 
-        if fields.get("open_interest") is not None:
-            append_ledger_record(
-                "oi", {"ts": ts, "asset": asset, "oi": fields["open_interest"]},
-                moment, ledger_dir,
-            )
+            if fields.get("open_interest") is not None:
+                append_ledger_record(
+                    "oi", {"ts": ts, "asset": asset, "oi": fields["open_interest"]},
+                    moment, ledger_dir,
+                )
 
-        liq_total = fields.get("liq_total_usd")
-        if liq_total is not None:
-            append_ledger_record(
-                "liquidations",
-                {
-                    "ts": ts, "asset": asset, "total_usd": liq_total,
-                    "long_usd": fields.get("liq_long_usd"),
-                    "short_usd": fields.get("liq_short_usd"),
-                },
-                moment, ledger_dir,
+            liq_total = fields.get("liq_total_usd")
+            if liq_total is not None:
+                append_ledger_record(
+                    "liquidations",
+                    {
+                        "ts": ts, "asset": asset, "total_usd": liq_total,
+                        "long_usd": fields.get("liq_long_usd"),
+                        "short_usd": fields.get("liq_short_usd"),
+                    },
+                    moment, ledger_dir,
+                )
+        except Exception:
+            logger.warning(
+                "export_heartbeat_to_ledger: failed for asset %s", asset, exc_info=True,
             )
 ```
-
-Note `LEDGER_DIR` needs to be imported at module level too — add `from store.ledger import LEDGER_DIR` to the existing import block near the top of `market/heartbeat.py`, and use it as the `export_heartbeat_to_ledger` default parameter instead of the local unused-import workaround above (remove the in-function import of `_DEFAULT_LEDGER_DIR`, it was just shown to make the diff self-contained -- the real default should read `ledger_dir: str = LEDGER_DIR` using the top-level import).
 
 Then replace the single line `append_historical(packet)` (in `generate_heartbeat()`, right before `return packet`) with:
 
@@ -927,18 +949,27 @@ def build_current_state(conn) -> dict:
     }
 
 
-def write_current_state(conn, path: str = DEFAULT_STATE_PATH) -> None:
+def write_current_state(conn, path: str | None = None) -> None:
     """Atomically overwrite `path` with the current desk state. Best-effort
-    -- must never block or crash the heartbeat cycle that calls it."""
+    -- must never block or crash the heartbeat cycle that calls it.
+
+    `path` defaults to the CURRENT value of module-level DEFAULT_STATE_PATH,
+    read at call time rather than bound into the signature at def time --
+    the same reasoning as store/ledger.py's append_ledger_record: a bound
+    `path: str = DEFAULT_STATE_PATH` default would silently ignore any
+    later `monkeypatch.setattr(store.state_snapshot, "DEFAULT_STATE_PATH", ...)`
+    for every caller that relies on the default.
+    """
     try:
+        effective_path = path if path is not None else DEFAULT_STATE_PATH
         state = build_current_state(conn)
-        parent = os.path.dirname(path)
+        parent = os.path.dirname(effective_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        tmp_path = f"{path}.tmp"
+        tmp_path = f"{effective_path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, default=str)
-        os.replace(tmp_path, path)
+        os.replace(tmp_path, effective_path)
     except Exception:
         logger.warning("failed to write current-state snapshot", exc_info=True)
 ```
@@ -1093,10 +1124,21 @@ def sync_to_git(repo_root: Path, paths: tuple[str, ...] = TRACKED_PATHS) -> bool
     succeeded, since a failed push just retries next cycle: the *next*
     commit's push carries every prior unpushed commit along with it, so no
     data is lost by a transient network failure here.
+
+    `paths` is filtered to entries that exist on disk before staging --
+    real git treats `git add` with ANY nonexistent pathspec as a fatal
+    error for the whole invocation, even when other pathspecs match. This
+    matters in production, not just in tests: on a fresh clone, neither
+    ledger/ nor state/ exists until the first heartbeat/decision cycle
+    writes to it, so an unfiltered `git add ledger state` would fail
+    outright on the very first sync attempt.
     """
     committed = False
+    existing = [p for p in paths if (repo_root / p).exists()]
+    if not existing:
+        return False
     try:
-        _run(["git", "add", *paths], repo_root)
+        _run(["git", "add", *existing], repo_root)
         staged = _run(["git", "diff", "--cached", "--quiet"], repo_root, check=False)
         if staged.returncode != 0:
             _run(["git", "commit", "-m", "chore(ledger): heartbeat sync"], repo_root)
@@ -1527,6 +1569,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -1588,18 +1631,78 @@ def rebuild(
 
     trades_df = _read_partitions(ledger_dir, "trades")
     for _, row in trades_df.iterrows():
-        insert_trade(conn, row.dropna().to_dict())
+        try:
+            insert_trade(conn, row.dropna().to_dict())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to replay trade {row.get('id')!r} for agent "
+                f"{row.get('agent_id')!r} -- is this agent missing from "
+                f"state/current.json's agents list? ({exc})"
+            ) from exc
 
     accounts_df = _read_partitions(ledger_dir, "accounts")
     for _, row in accounts_df.iterrows():
-        insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
+        try:
+            insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to replay account snapshot for agent "
+                f"{row.get('agent_id')!r} mode {row.get('mode')!r} -- is this "
+                f"agent missing from state/current.json's agents list? ({exc})"
+            ) from exc
 
+    # state's own paper_balance/paper_peak is authoritative for "right now"
+    # (that's the whole point of a snapshot committed every cycle, separate
+    # from the append-only ledger) -- insert it LAST so it becomes the
+    # latest account row regardless of whether the ledger's accounts
+    # stream was complete. Without this, a gap in the ledger accounts
+    # replay above would silently leave the rebuilt DB with a stale or
+    # missing balance even though state/current.json recorded the truth.
     for agent in state["agents"]:
-        if agent.get("paper_balance") is None:
+        paper_balance = agent.get("paper_balance")
+        paper_peak = agent.get("paper_peak")
+        if paper_balance is not None:
+            insert_account_snapshot(
+                conn, agent["id"], "paper", paper_balance,
+                paper_peak if paper_peak is not None else paper_balance,
+            )
+        else:
             insert_account_snapshot(conn, agent["id"], "paper", 50000.0, 50000.0)
 
     for position in state.get("open_positions", []):
-        insert_position(conn, position)
+        try:
+            trade_id = position.get("trade_id")
+            if trade_id is not None:
+                # No closed-trade ledger record exists for a still-open
+                # position (execute_close only ever ledger-exports on
+                # CLOSE) -- synthesize a minimal "open" trades row from
+                # the position snapshot so insert_position's FK
+                # (positions.trade_id -> trades.id) is satisfiable.
+                # insert_trade's INSERT OR IGNORE makes this a no-op if a
+                # real (closed) record for this id was already replayed
+                # from the ledger above.
+                insert_trade(conn, {
+                    "id": trade_id,
+                    "agent_id": position["agent_id"],
+                    "mode": position.get("mode", "paper"),
+                    "asset": position["asset"],
+                    "direction": position["direction"],
+                    "entry_price": position.get("entry_price"),
+                    "stop_loss_price": position.get("stop_loss_price"),
+                    "take_profit_price": position.get("take_profit_price"),
+                    "leverage": position.get("leverage"),
+                    "position_size_pct": position.get("position_size_pct"),
+                    "notional_usd": position.get("notional_usd"),
+                    "entry_timestamp": position.get("opened_at"),
+                    "status": "open",
+                })
+            insert_position(conn, position)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to reopen position {position.get('id')!r} for agent "
+                f"{position.get('agent_id')!r} -- is this agent missing from "
+                f"state/current.json's agents list? ({exc})"
+            ) from exc
 
     conn.close()
 
@@ -1619,7 +1722,12 @@ def main() -> None:
     parser.add_argument("--state-path", type=Path, default=DEFAULT_STATE_PATH)
     args = parser.parse_args()
 
-    summary = rebuild(args.db_path, args.ledger_dir, args.state_path)
+    try:
+        summary = rebuild(args.db_path, args.ledger_dir, args.state_path)
+    except Exception as exc:
+        print(f"rebuild failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
     print(
         f"Rebuilt {summary['db_path']}: {summary['agents']} agent(s), "
         f"{summary['trades']} trade(s), {summary['accounts']} account snapshot(s), "

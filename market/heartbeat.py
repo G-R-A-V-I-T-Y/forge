@@ -8,12 +8,13 @@ Hyperliquid API on its own wake cycle.
 
 This module owns: fetching raw data for all universe assets, computing every
 derived per-asset / cross-asset / regime field, the atomic file write/read,
-and the append-only historical capture (`append_historical()`), which mirrors
-each packet as one JSON line into a daily `data/historical_data/{YYYY-MM-DD}.jsonl`
-file and is failure-isolated from the primary write. See
-docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md for the
-full field list and the documented approximations (OI-history sampling,
-BTC-dominance-within-tracked-universe, Fear & Greed third-party fetch).
+and the git-native ledger export (`export_heartbeat_to_ledger()`), which
+decomposes each packet into lean per-asset-per-type records appended to
+`ledger/{kind}/{YYYY-MM}.jsonl` and is failure-isolated from the primary
+write. See docs/superpowers/specs/2026-07-01-heartbeat-market-data-design.md
+for the full field list and the documented approximations (OI-history
+sampling, BTC-dominance-within-tracked-universe, Fear & Greed third-party
+fetch).
 
 Task B wires `agents/decision_loop.py`, `execution/paper_bridge.py`, and the
 `/api/prices` web ticker to read this file (via `read_heartbeat_or_none()`
@@ -39,6 +40,7 @@ import pandas as pd
 
 from market.features import FEATURE_REGISTRY
 from market.regime import classify_regime
+from store.ledger import append_ledger_record
 
 logger = logging.getLogger(__name__)
 
@@ -785,33 +787,79 @@ def _update_oi_history(history: dict[str, list[float]], asset: str, oi_value: fl
 
 
 # ---------------------------------------------------------------------------
-# Historical capture (append-only JSONL)
+# Git-native ledger export -- replaces the old verbose full-packet mirror.
+# Only the lean, backtest-relevant raw fields are exported per asset, not
+# every derived indicator the heartbeat computes -- derived fields are
+# recomputed from these raw inputs at read time, never trusted as frozen
+# historical fact. See
+# docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
 # ---------------------------------------------------------------------------
 
-HISTORICAL_DATA_DIR = "data/historical_data"
+def export_heartbeat_to_ledger(
+    packet: dict, when: datetime | None = None, ledger_dir: str | None = None,
+) -> None:
+    """Decompose one heartbeat packet into lean per-type ledger records.
 
+    `ledger_dir` defaults to None so it resolves store.ledger.LEDGER_DIR at
+    call time via append_ledger_record's own None-sentinel handling --
+    binding it to `= LEDGER_DIR` here would silently defeat test isolation
+    the same way store/ledger.py's own docstring warns against.
 
-def append_historical(packet: dict, dir_path: str = HISTORICAL_DATA_DIR) -> None:
-    """Append one heartbeat packet as a JSON line to a daily JSONL file.
-
-    File name is ``{YYYY-MM-DD}.jsonl`` derived from the packet's
-    ``timestamp`` field (UTC).  Failure is silently swallowed so this
-    path can *never* block or degrade the primary heartbeat write.
+    Never raises: a malformed timestamp, or one asset's malformed data,
+    must not stop export for the rest of the universe or propagate into
+    generate_heartbeat()'s hot path -- each asset is isolated so a single
+    bad entry degrades only that asset's records, not the whole cycle.
     """
     try:
         ts = packet.get("timestamp")
         if not ts:
             return
-        day = ts[:10]  # "YYYY-MM-DD"
-        file_path = os.path.join(dir_path, f"{day}.jsonl")
-        os.makedirs(dir_path, exist_ok=True)
-        with open(file_path, "a") as f:
-            f.write(json.dumps(packet) + "\n")
+        moment = when or datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except Exception:
         logger.warning(
-            "failed to append historical heartbeat for %s",
-            packet.get("timestamp", "?"), exc_info=True,
+            "export_heartbeat_to_ledger: bad timestamp %r", packet.get("timestamp"),
+            exc_info=True,
         )
+        return
+
+    for asset, fields in (packet.get("assets") or {}).items():
+        try:
+            candle = (fields.get("candles_5m") or [None])[-1]
+            if candle is not None:
+                append_ledger_record(
+                    "candles_5m",
+                    {"ts": ts, "asset": asset, "o": candle[1], "h": candle[2],
+                     "l": candle[3], "c": candle[4], "v": candle[5]},
+                    moment, ledger_dir,
+                )
+
+            if fields.get("funding") is not None:
+                append_ledger_record(
+                    "funding", {"ts": ts, "asset": asset, "rate": fields["funding"]},
+                    moment, ledger_dir,
+                )
+
+            if fields.get("open_interest") is not None:
+                append_ledger_record(
+                    "oi", {"ts": ts, "asset": asset, "oi": fields["open_interest"]},
+                    moment, ledger_dir,
+                )
+
+            liq_total = fields.get("liq_total_usd")
+            if liq_total is not None:
+                append_ledger_record(
+                    "liquidations",
+                    {
+                        "ts": ts, "asset": asset, "total_usd": liq_total,
+                        "long_usd": fields.get("liq_long_usd"),
+                        "short_usd": fields.get("liq_short_usd"),
+                    },
+                    moment, ledger_dir,
+                )
+        except Exception:
+            logger.warning(
+                "export_heartbeat_to_ledger: failed for asset %s", asset, exc_info=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -940,5 +988,5 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         "regime": regime,
     }
     write_heartbeat(heartbeat_path, packet)
-    append_historical(packet)
+    export_heartbeat_to_ledger(packet)
     return packet

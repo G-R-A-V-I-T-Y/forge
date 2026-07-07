@@ -8,7 +8,6 @@ __pycache__/
 data/backups/
 data/keystores/
 data/forge.log
-data/historical_data/
 data/heartbeat.json
 data/heartbeat_oi_history.json
 .opencode/status
@@ -20,7 +19,4 @@ dist/
 build/
 .venv/
 venv/
-data/forge.log
-data/heartbeat.json
-data/heartbeat_oi_history.json
 nul

@@ -9,6 +9,14 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+_TRADE_LEDGER_EXCLUDE_COLUMNS = {
+    # Redundant with the candles_5m/funding ledger (Task 4) once a trade's
+    # timestamp is known, and raw `bytes` blobs don't round-trip through
+    # JSON -- exporting them would either crash json.dumps or silently
+    # write an unrestorable str(bytes) repr.
+    "ohlcv_15m_40_blob", "ohlcv_1h_20_blob", "ohlcv_4h_10_blob", "funding_history_blob",
+}
+
 
 def get_all_open_positions(conn) -> list[dict]:
     """Return all open positions across EVERY agent (desk-wide view)."""
@@ -193,6 +201,29 @@ def execute_close(
                 now,
             ),
         )
+
+    from store.ledger import append_ledger_record
+
+    full_trade = conn.execute(
+        "SELECT * FROM trades WHERE id = ?", (position_dict["trade_id"],)
+    ).fetchone()
+    if full_trade:
+        record = {
+            k: v for k, v in dict(full_trade).items()
+            if k not in _TRADE_LEDGER_EXCLUDE_COLUMNS
+        }
+        append_ledger_record("trades", record)
+
+    append_ledger_record(
+        "accounts",
+        {
+            "ts": now,
+            "agent_id": position_dict["agent_id"],
+            "mode": position_dict.get("mode", "paper"),
+            "balance": new_balance,
+            "peak_balance": peak,
+        },
+    )
 
     return {
         "trade_id": position_dict["trade_id"],
