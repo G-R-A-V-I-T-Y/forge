@@ -467,7 +467,7 @@ def log_decision(
     enter. See docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
     """
     from store.db import _now
-    from store import ledger as ledger_module
+    from store.ledger import append_ledger_record
 
     timestamp = _now()
     conn.execute(
@@ -477,10 +477,7 @@ def log_decision(
     )
     conn.commit()
 
-    # Read ledger_module.LEDGER_DIR at call time (not via the function's
-    # default parameter, which is bound once at import time) so tests can
-    # redirect ledger writes by monkeypatching store.ledger.LEDGER_DIR.
-    ledger_module.append_ledger_record(
+    append_ledger_record(
         "decisions",
         {
             "ts": timestamp,
@@ -491,7 +488,6 @@ def log_decision(
             "evidence_strength": evidence_strength,
             "model": model_used,
         },
-        ledger_dir=ledger_module.LEDGER_DIR,
     )
 
 
