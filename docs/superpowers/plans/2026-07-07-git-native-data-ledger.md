@@ -82,7 +82,7 @@ git commit -m "feat(ledger): extend fresh_start.py to retire pre-ledger legacy c
 - Test: `tests/test_ledger.py`
 
 **Interfaces:**
-- Produces: `append_ledger_record(kind: str, record: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR) -> None`. Later tasks (3, 4, 5) import this exact signature.
+- Produces: `append_ledger_record(kind: str, record: dict, when: datetime | None = None, ledger_dir: str | None = None) -> None` — `ledger_dir` defaults to the current value of module-level `LEDGER_DIR`, resolved at call time. Later tasks (3, 4, 5) import this exact signature.
 - Produces: `LEDGER_DIR = "ledger"` module constant.
 
 - [ ] **Step 1: Write the failing tests**
