@@ -111,13 +111,10 @@ def test_rebuild_reopens_positions_from_state(tmp_path):
         }],
         open_positions=[open_position],
     )
-    _write_ledger_jsonl(
-        tmp_path / "ledger" / "trades" / "2026-07.jsonl",
-        [{
-            "id": "t2", "agent_id": "sage_turtle", "mode": "paper", "asset": "TIA-PERP",
-            "direction": "long", "entry_price": 4.2, "status": "open",
-        }],
-    )
+    # No ledger/trades record for t2 -- execute_close only ever ledger-exports
+    # on CLOSE, so a still-open position's trade row exists only in the (lost)
+    # local SQLite DB, never in the git-tracked ledger. This is the real
+    # scenario rebuild() must handle.
 
     summary = rebuild(db_path, tmp_path / "ledger", state_path)
 
