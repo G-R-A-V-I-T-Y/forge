@@ -3,6 +3,7 @@
 WARNING: This deletes ALL existing data in the database.
 Run only when you want a clean start.
 """
+import shutil
 import sys
 from pathlib import Path
 
@@ -778,6 +779,20 @@ def main():
         if sidecar.exists():
             sidecar.unlink()
             print(f"Deleted stale sidecar file: {sidecar}")
+
+    # Retire legacy pre-ledger capture -- superseded by ledger/ (see
+    # docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md).
+    # Wrong schema for the new system either way, so nothing here is worth
+    # migrating forward.
+    legacy_historical_dir = PROJECT_ROOT / "data" / "historical_data"
+    if legacy_historical_dir.exists():
+        shutil.rmtree(legacy_historical_dir)
+        print(f"Deleted legacy historical capture: {legacy_historical_dir}")
+
+    oi_history_path = PROJECT_ROOT / "data" / "heartbeat_oi_history.json"
+    if oi_history_path.exists():
+        oi_history_path.unlink()
+        print(f"Deleted stale OI history baseline: {oi_history_path}")
 
     # Initialize fresh schema
     conn = get_connection(str(DB_PATH))
