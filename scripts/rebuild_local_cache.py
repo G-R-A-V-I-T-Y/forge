@@ -79,7 +79,14 @@ def rebuild(
         insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
 
     for agent in state["agents"]:
-        if agent.get("paper_balance") is None:
+        paper_balance = agent.get("paper_balance")
+        paper_peak = agent.get("paper_peak")
+        if paper_balance is not None:
+            insert_account_snapshot(
+                conn, agent["id"], "paper", paper_balance,
+                paper_peak if paper_peak is not None else paper_balance,
+            )
+        else:
             insert_account_snapshot(conn, agent["id"], "paper", 50000.0, 50000.0)
 
     for position in state.get("open_positions", []):
