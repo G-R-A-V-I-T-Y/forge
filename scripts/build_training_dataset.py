@@ -58,7 +58,9 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "historical_data"
 DEFAULT_OUTPUT = DATA_DIR / "training_dataset.parquet"
 
 EXPECTED_INTERVAL = timedelta(minutes=5)
-STALENESS_THRESHOLD = EXPECTED_INTERVAL * 2  # 10 min; mirrors heartbeat_max_age_seconds()
+STALENESS_THRESHOLD = (
+    EXPECTED_INTERVAL * 2
+)  # 10 min; mirrors heartbeat_max_age_seconds()
 
 # Horizons in minutes. Configurable via build_dataset()/--horizons; this is
 # just the default set, not hardcoded into the label logic below.
@@ -89,7 +91,9 @@ def horizon_label(minutes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _all_jsonl_files(data_dir: Path, start_date: date | None, end_date: date | None) -> list[Path]:
+def _all_jsonl_files(
+    data_dir: Path, start_date: date | None, end_date: date | None
+) -> list[Path]:
     """Sorted *.jsonl files in data_dir, optionally restricted to a date
     range (inclusive) based on the YYYY-MM-DD filename stem."""
     files = sorted(data_dir.glob("*.jsonl"))
@@ -139,7 +143,9 @@ def _flatten_asset(asset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_row(packet: dict[str, Any], asset_key: str, asset: dict[str, Any]) -> dict[str, Any]:
+def _build_row(
+    packet: dict[str, Any], asset_key: str, asset: dict[str, Any]
+) -> dict[str, Any]:
     """Flatten one packet's (asset_key, asset) pair into a single flat row."""
     row: dict[str, Any] = {
         "timestamp": packet.get("timestamp"),
@@ -193,7 +199,9 @@ def _label_one(
         return LabelWindow()
 
     target_end = base_ts + horizon
-    future = asset_df[(asset_df["timestamp"] > base_ts) & (asset_df["timestamp"] <= target_end)]
+    future = asset_df[
+        (asset_df["timestamp"] > base_ts) & (asset_df["timestamp"] <= target_end)
+    ]
     if future.empty:
         return LabelWindow()
 
@@ -229,7 +237,9 @@ def _label_one(
     fwd_maxrunup = float(cum_returns.max())
 
     funding_series = future["funding"].dropna()
-    fwd_funding_accrued = float(funding_series.sum()) if not funding_series.empty else None
+    fwd_funding_accrued = (
+        float(funding_series.sum()) if not funding_series.empty else None
+    )
 
     fwd_stop_hit = "none"
     for future_price in future["price"]:
@@ -274,13 +284,22 @@ def _compute_labels(
     label_cols: dict[str, list[Any]] = {}
     horizons = [(m, horizon_label(m), timedelta(minutes=m)) for m in horizons_minutes]
     for _minutes, label, _td in horizons:
-        for suffix in ("return", "vol", "maxdd", "maxrunup", "funding_accrued", "stop_hit"):
+        for suffix in (
+            "return",
+            "vol",
+            "maxdd",
+            "maxrunup",
+            "funding_accrued",
+            "stop_hit",
+        ):
             label_cols[f"fwd_{suffix}_{label}"] = [None] * len(df)
 
     for _asset_key, group in df.groupby("asset_key", sort=False):
-        asset_df = group[["timestamp", "asset.price", "asset.funding"]].rename(
-            columns={"asset.price": "price", "asset.funding": "funding"}
-        ).sort_values("timestamp")
+        asset_df = (
+            group[["timestamp", "asset.price", "asset.funding"]]
+            .rename(columns={"asset.price": "price", "asset.funding": "funding"})
+            .sort_values("timestamp")
+        )
         # `positions` maps the reset 0..n-1 index used inside _label_one
         # back to df's original row index, so results can be written back
         # to the correct row.
@@ -294,7 +313,9 @@ def _compute_labels(
                 label_cols[f"fwd_vol_{label}"][original_idx] = result.fwd_vol
                 label_cols[f"fwd_maxdd_{label}"][original_idx] = result.fwd_maxdd
                 label_cols[f"fwd_maxrunup_{label}"][original_idx] = result.fwd_maxrunup
-                label_cols[f"fwd_funding_accrued_{label}"][original_idx] = result.fwd_funding_accrued
+                label_cols[f"fwd_funding_accrued_{label}"][
+                    original_idx
+                ] = result.fwd_funding_accrued
                 label_cols[f"fwd_stop_hit_{label}"][original_idx] = result.fwd_stop_hit
 
     out = df.copy()
@@ -321,7 +342,9 @@ def build_dataset(
     Parquet. Returns the resulting DataFrame."""
     data_dir = data_dir if data_dir is not None else DATA_DIR
     output_path = output_path if output_path is not None else DEFAULT_OUTPUT
-    horizons = horizon_minutes if horizon_minutes is not None else DEFAULT_HORIZONS_MINUTES
+    horizons = (
+        horizon_minutes if horizon_minutes is not None else DEFAULT_HORIZONS_MINUTES
+    )
 
     jsonl_files = _all_jsonl_files(data_dir, start_date, end_date)
     if not jsonl_files:
@@ -359,33 +382,53 @@ def _parse_date(value: str) -> date:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build training dataset from heartbeat JSONL")
+    parser = argparse.ArgumentParser(
+        description="Build training dataset from heartbeat JSONL"
+    )
     parser.add_argument(
-        "-d", "--data-dir", type=Path, default=None,
+        "-d",
+        "--data-dir",
+        type=Path,
+        default=None,
         help=f"Directory with *.jsonl files (default: {DATA_DIR})",
     )
     parser.add_argument(
-        "-o", "--output", type=Path, default=None,
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
         help=f"Output Parquet path (default: {DEFAULT_OUTPUT})",
     )
     parser.add_argument(
-        "--start-date", type=_parse_date, default=None,
+        "--start-date",
+        type=_parse_date,
+        default=None,
         help="Earliest date (YYYY-MM-DD) of *.jsonl files to include, inclusive",
     )
     parser.add_argument(
-        "--end-date", type=_parse_date, default=None,
+        "--end-date",
+        type=_parse_date,
+        default=None,
         help="Latest date (YYYY-MM-DD) of *.jsonl files to include, inclusive",
     )
     parser.add_argument(
-        "-H", "--horizons", type=int, nargs="+", default=None,
+        "-H",
+        "--horizons",
+        type=int,
+        nargs="+",
+        default=None,
         help=f"Horizons in minutes (default: {DEFAULT_HORIZONS_MINUTES})",
     )
     parser.add_argument(
-        "--sl-pct", type=float, default=DEFAULT_SL_PCT,
+        "--sl-pct",
+        type=float,
+        default=DEFAULT_SL_PCT,
         help=f"Illustrative stop-loss threshold as a fraction (default: {DEFAULT_SL_PCT})",
     )
     parser.add_argument(
-        "--tp-pct", type=float, default=DEFAULT_TP_PCT,
+        "--tp-pct",
+        type=float,
+        default=DEFAULT_TP_PCT,
         help=f"Illustrative take-profit threshold as a fraction (default: {DEFAULT_TP_PCT})",
     )
     args = parser.parse_args()

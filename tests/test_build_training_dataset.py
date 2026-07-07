@@ -24,8 +24,14 @@ from scripts.build_training_dataset import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_packet(ts: datetime, asset_name: str, price: float, funding: float = 0.0001,
-                  extra: dict | None = None) -> dict:
+
+def _make_packet(
+    ts: datetime,
+    asset_name: str,
+    price: float,
+    funding: float = 0.0001,
+    extra: dict | None = None,
+) -> dict:
     """Build a minimal heartbeat packet matching the real shape: top-level
     timestamp/assets/regime, with per-asset scalar fields nested under
     assets.<ASSET>."""
@@ -109,6 +115,7 @@ def multi_day_jsonl(tmp_data_dir):
 # horizon_label
 # ---------------------------------------------------------------------------
 
+
 class TestHorizonLabel:
     def test_minutes_only(self):
         assert horizon_label(30) == "30m"
@@ -123,6 +130,7 @@ class TestHorizonLabel:
 # _load_jsonl / _all_jsonl_files
 # ---------------------------------------------------------------------------
 
+
 class TestLoadJsonl:
     def test_loads_valid_jsonl(self, simple_jsonl):
         files = sorted(simple_jsonl.glob("*.jsonl"))
@@ -133,7 +141,7 @@ class TestLoadJsonl:
         path = tmp_data_dir / "bad.jsonl"
         with path.open("w") as fh:
             fh.write('{"valid": true}\n')
-            fh.write('not json\n')
+            fh.write("not json\n")
             fh.write('{"also_valid": true}\n')
         records = _load_jsonl(path)
         assert len(records) == 2
@@ -167,6 +175,7 @@ class TestAllJsonlFiles:
 # ---------------------------------------------------------------------------
 # _build_row / _rows_from_packets
 # ---------------------------------------------------------------------------
+
 
 class TestBuildRow:
     def test_flat_fields(self):
@@ -216,7 +225,9 @@ class TestComputeLabels:
         base = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
         packets = [
-            _make_packet(base + timedelta(minutes=5 * i), "BTC", prices[i], funding=0.0001)
+            _make_packet(
+                base + timedelta(minutes=5 * i), "BTC", prices[i], funding=0.0001
+            )
             for i in range(len(prices))
         ]
         df = _df_for(packets)
@@ -232,7 +243,14 @@ class TestComputeLabels:
         result = _compute_labels(df, DEFAULT_HORIZONS_MINUTES)
         for h in DEFAULT_HORIZONS_MINUTES:
             label = {30: "30m", 120: "2h", 240: "4h", 1440: "24h"}[h]
-            for suffix in ("return", "vol", "maxdd", "maxrunup", "funding_accrued", "stop_hit"):
+            for suffix in (
+                "return",
+                "vol",
+                "maxdd",
+                "maxrunup",
+                "funding_accrued",
+                "stop_hit",
+            ):
                 assert f"fwd_{suffix}_{label}" in result.columns
 
     def test_last_row_has_none_labels(self, simple_jsonl):
@@ -295,6 +313,7 @@ class TestComputeLabels:
 # build_dataset (integration)
 # ---------------------------------------------------------------------------
 
+
 class TestBuildDataset:
     def test_basic_flow(self, simple_jsonl):
         out = simple_jsonl / "output.parquet"
@@ -308,19 +327,28 @@ class TestBuildDataset:
         out = multi_day_jsonl / "output.parquet"
         result = build_dataset(data_dir=multi_day_jsonl, output_path=out)
         assert len(result) == 30  # 5 assets * 3 timestamps * 2 days
-        assert sorted(result["asset_key"].unique()) == ["AVAX", "BTC", "DOGE", "ETH", "SOL"]
+        assert sorted(result["asset_key"].unique()) == [
+            "AVAX",
+            "BTC",
+            "DOGE",
+            "ETH",
+            "SOL",
+        ]
 
     def test_date_range_filters_files(self, multi_day_jsonl):
         out = multi_day_jsonl / "output.parquet"
         result = build_dataset(
-            data_dir=multi_day_jsonl, output_path=out,
+            data_dir=multi_day_jsonl,
+            output_path=out,
             start_date=datetime(2024, 1, 16).date(),
         )
         assert len(result) == 15  # only the second day
 
     def test_custom_horizons(self, simple_jsonl):
         out = simple_jsonl / "output_custom.parquet"
-        result = build_dataset(data_dir=simple_jsonl, output_path=out, horizon_minutes=[10, 20])
+        result = build_dataset(
+            data_dir=simple_jsonl, output_path=out, horizon_minutes=[10, 20]
+        )
         assert "fwd_return_10m" in result.columns
         assert "fwd_return_20m" in result.columns
         assert "fwd_return_30m" not in result.columns
