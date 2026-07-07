@@ -334,6 +334,35 @@ async def main():
     logger.info("Ledger git sync scheduler started -- runs every %ds", heartbeat_interval)
 
     # ------------------------------------------------------------------
+    # Ledger compaction -- runs monthly, converts the PRIOR month's closed
+    # JSONL partitions to Parquet (with resolution decay for old
+    # candles_5m/oi). Without this, ledger_git_sync above commits an
+    # ever-growing current-month JSONL every cycle with no rollup ever
+    # firing -- compaction is load-bearing for repo-size control, not
+    # optional housekeeping. See scripts/compact_ledger.py.
+    # ------------------------------------------------------------------
+    async def _run_compaction_job():
+        try:
+            from scripts.compact_ledger import compact_ledger
+
+            written = await asyncio.get_event_loop().run_in_executor(None, compact_ledger)
+            if written:
+                logger.info("Ledger compaction: compacted %d file(s)", len(written))
+        except Exception:
+            logger.warning("Ledger compaction job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_compaction_job,
+        trigger="cron",
+        day=1,
+        hour=3,
+        minute=0,
+        id="ledger_compaction",
+        replace_existing=True,
+    )
+    logger.info("Ledger compaction job scheduled -- runs monthly on day 1 at 03:00 UTC")
+
+    # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all
     # agents are spawned as parallel subprocesses.
     # ------------------------------------------------------------------

@@ -43,17 +43,26 @@ def build_current_state(conn) -> dict:
     }
 
 
-def write_current_state(conn, path: str = DEFAULT_STATE_PATH) -> None:
+def write_current_state(conn, path: str | None = None) -> None:
     """Atomically overwrite `path` with the current desk state. Best-effort
-    -- must never block or crash the heartbeat cycle that calls it."""
+    -- must never block or crash the heartbeat cycle that calls it.
+
+    `path` defaults to the CURRENT value of module-level DEFAULT_STATE_PATH,
+    read at call time rather than bound into the signature at def time --
+    the same reasoning as store/ledger.py's append_ledger_record: a bound
+    `path: str = DEFAULT_STATE_PATH` default would silently ignore any
+    later `monkeypatch.setattr(store.state_snapshot, "DEFAULT_STATE_PATH", ...)`
+    for every caller that relies on the default.
+    """
     try:
+        effective_path = path if path is not None else DEFAULT_STATE_PATH
         state = build_current_state(conn)
-        parent = os.path.dirname(path)
+        parent = os.path.dirname(effective_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        tmp_path = f"{path}.tmp"
+        tmp_path = f"{effective_path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, default=str)
-        os.replace(tmp_path, path)
+        os.replace(tmp_path, effective_path)
     except Exception:
         logger.warning("failed to write current-state snapshot", exc_info=True)

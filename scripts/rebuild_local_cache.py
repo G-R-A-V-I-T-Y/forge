@@ -6,6 +6,22 @@ ledger/ and state/ directories. This is the concrete proof of the "burned
 laptop -> git pull -> back to normal" requirement: after cloning the repo
 fresh, run this once before `python forge.py`. See
 docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
+
+Scope: restores everything the trading loop needs to keep operating without
+skipping a beat -- agents, balances, closed trades, and open positions
+(capital actually at risk). It deliberately does NOT replay the `decisions`
+or market-data (candles/funding/oi/liquidations) ledger streams into
+SQLite: those are high-volume analytical/calibration archives, not
+operational state the trading loop reads on its hot path (the nightly
+counterfactual job and any decision-history UI are the only consumers, and
+neither is on the "must resume immediately" critical path). That history
+isn't lost -- it's queryable directly from `ledger/decisions/*` and
+`ledger/candles_5m/*` etc. (JSONL for the current month, Parquet for closed
+months) exactly as it always was; duplicating it into the disposable cache
+would also require either a schema migration (SQLite's `decisions` table
+has no columns for confidence/evidence_strength/model, which only exist in
+the ledger record) or a lossy remap, for a stream this codebase treats as
+append-only history rather than mutable operational state.
 """
 from __future__ import annotations
 
@@ -165,7 +181,10 @@ def main() -> None:
     print(
         f"Rebuilt {summary['db_path']}: {summary['agents']} agent(s), "
         f"{summary['trades']} trade(s), {summary['accounts']} account snapshot(s), "
-        f"{summary['open_positions_in_state']} open position(s) restored."
+        f"{summary['open_positions_in_state']} open position(s) restored.\n"
+        f"Note: decision history and market data are not replayed into "
+        f"{summary['db_path']} -- query them directly from ledger/decisions/ "
+        f"and ledger/candles_5m/ etc."
     )
 
 

@@ -12,10 +12,13 @@ docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
 from __future__ import annotations
 
 import argparse
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 LEDGER_DIR = Path(__file__).resolve().parent.parent / "ledger"
 DECAY_WINDOW_MONTHS = 12
@@ -46,7 +49,12 @@ def compact_file(path: Path, decay_window_months: int = DECAY_WINDOW_MONTHS) -> 
     month = path.stem
 
     df = pd.read_json(path, lines=True)
-    if kind in DECAY_ELIGIBLE_KINDS and _months_ago(month) > decay_window_months and not df.empty:
+    if (
+        kind in DECAY_ELIGIBLE_KINDS
+        and _months_ago(month) > decay_window_months
+        and not df.empty
+        and "asset" in df.columns
+    ):
         ts = pd.to_datetime(df["ts"], utc=True)
         df = (
             df.assign(_hour=ts.dt.floor("h"))
@@ -67,7 +75,14 @@ def compact_ledger(
 ) -> list[Path]:
     written = []
     for path in _closed_month_files(ledger_dir):
-        out = compact_file(path, decay_window_months)
+        try:
+            out = compact_file(path, decay_window_months)
+        except Exception:
+            logger.warning(
+                "Failed to compact %s -- skipping, source left in place for next run",
+                path, exc_info=True,
+            )
+            continue
         written.append(out)
         print(f"Compacted {path} -> {out}")
     return written
