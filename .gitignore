@@ -12,6 +12,7 @@ data/historical_data/
 data/heartbeat.json
 data/heartbeat_oi_history.json
 .opencode/status
+.claude/settings.local.json
 logs/
 .pytest_cache/
 *.egg-info/
