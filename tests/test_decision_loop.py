@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -341,3 +342,62 @@ async def test_decision_prompt_contains_heartbeat_sourced_data_and_cadence_notic
     # Hard cadence-awareness requirement from the captain.
     assert "every 5 minutes" in prompt
     assert "Do not assume intraday granularity finer than 5 minutes" in prompt
+
+
+@pytest.mark.asyncio
+async def test_decision_loop_wait_logs_confidence_and_evidence_to_ledger(conn, tmp_path):
+    """The selection-bias fix: a 'wait' decision's confidence/evidence must
+    reach both the decisions table and the git-tracked ledger, not just a
+    bare reason string."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def wait_llm(sys, prompt, **kwargs):
+        return {
+            "action": "wait",
+            "reason": "days_to_event too far",
+            "confidence": 0.35,
+            "evidence_strength": {"unlock_size": 0.0, "days_to_event": 0.3},
+        }, "Test Wait Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    ledger_dir = tmp_path / "ledger"
+    import store.ledger as ledger_module
+
+    original_dir = ledger_module.LEDGER_DIR
+    ledger_module.LEDGER_DIR = str(ledger_dir)
+    try:
+        provider = MarketProvider(config)
+        async with provider:
+            result = await run_decision(
+                agent_id=AGENT_ID,
+                thesis_text=THESIS,
+                config=config,
+                conn=conn,
+                provider=provider,
+                llm_fn=wait_llm,
+                bridge_factory=_bridge_factory(config),
+            )
+    finally:
+        ledger_module.LEDGER_DIR = original_dir
+
+    assert result["action"] == "wait"
+
+    row = conn.execute(
+        "SELECT decision_action, decision_reason FROM decisions WHERE agent_id = ?", (AGENT_ID,)
+    ).fetchone()
+    assert row["decision_action"] == "wait"
+
+    from datetime import datetime, timezone
+    month_file = ledger_dir / "decisions" / f"{datetime.now(timezone.utc):%Y-%m}.jsonl"
+    assert month_file.exists()
+    lines = month_file.read_text(encoding="utf-8").strip().splitlines()
+    record = json.loads(lines[-1])
+    assert record["agent"] == AGENT_ID
+    assert record["action"] == "wait"
+    assert record["confidence"] == 0.35
+    assert record["evidence_strength"] == {"unlock_size": 0.0, "days_to_event": 0.3}
+    assert record["model"] == "Test Wait Model"

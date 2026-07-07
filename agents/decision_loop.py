@@ -202,13 +202,18 @@ async def run_decision(
         if action == "error":
             reason = response.get("reason", "no model available")
             logger.error("[%s] No model available for decision: %s", agent_id, reason)
-            log_decision(conn, agent_id, "error", reason, None)
+            log_decision(conn, agent_id, "error", reason, None, model_used=model_label)
             return {"action": "error", "detail": reason}
 
         if action == "wait":
             reason = response.get("reason", "")
             logger.info("[%s] LLM decided to wait: %s", agent_id, reason)
-            log_decision(conn, agent_id, "wait", reason, None)
+            log_decision(
+                conn, agent_id, "wait", reason, None,
+                confidence=response.get("confidence"),
+                evidence_strength=response.get("evidence_strength"),
+                model_used=model_label,
+            )
             return {"action": "wait", "detail": reason}
 
         if action == "close":
@@ -222,7 +227,11 @@ async def run_decision(
                 asyncio.ensure_future(
                     run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
                 )
-            log_decision(conn, agent_id, "close", reason, {"position_id": pos_id, "fill": str(fill)})
+            log_decision(
+                conn, agent_id, "close", reason,
+                {"position_id": pos_id, "fill": str(fill)},
+                model_used=model_label,
+            )
             return {"action": "close", "detail": str(fill)}
 
         if action == "enter":
@@ -241,7 +250,13 @@ async def run_decision(
                 )
             except RiskViolation as e:
                 logger.warning("[%s] Risk gate blocked order: %s", agent_id, e.reason)
-                log_decision(conn, agent_id, "risk_blocked", f"risk gate blocked: {e.reason}", {"risk_reason": e.reason, "order": str(response)})
+                log_decision(
+                    conn, agent_id, "risk_blocked", f"risk gate blocked: {e.reason}",
+                    {"risk_reason": e.reason, "order": str(response)},
+                    confidence=response.get("confidence"),
+                    evidence_strength=response.get("evidence_strength"),
+                    model_used=model_label,
+                )
                 return {"action": "risk_blocked", "detail": e.reason}
 
             response["position_size_pct"] = (
@@ -279,13 +294,22 @@ async def run_decision(
                 )
 
             logger.info("[%s] Entered trade: %s", agent_id, fill)
-            log_decision(conn, agent_id, "enter", f"entered {response['asset']}", {"order": str(response), "fill": str(fill)})
+            log_decision(
+                conn, agent_id, "enter", f"entered {response['asset']}",
+                {"order": str(response), "fill": str(fill)},
+                confidence=response.get("confidence"),
+                evidence_strength=response.get("evidence_strength"),
+                model_used=model_label,
+            )
             return {"action": "enter", "detail": str(fill)}
 
         logger.warning(
             "[%s] Unrecognized LLM action '%s', treating as wait", agent_id, action
         )
-        log_decision(conn, agent_id, "wait", f"unrecognized LLM action: {action}", None)
+        log_decision(
+            conn, agent_id, "wait", f"unrecognized LLM action: {action}", None,
+            model_used=model_label,
+        )
         return {"action": "wait", "detail": f"unrecognized LLM action: {action}"}
 
     except Exception as exc:
@@ -427,17 +451,48 @@ def _get_balance(conn, agent_id: str, starting_balance: float) -> float:
 
 
 def log_decision(
-    conn, agent_id: str, action: str, reason: str | None, details: dict | None
+    conn,
+    agent_id: str,
+    action: str,
+    reason: str | None,
+    details: dict | None,
+    confidence: float | None = None,
+    evidence_strength: dict | None = None,
+    model_used: str | None = None,
 ) -> None:
-    """Log a decision to the decisions table."""
-    from store.db import _now
+    """Log a decision to the decisions table AND the git-tracked ledger.
 
+    confidence/evidence_strength/model_used are what the calibration goal
+    depends on -- every cycle for every agent, wait included, not just
+    enter. See docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
+    """
+    from store.db import _now
+    from store import ledger as ledger_module
+
+    timestamp = _now()
     conn.execute(
         """INSERT INTO decisions (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
            VALUES (?, ?, ?, ?, ?)""",
-        (agent_id, _now(), action, reason, json.dumps(details) if details else None),
+        (agent_id, timestamp, action, reason, json.dumps(details) if details else None),
     )
     conn.commit()
+
+    # Read ledger_module.LEDGER_DIR at call time (not via the function's
+    # default parameter, which is bound once at import time) so tests can
+    # redirect ledger writes by monkeypatching store.ledger.LEDGER_DIR.
+    ledger_module.append_ledger_record(
+        "decisions",
+        {
+            "ts": timestamp,
+            "agent": agent_id,
+            "action": action,
+            "reason": reason,
+            "confidence": confidence,
+            "evidence_strength": evidence_strength,
+            "model": model_used,
+        },
+        ledger_dir=ledger_module.LEDGER_DIR,
+    )
 
 
 async def run_counterfactual(
