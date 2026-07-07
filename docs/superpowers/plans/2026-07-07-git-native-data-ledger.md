@@ -1627,8 +1627,22 @@ def rebuild(
     for _, row in accounts_df.iterrows():
         insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
 
+    # state's own paper_balance/paper_peak is authoritative for "right now"
+    # (that's the whole point of a snapshot committed every cycle, separate
+    # from the append-only ledger) -- insert it LAST so it becomes the
+    # latest account row regardless of whether the ledger's accounts
+    # stream was complete. Without this, a gap in the ledger accounts
+    # replay above would silently leave the rebuilt DB with a stale or
+    # missing balance even though state/current.json recorded the truth.
     for agent in state["agents"]:
-        if agent.get("paper_balance") is None:
+        paper_balance = agent.get("paper_balance")
+        paper_peak = agent.get("paper_peak")
+        if paper_balance is not None:
+            insert_account_snapshot(
+                conn, agent["id"], "paper", paper_balance,
+                paper_peak if paper_peak is not None else paper_balance,
+            )
+        else:
             insert_account_snapshot(conn, agent["id"], "paper", 50000.0, 50000.0)
 
     for position in state.get("open_positions", []):
