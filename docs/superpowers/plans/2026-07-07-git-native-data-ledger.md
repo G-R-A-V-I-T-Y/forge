@@ -1560,6 +1560,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -1621,11 +1622,25 @@ def rebuild(
 
     trades_df = _read_partitions(ledger_dir, "trades")
     for _, row in trades_df.iterrows():
-        insert_trade(conn, row.dropna().to_dict())
+        try:
+            insert_trade(conn, row.dropna().to_dict())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to replay trade {row.get('id')!r} for agent "
+                f"{row.get('agent_id')!r} -- is this agent missing from "
+                f"state/current.json's agents list? ({exc})"
+            ) from exc
 
     accounts_df = _read_partitions(ledger_dir, "accounts")
     for _, row in accounts_df.iterrows():
-        insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
+        try:
+            insert_account_snapshot(conn, row["agent_id"], row["mode"], row["balance"], row["peak_balance"])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to replay account snapshot for agent "
+                f"{row.get('agent_id')!r} mode {row.get('mode')!r} -- is this "
+                f"agent missing from state/current.json's agents list? ({exc})"
+            ) from exc
 
     # state's own paper_balance/paper_peak is authoritative for "right now"
     # (that's the whole point of a snapshot committed every cycle, separate
@@ -1646,7 +1661,39 @@ def rebuild(
             insert_account_snapshot(conn, agent["id"], "paper", 50000.0, 50000.0)
 
     for position in state.get("open_positions", []):
-        insert_position(conn, position)
+        try:
+            trade_id = position.get("trade_id")
+            if trade_id is not None:
+                # No closed-trade ledger record exists for a still-open
+                # position (execute_close only ever ledger-exports on
+                # CLOSE) -- synthesize a minimal "open" trades row from
+                # the position snapshot so insert_position's FK
+                # (positions.trade_id -> trades.id) is satisfiable.
+                # insert_trade's INSERT OR IGNORE makes this a no-op if a
+                # real (closed) record for this id was already replayed
+                # from the ledger above.
+                insert_trade(conn, {
+                    "id": trade_id,
+                    "agent_id": position["agent_id"],
+                    "mode": position.get("mode", "paper"),
+                    "asset": position["asset"],
+                    "direction": position["direction"],
+                    "entry_price": position.get("entry_price"),
+                    "stop_loss_price": position.get("stop_loss_price"),
+                    "take_profit_price": position.get("take_profit_price"),
+                    "leverage": position.get("leverage"),
+                    "position_size_pct": position.get("position_size_pct"),
+                    "notional_usd": position.get("notional_usd"),
+                    "entry_timestamp": position.get("opened_at"),
+                    "status": "open",
+                })
+            insert_position(conn, position)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to reopen position {position.get('id')!r} for agent "
+                f"{position.get('agent_id')!r} -- is this agent missing from "
+                f"state/current.json's agents list? ({exc})"
+            ) from exc
 
     conn.close()
 
@@ -1666,7 +1713,12 @@ def main() -> None:
     parser.add_argument("--state-path", type=Path, default=DEFAULT_STATE_PATH)
     args = parser.parse_args()
 
-    summary = rebuild(args.db_path, args.ledger_dir, args.state_path)
+    try:
+        summary = rebuild(args.db_path, args.ledger_dir, args.state_path)
+    except Exception as exc:
+        print(f"rebuild failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
     print(
         f"Rebuilt {summary['db_path']}: {summary['agents']} agent(s), "
         f"{summary['trades']} trade(s), {summary['accounts']} account snapshot(s), "
