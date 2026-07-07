@@ -185,18 +185,24 @@ def append_ledger_record(
     kind: str,
     record: dict,
     when: datetime | None = None,
-    ledger_dir: str = LEDGER_DIR,
+    ledger_dir: str | None = None,
 ) -> None:
     """Append one record as a JSON line to ledger/{kind}/{YYYY-MM}.jsonl.
 
     `kind` is the ledger stream name (e.g. "decisions", "candles_5m",
     "trades", "accounts"). `when` determines the month partition; defaults
-    to now (UTC). Failure is silently swallowed and logged -- this path
-    can never block or crash the caller.
+    to now (UTC). `ledger_dir` defaults to the CURRENT value of module-level
+    LEDGER_DIR, read at call time rather than bound into the signature at
+    def time -- Python evaluates default argument values once, at function
+    definition, so `ledger_dir: str = LEDGER_DIR` would silently ignore any
+    later `monkeypatch.setattr(store.ledger, "LEDGER_DIR", ...)` in tests
+    for every caller that relies on the default. Failure is silently
+    swallowed and logged -- this path can never block or crash the caller.
     """
     try:
         moment = when or datetime.now(timezone.utc)
-        path = _partition_path(kind, moment, ledger_dir)
+        effective_dir = ledger_dir if ledger_dir is not None else LEDGER_DIR
+        path = _partition_path(kind, moment, effective_dir)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
