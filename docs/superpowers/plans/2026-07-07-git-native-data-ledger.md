@@ -1115,10 +1115,21 @@ def sync_to_git(repo_root: Path, paths: tuple[str, ...] = TRACKED_PATHS) -> bool
     succeeded, since a failed push just retries next cycle: the *next*
     commit's push carries every prior unpushed commit along with it, so no
     data is lost by a transient network failure here.
+
+    `paths` is filtered to entries that exist on disk before staging --
+    real git treats `git add` with ANY nonexistent pathspec as a fatal
+    error for the whole invocation, even when other pathspecs match. This
+    matters in production, not just in tests: on a fresh clone, neither
+    ledger/ nor state/ exists until the first heartbeat/decision cycle
+    writes to it, so an unfiltered `git add ledger state` would fail
+    outright on the very first sync attempt.
     """
     committed = False
+    existing = [p for p in paths if (repo_root / p).exists()]
+    if not existing:
+        return False
     try:
-        _run(["git", "add", *paths], repo_root)
+        _run(["git", "add", *existing], repo_root)
         staged = _run(["git", "diff", "--cached", "--quiet"], repo_root, check=False)
         if staged.returncode != 0:
             _run(["git", "commit", "-m", "chore(ledger): heartbeat sync"], repo_root)
