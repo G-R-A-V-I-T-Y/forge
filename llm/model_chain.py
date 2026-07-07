@@ -27,8 +27,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Coroutine, TypeVar
-from typing import NamedTuple
+from typing import Any, Coroutine, NamedTuple, TypeVar
 
 from llm.ollama_client import _extract_json
 
@@ -118,7 +117,8 @@ def _resolve_opencode_executable() -> str:
         logger.warning(
             "Could not find a wrapped .exe inside opencode shim %s; "
             "falling back to the .cmd shim (newline-containing prompts "
-            "will be truncated by cmd.exe)", resolved,
+            "will be truncated by cmd.exe)",
+            resolved,
         )
         return resolved
 
@@ -126,7 +126,8 @@ def _resolve_opencode_executable() -> str:
     if not Path(exe_path).exists():
         logger.warning(
             "Resolved opencode .exe path %s does not exist; falling back "
-            "to the .cmd shim", exe_path,
+            "to the .cmd shim",
+            exe_path,
         )
         return resolved
 
@@ -166,7 +167,12 @@ OPENCODE_AGENT = "trading-responder"
 _OLLAMA_FAILURE_REASON = "LLM unavailable or timed out"
 
 _REQUIRED_ENTER_FIELDS = (
-    "asset", "direction", "entry_price", "stop_loss_price", "leverage", "position_size_pct",
+    "asset",
+    "direction",
+    "entry_price",
+    "stop_loss_price",
+    "leverage",
+    "position_size_pct",
 )
 
 
@@ -180,7 +186,12 @@ class Tier(NamedTuple):
 # Hardcoded fallback — used when the settings DB is unavailable.
 # The dynamic chain loaded from settings supersedes this at runtime.
 CHAIN: list[Tier] = [
-    Tier("opencode", "openrouter/anthropic/claude-sonnet-5", "low", "Claude Sonnet 5 (low)"),
+    Tier(
+        "opencode",
+        "openrouter/anthropic/claude-sonnet-5",
+        "low",
+        "Claude Sonnet 5 (low)",
+    ),
     Tier("opencode", "opencode/deepseek-v4-flash-free", None, "DeepSeek V4 Flash Free"),
     Tier("opencode", "opencode/big-pickle", None, "Big Pickle"),
     Tier("opencode", "opencode/mimo-v2.5-free", None, "MiMo V2.5 Free"),
@@ -200,6 +211,7 @@ def _load_chain_from_settings() -> list[Tier] | None:
     """
     try:
         import sqlite3
+
         conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -247,8 +259,14 @@ def _run_opencode_tier(model_id: str, variant: str | None, message: str) -> dict
     None on timeout, non-zero exit, unparseable output, or a decision
     missing required fields, logging a warning in each case."""
     cmd = [
-        _OPENCODE_EXECUTABLE, "run", "--model", model_id,
-        "--agent", OPENCODE_AGENT, "--format", "json",
+        _OPENCODE_EXECUTABLE,
+        "run",
+        "--model",
+        model_id,
+        "--agent",
+        OPENCODE_AGENT,
+        "--format",
+        "json",
     ]
     if variant:
         cmd += ["--variant", variant]
@@ -264,18 +282,26 @@ def _run_opencode_tier(model_id: str, variant: str | None, message: str) -> dict
         # promptly). errors="replace" keeps a single bad byte from losing
         # an otherwise-valid NDJSON response.
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=OPENCODE_TIMEOUT_SECS,
-            encoding="utf-8", errors="replace",
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=OPENCODE_TIMEOUT_SECS,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.TimeoutExpired:
-        logger.warning("opencode tier %s timed out after %ds", model_id, OPENCODE_TIMEOUT_SECS)
+        logger.warning(
+            "opencode tier %s timed out after %ds", model_id, OPENCODE_TIMEOUT_SECS
+        )
         return None
     except Exception as exc:
         logger.warning("opencode tier %s failed to launch: %s", model_id, exc)
         return None
 
     if proc.returncode != 0:
-        logger.warning("opencode tier %s exited %d: %.300s", model_id, proc.returncode, proc.stderr)
+        logger.warning(
+            "opencode tier %s exited %d: %.300s", model_id, proc.returncode, proc.stderr
+        )
         return None
 
     text_parts: list[str] = []
@@ -288,7 +314,9 @@ def _run_opencode_tier(model_id: str, variant: str | None, message: str) -> dict
         except json.JSONDecodeError:
             continue
         if event.get("type") == "error":
-            logger.warning("opencode tier %s returned an error event: %.300s", model_id, event)
+            logger.warning(
+                "opencode tier %s returned an error event: %.300s", model_id, event
+            )
             return None
         if event.get("type") == "text":
             part = event.get("part") or {}
@@ -303,17 +331,25 @@ def _run_opencode_tier(model_id: str, variant: str | None, message: str) -> dict
     full_text = "".join(text_parts)
     decision = _extract_json(full_text)
     if decision is None:
-        logger.warning("opencode tier %s: could not extract JSON from response", model_id)
+        logger.warning(
+            "opencode tier %s: could not extract JSON from response", model_id
+        )
         return None
 
     if not _is_valid_decision(decision):
-        logger.warning("opencode tier %s returned an invalid decision shape: %r", model_id, decision)
+        logger.warning(
+            "opencode tier %s returned an invalid decision shape: %r",
+            model_id,
+            decision,
+        )
         return None
 
     return decision
 
 
-def _run_ollama_tier(system_prompt: str, decision_prompt: str, config: dict | None) -> dict | None:
+def _run_ollama_tier(
+    system_prompt: str, decision_prompt: str, config: dict | None
+) -> dict | None:
     """Call the existing Ollama mechanism unchanged via llm/client.py's
     _ollama_decide(). Detects the failure sentinel (see
     _OLLAMA_FAILURE_REASON above) to distinguish a real failure from a
@@ -321,7 +357,10 @@ def _run_ollama_tier(system_prompt: str, decision_prompt: str, config: dict | No
     from llm.client import _ollama_decide
 
     result = _ollama_decide(system_prompt, decision_prompt, config)
-    if result.get("action") == "wait" and result.get("reason") == _OLLAMA_FAILURE_REASON:
+    if (
+        result.get("action") == "wait"
+        and result.get("reason") == _OLLAMA_FAILURE_REASON
+    ):
         return None
     if not _is_valid_decision(result):
         return None
@@ -341,6 +380,7 @@ def _run_llama_server_tier(
     port = _DEFAULT_LLAMA_PORT
     try:
         import sqlite3
+
         conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -374,15 +414,60 @@ def _run_llama_server_tier(
 _DEFAULT_LLAMA_PORT = 8080
 
 
+def _get_agent_pinned_model(conn, agent_id: str) -> Tier | None:
+    """Get the pinned model for an agent, if one is configured."""
+    try:
+        row = conn.execute(
+            "SELECT config_json FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+        if row:
+            import json
+
+            config = json.loads(row["config_json"])
+            pinned_model = config.get("pinned_model")
+            if pinned_model:
+                return Tier(
+                    kind="opencode",
+                    model_id=pinned_model,
+                    variant=None,
+                    display_name=pinned_model,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def _get_agent_pinned_model_from_settings(conn, agent_id: str) -> Tier | None:
+    """Get the pinned model from settings DB for an agent."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (f"agent_{agent_id}_model",)
+        ).fetchone()
+        if row:
+            model_id = json.loads(row["value"])
+            return Tier(
+                kind="opencode", model_id=model_id, variant=None, display_name=model_id
+            )
+    except Exception:
+        pass
+    return None
+
+
 def decide(
     system_prompt: str,
     decision_prompt: str,
     config: dict | None = None,
+    agent_id: str | None = None,
 ) -> tuple[dict, str | None]:
     """Try the ordered model chain, returning (decision_dict, model_display_name)
     for the first tier that succeeds. If every tier fails, returns
     ({"action": "error", "reason": "no model available"}, None) — never a
     silent generic "wait", per the captain's explicit requirement.
+
+    For M6: if agent_id is provided, checks for a pinned model for that agent.
+    If a pinned model is found, only that model is tried (no fallback chain).
+    This ensures each agent uses the same model consistently for reproducible
+    decision-making.
 
     The chain is loaded from the settings DB on each call so that
     Settings → Save & Apply takes effect without a forge restart.
@@ -392,6 +477,52 @@ def decide(
     convention.
     """
     message = f"{system_prompt}\n\n{decision_prompt}"
+
+    # Check for agent-pinned model
+    pinned_model = None
+    if agent_id:
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(_SETTINGS_DB_PATH, check_same_thread=False)
+            try:
+                conn.row_factory = sqlite3.Row
+                pinned_model = _get_agent_pinned_model(conn, agent_id)
+                if pinned_model is None:
+                    pinned_model = _get_agent_pinned_model_from_settings(conn, agent_id)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    # If agent has a pinned model, only try that model (no fallback)
+    if pinned_model:
+        logger.info(
+            "Agent %s using pinned model: %s", agent_id, pinned_model.display_name
+        )
+        decision = None
+        if pinned_model.kind == "opencode":
+            decision = _run_opencode_tier(
+                pinned_model.model_id, pinned_model.variant, message
+            )
+        elif pinned_model.kind == "llama_server":
+            decision = _run_llama_server_tier(system_prompt, decision_prompt, config)
+        else:
+            decision = _run_ollama_tier(system_prompt, decision_prompt, config)
+
+        if decision is not None:
+            logger.info("Pinned model: %s answered", pinned_model.display_name)
+            return decision, pinned_model.display_name
+
+        logger.error(
+            "Pinned model %s failed for agent %s", pinned_model.display_name, agent_id
+        )
+        return {
+            "action": "error",
+            "reason": f"pinned model {pinned_model.display_name} unavailable",
+        }, None
+
+    # No pinned model — use the normal chain
     chain = get_chain()
 
     for tier in chain:

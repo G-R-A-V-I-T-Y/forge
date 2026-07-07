@@ -10,11 +10,19 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from store.db import get_connection, init_schema
+import yaml
+
 from meta.spawner import spawn_agent
+from store.db import get_connection, init_schema
 
 DB_PATH = PROJECT_ROOT / "data" / "forge.db"
-STARTING_BALANCE = 50_000.0
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+
+def _load_starting_balance() -> float:
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    return float(cfg.get("desk", {}).get("starting_balance", 50000.0))
+
 
 SEED_AGENTS = [
     (
@@ -481,6 +489,7 @@ SEED_AGENTS = [
         "Primary: SOL, ETH, AVAX, LINK (clean VWAP behaviour, consistent mean reversion)\n"
         "Secondary: BTC (tight VWAP bands, lower edge per trade)\n"
         "Avoid: PEPE, DOGE, WIF, TRUMP (noisy price action, VWAP less reliable as gravity)\n",
+    ),
     (
         "violet_lion",
         "# violet_lion -- Thesis v1: Volatility Regime Trader\n\n"
@@ -555,6 +564,7 @@ SEED_AGENTS = [
         "Primary: SOL, ETH, SUI (clean vol cycles, reliable compression/expansion patterns)\n"
         "Secondary: BTC (lower vol variance, but tighter compression signals)\n"
         "Avoid: Low-liquidity perps (PEPE, WIF, TRUMP) -- vol is permanently elevated, making compression signals unreliable\n",
+    ),
     (
         "crimson_fox",
         "# crimson_fox -- Thesis v1: Session Pattern Arbitrage\n\n"
@@ -632,6 +642,7 @@ SEED_AGENTS = [
         "Primary: BTC, ETH (most consistent session behaviour across all time windows)\n"
         "Secondary: SOL (growing session consistency, particularly in US hours)\n"
         "Avoid: Small-cap perps -- session patterns are unreliable when the asset itself drives the flow rather than macro session dynamics\n",
+    ),
 ]
 
 
@@ -671,16 +682,17 @@ def main():
     init_schema(conn)
 
     # Seed agents
+    starting_balance = _load_starting_balance()
     for name, thesis in SEED_AGENTS:
         agent = spawn_agent(
             conn,
             name,
             thesis,
             status="rookie",
-            starting_balance=STARTING_BALANCE,
+            starting_balance=starting_balance,
         )
         print(
-            f"  Created agent: {name} (status={agent['status']}, balance=${STARTING_BALANCE:,.0f})"
+            f"  Created agent: {name} (status={agent['status']}, balance=${starting_balance:,.0f})"
         )
 
     conn.close()

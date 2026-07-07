@@ -24,12 +24,16 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from llm.llama_server import server_manager as llama_server
 from market import heartbeat
 from market.provider import MarketProvider
-from store.db import get_connection, init_schema, insert_agent, insert_account_snapshot
-from store.positions import get_all_open_positions, reconcile_positions, update_position_pnl
+from store.db import get_connection, init_schema, insert_account_snapshot, insert_agent
+from store.positions import (
+    get_all_open_positions,
+    reconcile_positions,
+    update_position_pnl,
+)
 from store.settings import load_all as load_settings
-from llm.llama_server import server_manager as llama_server
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -71,9 +75,7 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
             conn.close()
 
 
-async def _spawn_agent_runner(
-    agent_id: str, db_path: str, config_path: str
-) -> dict:
+async def _spawn_agent_runner(agent_id: str, db_path: str, config_path: str) -> dict:
     """Run one agent as a standalone subprocess and return its result dict.
 
     The agent process reads the shared heartbeat file, calls model_chain
@@ -118,14 +120,16 @@ async def _spawn_agent_runner(
         err_text = stderr.decode("utf-8", errors="replace")[:300]
         logger.warning(
             "[%s] Agent runner exited %d: %.300s",
-            agent_id, proc.returncode, err_text,
+            agent_id,
+            proc.returncode,
+            err_text,
         )
 
     # Parse the structured result line (last AGENT_RESULT line wins)
     result: dict | None = None
     for line in out_text.splitlines():
         if line.startswith("AGENT_RESULT"):
-            rest = line[len("AGENT_RESULT "):]
+            rest = line[len("AGENT_RESULT ") :]
             # rest format: [agent_id] action=... detail=...
             try:
                 meta, action_part, detail_part = rest.split(None, 2)
@@ -167,9 +171,7 @@ async def agent_fleet_cycle(config: dict) -> None:
 
     agent_ids = [r["id"] for r in rows]
 
-    logger.info(
-        "Fleet cycle: spawning %d agent(s) in parallel", len(agent_ids)
-    )
+    logger.info("Fleet cycle: spawning %d agent(s) in parallel", len(agent_ids))
 
     tasks = [_spawn_agent_runner(aid, db_path, config_path) for aid in agent_ids]
     results = await asyncio.gather(*tasks)
@@ -178,7 +180,9 @@ async def agent_fleet_cycle(config: dict) -> None:
         detail = r.get("detail", "")
         logger.info(
             "[%s] Result: %s — %.200s",
-            r["agent_id"], r["action"], detail,
+            r["agent_id"],
+            r["action"],
+            detail,
         )
 
 
@@ -199,15 +203,25 @@ async def main():
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     if agent_count == 0:
         TRADER_NAMES = [
-            "jade_hawk", "crimson_fox", "amber_wolf", "cobalt_raven", "emerald_bear",
-            "silver_phoenix", "scarlet_viper", "golden_lion", "frost_unicorn", "storm_griffin",
+            "jade_hawk",
+            "crimson_fox",
+            "amber_wolf",
+            "cobalt_raven",
+            "emerald_bear",
+            "silver_phoenix",
+            "scarlet_viper",
+            "golden_lion",
+            "frost_unicorn",
+            "storm_griffin",
         ]
         balance = desk_config.get("starting_balance", 1000.0)
         for name in TRADER_NAMES:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             insert_agent(conn, name, name, now, "{}")
             insert_account_snapshot(conn, name, "paper", balance, balance)
-        logger.info("Seeded %d default agents with $%.0f each", len(TRADER_NAMES), balance)
+        logger.info(
+            "Seeded %d default agents with $%.0f each", len(TRADER_NAMES), balance
+        )
 
     web_app.state.conn = conn
     web_app.state.provider = provider
@@ -245,6 +259,49 @@ async def main():
     logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
 
     # ------------------------------------------------------------------
+    # Counterfactual analysis — runs nightly at 02:00 UTC.
+    # Analyzes past "wait" decisions to determine if taking the trade
+    # would have been profitable.
+    # ------------------------------------------------------------------
+    async def _run_counterfactual_job():
+        """Run counterfactual analysis for all agents."""
+        try:
+            agents = conn.execute("SELECT id, name FROM agents").fetchall()
+            for agent in agents:
+                agent_id = agent["id"]
+                agent_name = agent["name"]
+                logger.info(
+                    "Running counterfactual analysis for agent %s (%s)",
+                    agent_id,
+                    agent_name,
+                )
+                # Get the system prompt for the agent
+                from agents.persona import build_system_prompt
+
+                system_prompt = build_system_prompt(agent_id, config)
+                from agents.decision_loop import run_counterfactual
+
+                await run_counterfactual(
+                    conn,
+                    agent_id,
+                    None,
+                    lambda sp, dp, **kw: llm_fn(sp, dp),
+                    system_prompt,
+                )
+        except Exception as exc:
+            logger.error("Counterfactual analysis failed: %s", exc, exc_info=True)
+
+    scheduler.add_job(
+        _run_counterfactual_job,
+        trigger="cron",
+        hour=2,
+        minute=0,
+        id="counterfactual",
+        replace_existing=True,
+    )
+    logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
+
+    # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all
     # agents are spawned as parallel subprocesses.
     # ------------------------------------------------------------------
@@ -258,14 +315,18 @@ async def main():
     fleet_task = asyncio.create_task(_fleet_loop())
     logger.info(
         "Agent fleet cycle started — %d agent(s) wake every %ds",
-        agent_count, wake_interval,
+        agent_count,
+        wake_interval,
     )
 
     # ------------------------------------------------------------------
     # Web server
     # ------------------------------------------------------------------
     server_config = uvicorn.Config(
-        web_app, host="0.0.0.0", port=8000, log_level="warning",
+        web_app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="warning",
     )
     server = uvicorn.Server(server_config)
     logger.info("Web UI starting at http://localhost:8000")
@@ -275,10 +336,6 @@ async def main():
     finally:
         await provider.__aexit__(None, None, None)
         llama_server.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 if __name__ == "__main__":

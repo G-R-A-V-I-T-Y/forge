@@ -1,18 +1,13 @@
 from datetime import datetime, timezone
 
+from execution.bridge import TradingBridge
 from market.heartbeat import (
     DEFAULT_HEARTBEAT_PATH,
     heartbeat_max_age_seconds,
     read_heartbeat_or_none,
 )
-from store.db import (
-    insert_trade,
-    insert_position,
-    get_positions,
-    get_latest_account,
-)
-from store.positions import execute_close, _parse_entry_ts
-from execution.bridge import TradingBridge
+from store.db import get_latest_account, get_positions, insert_position, insert_trade
+from store.positions import execute_close
 
 
 def _now() -> str:
@@ -41,13 +36,18 @@ class PaperBridge(TradingBridge):
         propagates up through enter()/close() to run_decision()'s outer
         except Exception, surfacing as {"action": "error", ...} rather than
         crashing the agent's tick.
+
+        Applies spread and slippage to the raw heartbeat price for realistic
+        paper fills.
         """
         desk_config = (self.config or {}).get("desk", {})
         heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
         max_age = heartbeat_max_age_seconds(self.config or {})
         heartbeat = read_heartbeat_or_none(heartbeat_path, max_age)
         if heartbeat is None:
-            raise RuntimeError("heartbeat data unavailable or stale; cannot simulate fill")
+            raise RuntimeError(
+                "heartbeat data unavailable or stale; cannot simulate fill"
+            )
 
         asset_fields = (heartbeat.get("assets") or {}).get(asset)
         price = asset_fields.get("price") if asset_fields else None
@@ -55,6 +55,23 @@ class PaperBridge(TradingBridge):
             raise RuntimeError(
                 f"heartbeat data unavailable or stale; cannot simulate fill for {asset}"
             )
+
+        # Apply spread: for long entries, add half-spread; for short entries, subtract half-spread
+        spread = asset_fields.get("spread", 0)
+        if spread and spread > 0:
+            if asset_fields.get("direction") == "short":
+                price -= spread / 2
+            else:
+                price += spread / 2
+
+        # Apply slippage estimate
+        slippage_estimate = asset_fields.get("slippage_estimate", 0)
+        if slippage_estimate and slippage_estimate > 0:
+            if asset_fields.get("direction") == "short":
+                price -= slippage_estimate
+            else:
+                price += slippage_estimate
+
         return price
 
     async def enter(self, order: dict) -> dict:
@@ -151,9 +168,5 @@ class PaperBridge(TradingBridge):
         latest = get_latest_account(self.conn, self.agent_id, "paper")
         if latest:
             return {"balance": latest["balance"], "peak": latest["peak_balance"]}
-        starting = (
-            self.config["desk"]["starting_balance"]
-            if self.config
-            else 50000.0
-        )
+        starting = self.config["desk"]["starting_balance"] if self.config else 50000.0
         return {"balance": starting, "peak": starting}
