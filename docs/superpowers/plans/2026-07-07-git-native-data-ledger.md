@@ -463,7 +463,7 @@ git commit -m "feat(ledger): capture confidence/evidence on wait decisions, wire
 
 **Interfaces:**
 - Consumes: `store.ledger.append_ledger_record` (Task 2).
-- Produces: `export_heartbeat_to_ledger(packet: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR) -> None` — a standalone, independently-testable function, called once at the end of `generate_heartbeat()`.
+- Produces: `export_heartbeat_to_ledger(packet: dict, when: datetime | None = None, ledger_dir: str | None = None) -> None` — a standalone, independently-testable function, called once at the end of `generate_heartbeat()`. Never raises; isolates failures per-asset.
 
 - [ ] **Step 1: Check nothing else depends on the function being removed**
 
@@ -537,7 +537,7 @@ Expected: FAIL with `ImportError: cannot import name 'export_heartbeat_to_ledger
 In `market/heartbeat.py`, add this import to the existing top-of-file import block (alongside `from market.regime import classify_regime`):
 
 ```python
-from store.ledger import LEDGER_DIR, append_ledger_record
+from store.ledger import append_ledger_record
 ```
 
 Then delete the entire `# Historical capture (append-only JSONL)` section (the `HISTORICAL_DATA_DIR` constant and `append_historical()` function, lines 787-815 in the current file), and replace it with:
@@ -553,55 +553,71 @@ Then delete the entire `# Historical capture (append-only JSONL)` section (the `
 # ---------------------------------------------------------------------------
 
 def export_heartbeat_to_ledger(
-    packet: dict, when: datetime | None = None, ledger_dir: str = LEDGER_DIR,
+    packet: dict, when: datetime | None = None, ledger_dir: str | None = None,
 ) -> None:
     """Decompose one heartbeat packet into lean per-type ledger records.
 
-    Failure in any one record must not stop the others -- each
-    append_ledger_record() call is independently best-effort already, so
-    this function itself has no additional error handling to add.
+    `ledger_dir` defaults to None so it resolves store.ledger.LEDGER_DIR at
+    call time via append_ledger_record's own None-sentinel handling --
+    binding it to `= LEDGER_DIR` here would silently defeat test isolation
+    the same way store/ledger.py's own docstring warns against.
+
+    Never raises: a malformed timestamp, or one asset's malformed data,
+    must not stop export for the rest of the universe or propagate into
+    generate_heartbeat()'s hot path -- each asset is isolated so a single
+    bad entry degrades only that asset's records, not the whole cycle.
     """
-    ts = packet.get("timestamp")
-    if not ts:
+    try:
+        ts = packet.get("timestamp")
+        if not ts:
+            return
+        moment = when or datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.warning(
+            "export_heartbeat_to_ledger: bad timestamp %r", packet.get("timestamp"),
+            exc_info=True,
+        )
         return
-    moment = when or datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
     for asset, fields in (packet.get("assets") or {}).items():
-        candle = (fields.get("candles_5m") or [None])[-1]
-        if candle is not None:
-            append_ledger_record(
-                "candles_5m",
-                {"ts": ts, "asset": asset, "o": candle[1], "h": candle[2],
-                 "l": candle[3], "c": candle[4], "v": candle[5]},
-                moment, ledger_dir,
-            )
+        try:
+            candle = (fields.get("candles_5m") or [None])[-1]
+            if candle is not None:
+                append_ledger_record(
+                    "candles_5m",
+                    {"ts": ts, "asset": asset, "o": candle[1], "h": candle[2],
+                     "l": candle[3], "c": candle[4], "v": candle[5]},
+                    moment, ledger_dir,
+                )
 
-        if fields.get("funding") is not None:
-            append_ledger_record(
-                "funding", {"ts": ts, "asset": asset, "rate": fields["funding"]},
-                moment, ledger_dir,
-            )
+            if fields.get("funding") is not None:
+                append_ledger_record(
+                    "funding", {"ts": ts, "asset": asset, "rate": fields["funding"]},
+                    moment, ledger_dir,
+                )
 
-        if fields.get("open_interest") is not None:
-            append_ledger_record(
-                "oi", {"ts": ts, "asset": asset, "oi": fields["open_interest"]},
-                moment, ledger_dir,
-            )
+            if fields.get("open_interest") is not None:
+                append_ledger_record(
+                    "oi", {"ts": ts, "asset": asset, "oi": fields["open_interest"]},
+                    moment, ledger_dir,
+                )
 
-        liq_total = fields.get("liq_total_usd")
-        if liq_total is not None:
-            append_ledger_record(
-                "liquidations",
-                {
-                    "ts": ts, "asset": asset, "total_usd": liq_total,
-                    "long_usd": fields.get("liq_long_usd"),
-                    "short_usd": fields.get("liq_short_usd"),
-                },
-                moment, ledger_dir,
+            liq_total = fields.get("liq_total_usd")
+            if liq_total is not None:
+                append_ledger_record(
+                    "liquidations",
+                    {
+                        "ts": ts, "asset": asset, "total_usd": liq_total,
+                        "long_usd": fields.get("liq_long_usd"),
+                        "short_usd": fields.get("liq_short_usd"),
+                    },
+                    moment, ledger_dir,
+                )
+        except Exception:
+            logger.warning(
+                "export_heartbeat_to_ledger: failed for asset %s", asset, exc_info=True,
             )
 ```
-
-Note `LEDGER_DIR` needs to be imported at module level too — add `from store.ledger import LEDGER_DIR` to the existing import block near the top of `market/heartbeat.py`, and use it as the `export_heartbeat_to_ledger` default parameter instead of the local unused-import workaround above (remove the in-function import of `_DEFAULT_LEDGER_DIR`, it was just shown to make the diff self-contained -- the real default should read `ledger_dir: str = LEDGER_DIR` using the top-level import).
 
 Then replace the single line `append_historical(packet)` (in `generate_heartbeat()`, right before `return packet`) with:
 

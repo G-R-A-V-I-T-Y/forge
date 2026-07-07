@@ -9,7 +9,8 @@ docs/superpowers/specs/2026-07-07-git-native-data-ledger-design.md.
 
 append_ledger_record() never raises -- a ledger write must never block or
 crash the caller's primary operation (heartbeat, decision cycle, trade
-close), mirroring market/heartbeat.py's append_historical().
+close), the same best-effort contract every write path into this ledger
+follows (see e.g. market/heartbeat.py's export_heartbeat_to_ledger()).
 """
 from __future__ import annotations
 
