@@ -148,6 +148,20 @@ later research and backtesting. This capture path is failure-isolated: any
 error is logged and swallowed so it can never block or degrade the primary
 heartbeat write. The directory is gitignored.
 
+Run `scripts/build_training_dataset.py` to turn that JSONL history into a
+flat training dataset: `python scripts/build_training_dataset.py [--start-date
+YYYY-MM-DD] [--end-date YYYY-MM-DD] [--output PATH] [--horizons MIN [MIN ...]]
+[--sl-pct PCT] [--tp-pct PCT]`. It flattens each (asset, timestamp) sample and
+computes forward-looking labels at each horizon (default 30m/2h/4h/24h):
+return, realized volatility, max drawdown/run-up, funding accrued, and an
+illustrative stop-loss/take-profit "which triggers first" label (default
+2%/5%). A (sample, horizon) combination is excluded (labels left null, row
+kept) when the timeline has a gap or doesn't yet extend far enough past
+horizon. Output is written as Parquet (default
+`data/historical_data/training_dataset.parquet`; requires `pyarrow`). This is
+an offline, read-only batch job — it is not wired into `forge.py` or run on a
+schedule.
+
 ## Multi-Agent Desk
 
 `forge.py` reads every `ACTIVE`/`ROOKIE` agent row from SQLite at startup and
@@ -218,4 +232,4 @@ of hardcoding their own value.
 - **M5** (complete): Multi-agent desk — 10 concurrent agents, desk-wide position registry, competing positions allowed, leaderboard (LyteNyte Grid + sparklines) + agent detail pages, `/api/desk`, `/api/agents/balance-history`, `WS /api/ws/desk`
 - **M6** (complete): Truth — 13-rule risk gate, voided/corrupted-trade tracking, realistic paper fills (spread/slippage/duration), per-agent model pinning, `decisions` table + nightly counterfactual job, rewritten metrics (Sharpe/Sortino/exposure-adjusted/benchmark-vs-null), seeded benchmark agents, config hygiene
 - **M7-M10**: Full system
-- **M11** (Phase 1 complete): Historical heartbeat data — daily JSONL capture in `data/historical_data/`; training-dataset build and statistical forecast features planned (see `docs/FORGE_PROPOSAL.md`)
+- **M11** (Phases 1-2 complete): Historical heartbeat data — daily JSONL capture in `data/historical_data/`; offline `scripts/build_training_dataset.py` builds a multi-horizon labeled Parquet dataset; statistical forecast features (Phase 3) planned (see `docs/FORGE_PROPOSAL.md`)
