@@ -27,7 +27,7 @@ class PaperBridge(TradingBridge):
         self.provider = provider
         self.config = config
 
-    async def _fill_price(self, asset: str) -> float:
+    async def _fill_price(self, asset: str, direction: str = "long") -> float:
         """Read the asset's current price from the shared heartbeat file
         (data/heartbeat.json by default) rather than calling the provider
         live — see docs/superpowers/specs/2026-07-01-heartbeat-wiring-design.md.
@@ -59,7 +59,7 @@ class PaperBridge(TradingBridge):
         # Apply spread: for long entries, add half-spread; for short entries, subtract half-spread
         spread = asset_fields.get("spread", 0)
         if spread and spread > 0:
-            if asset_fields.get("direction") == "short":
+            if direction == "short":
                 price -= spread / 2
             else:
                 price += spread / 2
@@ -67,7 +67,7 @@ class PaperBridge(TradingBridge):
         # Apply slippage estimate
         slippage_estimate = asset_fields.get("slippage_estimate", 0)
         if slippage_estimate and slippage_estimate > 0:
-            if asset_fields.get("direction") == "short":
+            if direction == "short":
                 price -= slippage_estimate
             else:
                 price += slippage_estimate
@@ -76,7 +76,7 @@ class PaperBridge(TradingBridge):
 
     async def enter(self, order: dict) -> dict:
         asset = order["asset"]
-        fill_price = await self._fill_price(asset)
+        fill_price = await self._fill_price(asset, order["direction"])
 
         account = await self.get_account()
         balance = account["balance"]
@@ -141,7 +141,7 @@ class PaperBridge(TradingBridge):
         pos = dict(row)
 
         asset = pos["asset"]
-        exit_price = await self._fill_price(asset)
+        exit_price = await self._fill_price(asset, pos["direction"])
 
         desk_config = (self.config or {}).get("desk", {})
         heartbeat_path = desk_config.get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)

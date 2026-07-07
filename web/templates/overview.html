@@ -24,7 +24,7 @@
 </div>
 
 <h2>Leaderboard</h2>
-<div id="leaderboard-grid" style="width:100%;overflow-x:auto;"></div>
+<div id="leaderboard-grid" style="width:100%;overflow-x:auto;min-height:400px;"></div>
 
 {% if positions %}
 <h2>Open Positions</h2>
@@ -157,8 +157,8 @@ function toggleReasoning(id) {
 
 <script type="module">
 import { Grid, useClientDataSource } from "https://esm.sh/@1771technologies/lytenyte-core@2.2.0?external=react,react-dom";
-import React, { useMemo } from "https://esm.sh/react@18.3.1?target=es2022";
-import { createRoot } from "https://esm.sh/react-dom@18.3.1/client?target=es2022";
+import React, { useMemo } from "https://esm.sh/react@18.0.0%20||%20^19.0.0?target=es2022";
+import { createRoot } from "https://esm.sh/react-dom@18.0.0%20||%20^19.0.0/client?target=es2022";
 
 /* ── Sparkline SVG helper ── */
 function renderSparklineSVG(history, width, height) {
@@ -227,6 +227,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
     return agents.map(function(a) {
       return {
         __id: a.name,
+        id: a.name,
         name: a.name,
         status: a.status,
         trades_count: a.trades_count,
@@ -242,7 +243,7 @@ function LeaderboardGrid({ agents, balanceHistory }) {
     });
   }, [agents, balanceHistory]);
 
-  var ds = useClientDataSource({ data: data, sort: [{ id: 'sharpe', direction: 'desc' }] });
+  var ds = useClientDataSource({ data: data, sort: [{ dim: 'sharpe', descending: true }] });
 
   var columns = useMemo(function() {
     return [
@@ -370,16 +371,23 @@ function LeaderboardGrid({ agents, balanceHistory }) {
 /* ── Mount ── */
 var agentsData = {{ agents|tojson }};
 var balanceHistoryData = {};
+var root = createRoot(document.getElementById('leaderboard-grid'));
+
+function renderGrid(balanceHistory) {
+  root.render(
+    React.createElement(LeaderboardGrid, { agents: agentsData, balanceHistory: balanceHistory || {} })
+  );
+}
+
+renderGrid({});
 
 fetch('/api/agents/balance-history')
   .then(function(r) { return r.json(); })
-  .then(function(data) { balanceHistoryData = data; })
+  .then(function(data) {
+    balanceHistoryData = data;
+    renderGrid(data);
+  })
   .catch(function() {});
-
-var root = createRoot(document.getElementById('leaderboard-grid'));
-root.render(
-  React.createElement(LeaderboardGrid, { agents: agentsData, balanceHistory: balanceHistoryData })
-);
 
 /* ── WebSocket: update grid on desk data refresh ── */
 (function connectDeskWs() {
@@ -390,9 +398,7 @@ root.render(
     ws.onmessage = function(evt) {
       var agents = JSON.parse(evt.data);
       if (!agents) return;
-      root.render(
-        React.createElement(LeaderboardGrid, { agents: agents, balanceHistory: balanceHistoryData })
-      );
+      renderGrid(balanceHistoryData);
     };
     ws.onclose = function() { setTimeout(connect, 5000); };
     ws.onerror = function() { ws.close(); };

@@ -200,21 +200,26 @@ async def main():
     conn = get_connection(str(DB_PATH))
     init_schema(conn)
 
+    from store.db import void_corrupted_trades
+    voided = void_corrupted_trades(conn)
+    if voided:
+        logger.info("Voided %d corrupted trade(s) from pre-M6 schema", voided)
+
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     if agent_count == 0:
         TRADER_NAMES = [
-            "jade_hawk",
-            "crimson_fox",
+            "iron_moth",
+            "silver_basin",
+            "copper_vane",
+            "gray_finch",
             "amber_wolf",
-            "cobalt_raven",
-            "emerald_bear",
-            "silver_phoenix",
-            "scarlet_viper",
-            "golden_lion",
-            "frost_unicorn",
-            "storm_griffin",
+            "steel_crane",
+            "onyx_heron",
+            "jade_hawk",
+            "violet_lion",
+            "crimson_fox",
         ]
-        balance = desk_config.get("starting_balance", 1000.0)
+        balance = desk_config.get("starting_balance", 50000.0)
         for name in TRADER_NAMES:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             insert_agent(conn, name, name, now, "{}")

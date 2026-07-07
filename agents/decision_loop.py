@@ -6,6 +6,7 @@ as {"action": "error", "detail": str(exc)}.
 """
 
 import asyncio
+import json
 import logging
 
 from agents.persona import build_system_prompt
@@ -72,56 +73,142 @@ async def run_decision(
             heartbeat_path, heartbeat_max_age_seconds(config)
         )
         if heartbeat is None:
+            log_decision(conn, agent_id, "wait", "heartbeat unavailable or stale", None)
             return {"action": "wait", "detail": "heartbeat unavailable or stale"}
 
-        system_prompt = build_system_prompt(agent_id, config)
-        decision_prompt = await build_decision_prompt(
-            agent_id,
-            thesis_text,
-            heartbeat,
-            conn,
-            provider,
-            starting_balance=desk_config["starting_balance"],
-            universe=assets,
-        )
+        # Check if this agent is a benchmark agent (random_walk or btc_hold)
+        import json as _json
+        agent_row = conn.execute(
+            "SELECT config_json FROM agents WHERE id = ?", (agent_id,)
+        ).fetchone()
+        response = None
+        model_used = None
+        system_prompt = ""
+        if agent_row:
+            cfg = _json.loads(agent_row["config_json"])
+            benchmark_type = cfg.get("benchmark_type")
+            if benchmark_type:
+                import random as _random
+                from store.db import _now as _db_now
 
-        response, model_used = _call_llm_with_retry(
-            llm_fn, system_prompt, decision_prompt, agent_id
-        )
+                if benchmark_type == "random_walk":
+                    action = _random.choices(
+                        ["enter", "wait", "close"],
+                        weights=[0.3, 0.6, 0.1],
+                        k=1,
+                    )[0]
+                    if action == "enter":
+                        asset = _random.choice(config["universe"])
+                        entry_price = (heartbeat.get("assets") or {}).get(asset, {}).get("price", 100.0)
+                        direction = _random.choice(["long", "short"])
+                        if direction == "long":
+                            sl = entry_price * 0.98
+                            tp = entry_price * 1.04
+                        else:
+                            sl = entry_price * 1.02
+                            tp = entry_price * 0.96
+                        response = {
+                            "action": "enter",
+                            "asset": asset,
+                            "direction": direction,
+                            "entry_price": entry_price,
+                            "stop_loss_price": sl,
+                            "take_profit_price": tp,
+                            "leverage": 3,
+                            "position_size_pct": 0.10,
+                            "confidence": 0.5,
+                        }
+                    elif action == "close":
+                        positions = get_positions(conn, agent_id)
+                        if positions:
+                            pos = _random.choice(positions)
+                            response = {
+                                "action": "close",
+                                "position_id": pos["id"],
+                                "reason": "benchmark_close",
+                            }
+                        else:
+                            response = {"action": "wait", "reason": "no positions to close"}
+                    else:
+                        response = {"action": "wait", "reason": "benchmark_wait"}
 
-        # Record which model produced (or failed to produce) this cycle's
-        # decision — "most recently used model", not "model used for the
-        # last trade": every cycle updates this, including wait/error
-        # cycles, per the captain's requirement. The literal
-        # "no model available" sentinel (distinct from NULL, which means
-        # "no decision cycle has recorded a model yet" e.g. legacy rows)
-        # covers the case where model_chain.decide() exhausted every tier.
-        model_label = model_used
-        if (
-            model_label is None
-            and response is not None
-            and response.get("action") == "error"
-        ):
-            model_label = "no model available"
-        if model_label is not None:
-            update_last_model_used(conn, agent_id, model_label)
+                    model_used = "benchmark_random_walk"
+
+                elif benchmark_type == "btc_hold":
+                    asset = "BTC-PERP"
+                    entry_price = (heartbeat.get("assets") or {}).get(asset, {}).get("price", 100.0)
+                    if entry_price and entry_price > 0:
+                        response = {
+                            "action": "enter",
+                            "asset": asset,
+                            "direction": "long",
+                            "entry_price": entry_price,
+                            "stop_loss_price": entry_price * 0.90,
+                            "take_profit_price": entry_price * 5.0,
+                            "leverage": 1,
+                            "position_size_pct": 0.50,
+                            "confidence": 1.0,
+                        }
+                    else:
+                        response = {"action": "wait", "reason": "no BTC price"}
+                    model_used = "benchmark_btc_hold"
+
+                update_last_model_used(conn, agent_id, model_used)
 
         if response is None:
-            return {
-                "action": "wait",
-                "detail": "LLM returned invalid response after retries",
-            }
+            system_prompt = build_system_prompt(agent_id, config)
+            decision_prompt = await build_decision_prompt(
+                agent_id,
+                thesis_text,
+                heartbeat,
+                conn,
+                provider,
+                starting_balance=desk_config["starting_balance"],
+                universe=assets,
+            )
+
+            response, model_used = _call_llm_with_retry(
+                llm_fn, system_prompt, decision_prompt, agent_id
+            )
+
+            # Record which model produced (or failed to produce) this cycle's
+            # decision — "most recently used model", not "model used for the
+            # last trade": every cycle updates this, including wait/error
+            # cycles, per the captain's requirement. The literal
+            # "no model available" sentinel (distinct from NULL, which means
+            # "no decision cycle has recorded a model yet" e.g. legacy rows)
+            # covers the case where model_chain.decide() exhausted every tier.
+            model_label = model_used
+            if (
+                model_label is None
+                and response is not None
+                and response.get("action") == "error"
+            ):
+                model_label = "no model available"
+            if model_label is not None:
+                update_last_model_used(conn, agent_id, model_label)
+
+            if response is None:
+                log_decision(conn, agent_id, "wait", "LLM returned invalid response after retries", None)
+                return {
+                    "action": "wait",
+                    "detail": "LLM returned invalid response after retries",
+                }
+        else:
+            model_label = model_used
 
         action = response.get("action", "wait")
 
         if action == "error":
             reason = response.get("reason", "no model available")
             logger.error("[%s] No model available for decision: %s", agent_id, reason)
+            log_decision(conn, agent_id, "error", reason, None)
             return {"action": "error", "detail": reason}
 
         if action == "wait":
             reason = response.get("reason", "")
             logger.info("[%s] LLM decided to wait: %s", agent_id, reason)
+            log_decision(conn, agent_id, "wait", reason, None)
             return {"action": "wait", "detail": reason}
 
         if action == "close":
@@ -135,6 +222,7 @@ async def run_decision(
                 asyncio.ensure_future(
                     run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
                 )
+            log_decision(conn, agent_id, "close", reason, {"position_id": pos_id, "fill": str(fill)})
             return {"action": "close", "detail": str(fill)}
 
         if action == "enter":
@@ -153,6 +241,7 @@ async def run_decision(
                 )
             except RiskViolation as e:
                 logger.warning("[%s] Risk gate blocked order: %s", agent_id, e.reason)
+                log_decision(conn, agent_id, "risk_blocked", f"risk gate blocked: {e.reason}", {"risk_reason": e.reason, "order": str(response)})
                 return {"action": "risk_blocked", "detail": e.reason}
 
             response["position_size_pct"] = (
@@ -190,11 +279,13 @@ async def run_decision(
                 )
 
             logger.info("[%s] Entered trade: %s", agent_id, fill)
+            log_decision(conn, agent_id, "enter", f"entered {response['asset']}", {"order": str(response), "fill": str(fill)})
             return {"action": "enter", "detail": str(fill)}
 
         logger.warning(
             "[%s] Unrecognized LLM action '%s', treating as wait", agent_id, action
         )
+        log_decision(conn, agent_id, "wait", f"unrecognized LLM action: {action}", None)
         return {"action": "wait", "detail": f"unrecognized LLM action: {action}"}
 
     except Exception as exc:
