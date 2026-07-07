@@ -261,6 +261,12 @@ def _compute_labels(
 ) -> pd.DataFrame:
     """Return a copy of df with forward-label columns added for every
     configured horizon, computed per asset_key group."""
+    if not df.index.equals(pd.RangeIndex(len(df))):
+        raise ValueError(
+            "_compute_labels requires df to have a contiguous 0..len(df)-1 "
+            "RangeIndex; call df.reset_index(drop=True) before invoking it"
+        )
+
     for required_col in ("asset.price", "asset.funding"):
         if required_col not in df.columns:
             df[required_col] = None
