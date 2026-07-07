@@ -34,6 +34,7 @@ from store.positions import (
     update_position_pnl,
 )
 from store.settings import load_all as load_settings
+from store.state_snapshot import write_current_state
 from web.app import app as web_app
 
 logging.basicConfig(
@@ -67,6 +68,7 @@ async def run_heartbeat_cycle(provider, config: dict) -> None:
             if closed:
                 logger.info("SL/TP reconciled %d position(s)", closed)
             update_position_pnl(conn, assets_data)
+            write_current_state(conn)
         except Exception:
             logger.warning(
                 "Failed to update position PnL from heartbeat", exc_info=True
