@@ -1,5 +1,31 @@
 from backtest.dsl import load_spec
-from backtest.validator import validate_spec
+from backtest.validator import REPLAYABLE_FEATURES, validate_spec
+from market.heartbeat import compute_replayable_fields
+
+
+def test_replayable_features_matches_compute_replayable_fields_output():
+    """REPLAYABLE_FEATURES is hand-maintained (backtest/validator.py's own
+    comment says so) to mirror compute_replayable_fields()'s real output --
+    this test is the drift guard that comment promises. A name listed here
+    but not actually produced would pass spec validation yet be silently
+    missing (veto/skip) on every single backtest bar, exactly like
+    steel_crane's liq_total_usd gap, except undetected instead of known."""
+    candles = [[i * 3_600_000, 100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i, 10.0] for i in range(5)]
+    funding_history = [{"time": 0, "fundingRate": 0.0001}]
+    fields = compute_replayable_fields(candles, funding_history, oi_val=1_000_000.0, funding_val=0.0001, prior_oi_history=[900_000.0])
+
+    # candles_5m/candles_30m/candles_4h are raw OHLCV blobs carried in the
+    # packet for fingerprinting, not scalar features a spec's evidence term
+    # can reference -- deliberately excluded from REPLAYABLE_FEATURES.
+    non_feature_keys = {"candles_5m", "candles_30m", "candles_4h"}
+    produced_features = set(fields.keys()) - non_feature_keys
+
+    missing_from_output = REPLAYABLE_FEATURES - produced_features
+    assert missing_from_output == set(), (
+        f"REPLAYABLE_FEATURES lists names compute_replayable_fields() never "
+        f"produces: {missing_from_output}"
+    )
+
 
 VALID_YAML = """
 agent_id: test_agent

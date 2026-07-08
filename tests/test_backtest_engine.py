@@ -229,3 +229,47 @@ def test_bisect_windowing_has_no_lookahead_and_respects_candle_cap(tmp_path, mon
         last_candle_ts = candle_times[-1]
         if funding_times:
             last_funding_ts = funding_times[-1]
+
+
+def test_funding_window_bounded_to_lookback_matches_live(tmp_path, monkeypatch):
+    # Final-review finding: the funding window fed to compute_replayable_fields
+    # was unbounded (all history since backfill start), while live's
+    # _fetch_asset_snapshot has fetched only a FUNDING_LOOKBACK_HOURS (14-day)
+    # window since Task 1's fix -- a live/backtest feature-parity bug, not a
+    # preserved behavior. This pins down that the backtest now bounds the
+    # funding window the same way: a funding record older than
+    # FUNDING_LOOKBACK_HOURS relative to bar_ts must never reach
+    # compute_replayable_fields.
+    monkeypatch.setattr(engine_module, "FUNDING_LOOKBACK_HOURS", 24)  # 1 day, for a small fast test
+
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    n = 72  # 3 days of hourly candles/funding -- spans several lookback windows
+    candles = _synthetic_candles("FET-PERP", start, n, base_price=1.0, drift=0.001)
+    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, n))
+
+    spec = _always_enter_long_spec(universe_include=["FET-PERP"], max_hold_hours=1)
+
+    calls = []
+    real_compute = engine_module.compute_replayable_fields
+
+    def _spying_compute(candles_arg, funding_history_arg, oi_val, funding_val, prior_oi_history, *a, **kw):
+        calls.append((candles_arg[-1][0], list(funding_history_arg)))
+        return real_compute(candles_arg, funding_history_arg, oi_val, funding_val, prior_oi_history, *a, **kw)
+
+    monkeypatch.setattr(engine_module, "compute_replayable_fields", _spying_compute)
+
+    run_backtest(spec, ledger_dir, start, start + timedelta(hours=n - 1), taker_fee=0.0)
+
+    assert calls, "expected at least one bar to reach compute_replayable_fields"
+    late_bar_calls = [c for c in calls if c[0] >= int((start + timedelta(hours=n - 1)).timestamp() * 1000)]
+    assert late_bar_calls, "expected at least one call at/near the final bar"
+    bar_ts_ms, funding_history_arg = late_bar_calls[-1]
+    if funding_history_arg:
+        oldest_funding_ms = funding_history_arg[0]["time"]
+        age_hours = (bar_ts_ms - oldest_funding_ms) / (3600 * 1000)
+        assert age_hours <= 24 + 1e-6, (
+            f"funding_history included a record {age_hours:.1f}h old at the "
+            f"final bar, exceeding the 24h lookback -- funding window is not bounded"
+        )

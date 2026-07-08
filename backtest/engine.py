@@ -20,7 +20,7 @@ import pandas as pd
 
 from backtest.dsl import Spec
 from backtest.interpreter import evaluate
-from market.heartbeat import compute_replayable_fields
+from market.heartbeat import FUNDING_LOOKBACK_HOURS, compute_replayable_fields
 
 # Fixed backtest slippage assumption (pct of price), applied against the
 # entry direction. Conservative relative to typical observed spread+impact
@@ -133,15 +133,20 @@ def run_backtest(
         # tolist()) pass over the whole DataFrame on every single bar, which
         # was the dominant cost of run_backtest (see
         # docs/superpowers/reports/2026-07-07-seed-backtest-results.md for
-        # the profile that identified this). Semantics are unchanged:
-        # candles still cap at the trailing 300 (matching the old
-        # `.tail(300)`), funding/OI windows stay unbounded up to bar_ts
-        # (matching the old behavior exactly), so results are bit-for-bit
-        # identical to the previous implementation, just far fewer
-        # per-bar pandas operations.
+        # the profile that identified this). Candles still cap at the
+        # trailing 300 (matching the old `.tail(300)`). The funding window
+        # is capped to FUNDING_LOOKBACK_HOURS (see below) -- the earlier
+        # unbounded version was a live/backtest parity bug, not a
+        # preserved behavior: live's _fetch_asset_snapshot has fetched only
+        # a 14-day funding window since the Task-1 fix, so an unbounded
+        # multi-month window here silently fed compute_replayable_fields's
+        # funding_zscore a different population than live ever computes
+        # against. OI stays unbounded up to bar_ts since no equivalent live
+        # lookback constant exists for it yet.
         candle_ts_list, candle_rows = _candles_to_plain_list(candles_df)
         funding_ts_list, funding_rows = _funding_to_plain_list(funding_df)
         oi_ts_list, oi_val_list = _oi_to_plain_list(oi_df)
+        funding_lookback = pd.Timedelta(hours=FUNDING_LOOKBACK_HOURS)
 
         for bar_ts in bar_timestamps:
             candle_cutoff = bisect.bisect_right(candle_ts_list, bar_ts)
@@ -150,7 +155,8 @@ def run_backtest(
                 continue
 
             funding_cutoff = bisect.bisect_right(funding_ts_list, bar_ts)
-            funding_history = funding_rows[:funding_cutoff]
+            funding_window_start = bisect.bisect_left(funding_ts_list, bar_ts - funding_lookback)
+            funding_history = funding_rows[funding_window_start:funding_cutoff]
             funding_val = funding_history[-1]["fundingRate"] if funding_history else None
 
             oi_cutoff = bisect.bisect_right(oi_ts_list, bar_ts)
@@ -196,6 +202,18 @@ def run_backtest(
 
             decision = evaluate(spec, feature_row)
             if decision["action"] == "enter":
+                # Deliberately deferred, not an oversight: the interpreter
+                # distinguishes a "scaled" entry (confidence between
+                # scale_threshold and confidence_threshold) from a full-size
+                # one only via decision["reason"]'s text (backtest/interpreter.py),
+                # not a structured field. Every backtest entry here opens at
+                # full spec.position_size_pct regardless of that distinction,
+                # so scaled-conviction sizing is not yet reflected in P&L or
+                # Sharpe. Implementing it needs a structured signal from the
+                # interpreter (e.g. a numeric size multiplier), which is out
+                # of scope for M7b -- tracked as follow-up before any spec's
+                # backtest results are used to justify scaled position sizing
+                # in a live/paper deployment (M8+).
                 open_positions[asset] = {
                     "asset": asset, "direction": decision["direction"],
                     "entry_price": price, "opened_at": bar_ts,
