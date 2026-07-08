@@ -45,20 +45,21 @@ async def test_backfill_writes_candles_and_funding_to_ledger(tmp_path, monkeypat
 
 
 class _PagedOhlcvClient:
-    """Simulates candleSnapshot's real single-response page cap: a request
-    spanning more than PAGE_SIZE candles silently returns only the first
-    PAGE_SIZE, exactly what a real 12-month "1h" backfill did (5003 rows
-    back instead of ~8760) before pagination was added."""
+    """Simulates candleSnapshot's real behavior: a [start_ms, end_ms] range
+    spanning more than PAGE_SIZE candles is truncated from the START of the
+    range, keeping only the PAGE_SIZE candles nearest end_ms -- confirmed
+    empirically (an un-paginated 12-month "1h" backfill returned the most
+    RECENT ~7 months, not the oldest). Bounds are inclusive, matching
+    candleSnapshot's documented startTime/endTime semantics."""
 
     PAGE_SIZE = 3
 
-    def __init__(self, interval_ms: int, all_candles: list[list]):
-        self._interval_ms = interval_ms
+    def __init__(self, all_candles: list[list]):
         self._all_candles = all_candles
 
     async def get_ohlcv(self, asset, interval, lookback_candles=0, start_ms=None, end_ms=None):
-        page = [c for c in self._all_candles if start_ms <= c[0] < end_ms]
-        return page[: self.PAGE_SIZE]
+        page = [c for c in self._all_candles if start_ms <= c[0] <= end_ms]
+        return page[-self.PAGE_SIZE:]
 
 
 @pytest.mark.asyncio
@@ -68,9 +69,9 @@ async def test_paginated_get_ohlcv_retrieves_full_range_across_multiple_pages():
     all_candles = [
         [start_ms + i * interval_ms, 100.0, 101.0, 99.0, 100.5, 10.0] for i in range(10)
     ]
-    client = _PagedOhlcvClient(interval_ms, all_candles)
+    client = _PagedOhlcvClient(all_candles)
 
-    result = await _paginated_get_ohlcv(client, "BTC-PERP", "1h", start_ms, start_ms + 10 * interval_ms)
+    result = await _paginated_get_ohlcv(client, "BTC-PERP", "1h", start_ms, start_ms + 9 * interval_ms)
 
     assert [c[0] for c in result] == [c[0] for c in all_candles]
 

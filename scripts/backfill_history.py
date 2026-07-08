@@ -28,34 +28,70 @@ DEFAULT_5M_DAYS = 90
 # candleSnapshot's own single-response page size is small enough that a
 # multi-month request silently returns only its first page rather than an
 # error -- a real 12-month "1h" backfill measured 5003 rows back (~7 months),
-# not ~8760, with no indication anything was truncated. Page forward from
-# the last candle received until the full requested range is covered, capped
+# not ~8760, with no indication anything was truncated. When a
+# [startTime, endTime] range exceeds the cap, candleSnapshot truncates from
+# the START of the range and keeps the candles nearest endTime (confirmed
+# empirically: an un-paginated 12-month request returned Dec-2025..Jul-2026,
+# the most RECENT ~7 months, not the oldest) -- the opposite of
+# fundingHistory, which has no endTime and always returns the earliest N
+# candles after startTime. So candles must page BACKWARD (shrinking end_ms
+# from the last-received page's oldest candle) while funding pages FORWARD
+# (growing start_ms from the last-received page's newest entry) -- see
+# _paginated_get_funding_history below.
+#
+# IMPORTANT, discovered after implementing backward pagination: for candles
+# specifically (unlike funding), paginating further back does not actually
+# yield more data. Every asset lands on the same ~5000-row ceiling (~208
+# days for "1h", ~17 days for "5m") regardless of pagination direction --
+# the second page's request consistently comes back empty. This means
+# candleSnapshot's public endpoint appears to have a genuine historical
+# depth ceiling around 5000 candles per interval, not merely a per-response
+# page cap that pagination can walk past. The backward-pagination logic
+# below is still correct (it fetches everything actually available and
+# stops cleanly rather than assuming a fixed truncation direction that
+# happened to coincidentally match observed output before), and it is what
+# correctly fixed fundingHistory (500 -> 8640 rows, the real 12-month
+# depth). But callers should not expect DEFAULT_CANDLE_MONTHS=12 or
+# DEFAULT_5M_DAYS=90 to be fully achievable for candles via this endpoint --
+# see docs/superpowers/reports/2026-07-07-seed-backtest-results.md for the
+# actual per-stream data window a real backfill run produced. Capped
 # generously to guard against an unexpected non-advancing response looping
 # forever against a real network API.
 MAX_PAGES_PER_ASSET = 500
+
+# Paginating turns what used to be one request per asset/stream into several
+# -- across the full universe that's enough added request volume to trip
+# Hyperliquid's rate limiter well before HyperliquidClient's own 3-retry
+# budget recovers (observed: 7/20 assets failed outright on the first
+# paginated run). A small pause between page requests keeps steady-state
+# request rate down without touching HyperliquidClient's shared retry/
+# backoff logic, which the live trading path also depends on.
+PAGE_REQUEST_DELAY_SECONDS = 0.3
 
 
 async def _paginated_get_ohlcv(
     client: HyperliquidClient, asset: str, interval: str, start_ms: int, end_ms: int,
 ) -> list[list]:
-    """Fetch every candle in [start_ms, end_ms), walking forward one page at
-    a time. Each page's cursor starts right after the previous page's last
-    candle, so pages neither overlap nor gap as long as the API's start/end
-    range is inclusive (matching candleSnapshot's documented behavior)."""
+    """Fetch every candle in [start_ms, end_ms), walking BACKWARD one page at
+    a time from end_ms. candleSnapshot truncates from the start of an
+    over-wide range, keeping the candles nearest its endTime -- so each
+    successive request narrows end_ms to just before the earliest candle the
+    previous page returned, until the full range is covered."""
     interval_ms = _interval_to_ms(interval)
     all_candles: list[list] = []
-    cursor = start_ms
+    cursor_end = end_ms
     for _ in range(MAX_PAGES_PER_ASSET):
-        if cursor >= end_ms:
+        if cursor_end < start_ms:
             break
-        page = await client.get_ohlcv(asset, interval, lookback_candles=0, start_ms=cursor, end_ms=end_ms)
+        page = await client.get_ohlcv(asset, interval, lookback_candles=0, start_ms=start_ms, end_ms=cursor_end)
         if not page:
             break
-        all_candles.extend(page)
-        next_cursor = page[-1][0] + interval_ms
-        if next_cursor <= cursor:
-            break  # no forward progress -- stop rather than loop forever
-        cursor = next_cursor
+        all_candles = page + all_candles
+        next_cursor_end = page[0][0] - interval_ms
+        if next_cursor_end >= cursor_end:
+            break  # no backward progress -- stop rather than loop forever
+        cursor_end = next_cursor_end
+        await asyncio.sleep(PAGE_REQUEST_DELAY_SECONDS)
     return all_candles
 
 
@@ -82,6 +118,7 @@ async def _paginated_get_funding_history(
         if next_cursor <= cursor:
             break  # no forward progress -- stop rather than loop forever
         cursor = next_cursor
+        await asyncio.sleep(PAGE_REQUEST_DELAY_SECONDS)
     return all_funding
 
 
