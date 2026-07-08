@@ -175,3 +175,57 @@ def test_multi_asset_open_position_does_not_stall_later_assets(tmp_path):
 
     bbb_trades = [t for t in result.trades if t["asset"] == "BBB-PERP"]
     assert bbb_trades, "BBB should get entries evaluated even though AAA's position never closed"
+
+
+def test_bisect_windowing_has_no_lookahead_and_respects_candle_cap(tmp_path, monkeypatch):
+    # run_backtest's per-bar windowing was rewritten from a fresh pandas
+    # boolean-filter + iterrows() pass per bar to a bisect.bisect_right cutoff
+    # over precomputed plain lists (perf fix -- see
+    # docs/superpowers/reports/2026-07-07-seed-backtest-results.md). This
+    # pins down that the rewrite didn't introduce lookahead bias: each
+    # successive bar's candle/funding window must end at a timestamp no
+    # earlier than the previous bar's (monotonically non-decreasing, proving
+    # the bisect cutoff advances forward in time and never jumps ahead or
+    # falls behind), and the candle window must never exceed the historical
+    # 300-candle cap.
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    n = 40
+    candles = _synthetic_candles("FET-PERP", start, n, base_price=1.0, drift=0.001)
+    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, n))
+
+    spec = _always_enter_long_spec(universe_include=["FET-PERP"], max_hold_hours=1)
+
+    calls = []
+    real_compute = engine_module.compute_replayable_fields
+
+    def _spying_compute(candles_arg, funding_history_arg, oi_val, funding_val, prior_oi_history, *a, **kw):
+        calls.append((list(candles_arg), list(funding_history_arg)))
+        return real_compute(candles_arg, funding_history_arg, oi_val, funding_val, prior_oi_history, *a, **kw)
+
+    monkeypatch.setattr(engine_module, "compute_replayable_fields", _spying_compute)
+
+    run_backtest(spec, ledger_dir, start, start + timedelta(hours=n - 1), taker_fee=0.0)
+
+    assert calls, "expected at least one bar to reach compute_replayable_fields"
+    last_candle_ts = None
+    last_funding_ts = None
+    for idx, (candles_arg, funding_history_arg) in enumerate(calls):
+        assert len(candles_arg) <= 300, f"call {idx}: candle window exceeded the 300-candle cap"
+        candle_times = [c[0] for c in candles_arg]
+        assert candle_times == sorted(candle_times), f"call {idx}: candle window not in time order"
+        funding_times = [f["time"] for f in funding_history_arg]
+        assert funding_times == sorted(funding_times), f"call {idx}: funding window not in time order"
+
+        if last_candle_ts is not None:
+            assert candle_times[-1] >= last_candle_ts, (
+                f"call {idx}: candle window's latest ts moved backwards -- possible lookahead/bisect bug"
+            )
+        if funding_times and last_funding_ts is not None:
+            assert funding_times[-1] >= last_funding_ts, (
+                f"call {idx}: funding window's latest ts moved backwards -- possible lookahead/bisect bug"
+            )
+        last_candle_ts = candle_times[-1]
+        if funding_times:
+            last_funding_ts = funding_times[-1]

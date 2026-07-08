@@ -10,6 +10,7 @@ section 3 for why this gap is real and stays documented, not hidden.
 """
 from __future__ import annotations
 
+import bisect
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -56,15 +57,41 @@ def _read_partitions(ledger_dir: Path, kind: str, asset: str) -> pd.DataFrame:
     return df.sort_values("_ts").reset_index(drop=True)
 
 
-def _to_candle_list(df: pd.DataFrame) -> list[list]:
-    return [
-        [int(row["_ts"].timestamp() * 1000), row["o"], row["h"], row["l"], row["c"], row["v"]]
-        for _, row in df.iterrows()
+def _candles_to_plain_list(df: pd.DataFrame) -> tuple[list, list]:
+    """Convert a sorted candles DataFrame into a plain Python list once (no
+    per-bar re-filtering/iterrows). Returns (timestamps, candle_rows), both
+    in ascending time order and index-aligned, so a per-bar cutoff can be
+    found via bisect on `timestamps` and sliced directly out of
+    `candle_rows` -- O(log n) + O(1) instead of re-scanning + re-converting
+    the whole DataFrame on every bar."""
+    if df.empty:
+        return [], []
+    timestamps = df["_ts"].tolist()
+    candle_rows = [
+        [int(ts.timestamp() * 1000), o, h, l, c, v]
+        for ts, o, h, l, c, v in zip(
+            timestamps, df["o"], df["h"], df["l"], df["c"], df["v"],
+        )
     ]
+    return timestamps, candle_rows
 
 
-def _to_funding_history(df: pd.DataFrame) -> list[dict]:
-    return [{"time": int(row["_ts"].timestamp() * 1000), "fundingRate": row["rate"]} for _, row in df.iterrows()]
+def _funding_to_plain_list(df: pd.DataFrame) -> tuple[list, list]:
+    """Same idea as _candles_to_plain_list for the funding series."""
+    if df.empty:
+        return [], []
+    timestamps = df["_ts"].tolist()
+    funding_rows = [
+        {"time": int(ts.timestamp() * 1000), "fundingRate": rate}
+        for ts, rate in zip(timestamps, df["rate"])
+    ]
+    return timestamps, funding_rows
+
+
+def _oi_to_plain_list(df: pd.DataFrame) -> tuple[list, list]:
+    if df.empty:
+        return [], []
+    return df["_ts"].tolist(), df["oi"].tolist()
 
 
 def run_backtest(
@@ -97,19 +124,37 @@ def run_backtest(
         start_ts = pd.Timestamp(start) if start.tzinfo else pd.Timestamp(start, tz="UTC")
         end_ts = pd.Timestamp(end) if end.tzinfo else pd.Timestamp(end, tz="UTC")
         in_window = candles_df[(candles_df["_ts"] >= start_ts) & (candles_df["_ts"] <= end_ts)]
+        bar_timestamps = in_window["_ts"].tolist()
 
-        for idx in range(len(in_window)):
-            bar_ts = in_window.iloc[idx]["_ts"]
-            history_df = candles_df[candles_df["_ts"] <= bar_ts].tail(300)
-            if len(history_df) < MIN_CANDLES_FOR_FEATURES:
+        # Precompute each asset's full history as plain Python lists ONCE
+        # (not per bar). A per-bar cutoff index is then found via bisect on
+        # the parallel timestamp list and the plain list is sliced directly
+        # -- this replaces a fresh pandas boolean-filter + iterrows() (or
+        # tolist()) pass over the whole DataFrame on every single bar, which
+        # was the dominant cost of run_backtest (see
+        # docs/superpowers/reports/2026-07-07-seed-backtest-results.md for
+        # the profile that identified this). Semantics are unchanged:
+        # candles still cap at the trailing 300 (matching the old
+        # `.tail(300)`), funding/OI windows stay unbounded up to bar_ts
+        # (matching the old behavior exactly), so results are bit-for-bit
+        # identical to the previous implementation, just far fewer
+        # per-bar pandas operations.
+        candle_ts_list, candle_rows = _candles_to_plain_list(candles_df)
+        funding_ts_list, funding_rows = _funding_to_plain_list(funding_df)
+        oi_ts_list, oi_val_list = _oi_to_plain_list(oi_df)
+
+        for bar_ts in bar_timestamps:
+            candle_cutoff = bisect.bisect_right(candle_ts_list, bar_ts)
+            candles = candle_rows[max(0, candle_cutoff - 300):candle_cutoff]
+            if len(candles) < MIN_CANDLES_FOR_FEATURES:
                 continue
 
-            candles = _to_candle_list(history_df)
-            funding_window = funding_df[funding_df["_ts"] <= bar_ts]
-            funding_history = _to_funding_history(funding_window)
+            funding_cutoff = bisect.bisect_right(funding_ts_list, bar_ts)
+            funding_history = funding_rows[:funding_cutoff]
             funding_val = funding_history[-1]["fundingRate"] if funding_history else None
 
-            oi_window = oi_df[oi_df["_ts"] <= bar_ts]["oi"].tolist() if not oi_df.empty else []
+            oi_cutoff = bisect.bisect_right(oi_ts_list, bar_ts)
+            oi_window = oi_val_list[:oi_cutoff]
             oi_val = oi_window[-1] if oi_window else None
             prior_oi_history = oi_window[:-1] if len(oi_window) > 1 else []
 
