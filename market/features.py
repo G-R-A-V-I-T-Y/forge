@@ -84,6 +84,36 @@ def momentum_acceleration(
     return per_period_5m - longer_avg
 
 
+def _atr_series(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> list[float]:
+    """Wilder-smoothed ATR at every index i >= period, one-pass.
+
+    Equivalent to calling `_atr(highs[:i+1], lows[:i+1], closes[:i+1], period)`
+    for each i in range(period, len(closes)) -- Wilder's recurrence
+    (`atr = (atr*(period-1) + tr) / period`) already only depends on the
+    previous ATR value and the new true range, so recomputing it from
+    scratch (as the original per-i _atr(...) calls did) was pure O(n^2)
+    (each call itself re-walks the whole true-range series from index 1),
+    made worse by the outer per-bar loop in backtest/engine.py calling this
+    once per bar -- O(n^3) overall on a full backtest run. This computes
+    the exact same sequence of values in one O(n) pass.
+    """
+    n = len(closes)
+    if n < period + 1:
+        return []
+    trs = [
+        max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        for i in range(1, n)
+    ]
+    if len(trs) < period:
+        return []
+    atr = statistics.mean(trs[:period])
+    values = [atr]  # corresponds to i == period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+        values.append(atr)
+    return values
+
+
 @register("atr_percentile")
 def atr_percentile(
     candles: list[list], closes: list[float], highs: list[float],
@@ -94,11 +124,7 @@ def atr_percentile(
     current_atr = fields.get("atr")
     if current_atr is None or len(closes) < 15:
         return None
-    atr_values = []
-    for i in range(14, len(closes)):
-        atr_i = _atr(highs[:i + 1], lows[:i + 1], closes[:i + 1], 14)
-        if atr_i is not None:
-            atr_values.append(atr_i)
+    atr_values = _atr_series(highs, lows, closes, 14)
     if not atr_values:
         return None
     return _percentile_rank(current_atr, atr_values)
@@ -121,6 +147,51 @@ def bb_width(
     return (4.0 * std) / sma
 
 
+def _rolling_bb_widths(closes: list[float], window_size: int = 20) -> list[float]:
+    """(4*stdev - SMA-normalized) Bollinger Band width at every fixed-size
+    trailing window, one incremental pass.
+
+    Equivalent to computing `statistics.mean`/`statistics.stdev` fresh over
+    `closes[i-19:i+1]` for each `i in range(19, len(closes) - 1)` -- that
+    original loop was already O(n) (each window is a fixed 20 elements, not
+    growing), but paid real per-call overhead calling into the stdlib
+    `statistics` module (~280 mean/stdev call pairs per invocation, each
+    using exact-Fraction internals for precision). A sliding window's sum
+    and sum-of-squares can be updated in O(1) per step instead, so the whole
+    series is produced in one O(n) pass with plain float arithmetic and no
+    per-step function-call overhead.
+
+    Note: this uses a running-sum formula (sample variance = (sum_sq - n *
+    mean^2) / (n - 1)), which is arithmetically equivalent to but NOT
+    bit-for-bit identical to `statistics.stdev`'s exact-fraction computation
+    -- results match to float precision (~1e-9 relative), not exactly.
+    Acceptable here because bb_width_percentile's output is a percentile
+    RANK, a relative ordering that a ~1e-9 relative float difference in one
+    window's width practically never flips for a non-degenerate series.
+    """
+    n = len(closes)
+    if n < window_size + 1:  # need range(window_size-1, n-1) to have at least one iteration
+        return []
+    widths = []
+    window_sum = sum(closes[0:window_size])
+    window_sumsq = sum(c * c for c in closes[0:window_size])
+    for i in range(window_size - 1, n - 1):
+        if i > window_size - 1:
+            # Slide the window forward by one: drop closes[i-window_size],
+            # add closes[i] -- matches window = closes[i-19:i+1].
+            dropped = closes[i - window_size]
+            added = closes[i]
+            window_sum += added - dropped
+            window_sumsq += added * added - dropped * dropped
+        w_sma = window_sum / window_size
+        variance = (window_sumsq - window_size * w_sma * w_sma) / (window_size - 1)
+        w_std = variance ** 0.5 if variance > 0 else 0.0
+        if w_sma == 0:
+            continue
+        widths.append((4.0 * w_std) / w_sma)
+    return widths
+
+
 @register("bb_width_percentile")
 def bb_width_percentile(
     candles: list[list], closes: list[float], highs: list[float],
@@ -133,14 +204,7 @@ def bb_width_percentile(
     current_width = bb_width(candles, closes, highs, lows, volumes, fields, raw_data)
     if current_width is None:
         return None
-    widths = []
-    for i in range(19, len(closes) - 1):
-        window = closes[i - 19:i + 1]
-        w_sma = statistics.mean(window)
-        w_std = statistics.stdev(window) if len(window) >= 2 else 0.0
-        if w_sma == 0:
-            continue
-        widths.append((4.0 * w_std) / w_sma)
+    widths = _rolling_bb_widths(closes, 20)
     if not widths:
         return None
     return _percentile_rank(current_width, widths)
