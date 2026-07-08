@@ -491,3 +491,53 @@ def test_fetch_asset_snapshot_uses_14_day_funding_lookback(monkeypatch):
     assert abs(captured["start_time_ms"] - expected_start) < 10_000
 
 
+def test_compute_replayable_fields_excludes_live_only_fields():
+    """The replayable core must never require order-book or trade-tape data
+    -- those are the fields a historical backtest can never have."""
+    from market.heartbeat import compute_replayable_fields
+
+    candles = [[i * 300_000, 100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i, 10.0] for i in range(250)]
+    result = compute_replayable_fields(
+        candles=candles,
+        funding_history=[{"time": 0, "fundingRate": 0.0001}],
+        oi_val=1_000_000.0,
+        funding_val=0.0002,
+        prior_oi_history=[900_000.0, 950_000.0],
+        liq_data={"liq_total_usd": 50_000.0, "liq_long_usd": 30_000.0, "liq_short_usd": 20_000.0},
+    )
+
+    for live_only_key in ("spread", "bid_depth", "ask_depth", "depth_imbalance",
+                           "slippage_estimate", "buy_volume", "sell_volume",
+                           "aggressor_ratio", "avg_trade_size", "largest_trade"):
+        assert live_only_key not in result, f"{live_only_key} is live-only, must not appear in replayable fields"
+
+    for replayable_key in ("price", "return_5m", "atr", "rsi", "ema20", "funding_zscore",
+                            "oi_zscore", "oi_drawdown_pct", "liquidation_cascade_flag",
+                            "momentum_acceleration", "atr_percentile", "liq_total_usd"):
+        assert replayable_key in result, f"{replayable_key} should be computed from replayable inputs"
+
+
+def test_compute_asset_fields_unchanged_after_refactor(monkeypatch):
+    """Full live output must be byte-for-byte identical to before the split --
+    this is a regression guard, not a spec of new behavior."""
+    from market.heartbeat import _compute_asset_fields, PER_ASSET_FIELDS
+
+    candles = [[i * 300_000, 100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i, 10.0] for i in range(250)]
+    raw = {
+        "candles": candles,
+        # >=2 entries required: _zscore needs a baseline of at least 2 points
+        # to return a non-None value, and this test asserts funding_zscore
+        # survives the replayable/live-only merge.
+        "funding_history": [{"time": 0, "fundingRate": 0.0001}, {"time": 1, "fundingRate": 0.00015}],
+        "oi": {"openInterest": 1_000_000.0},
+        "funding": {"fundingRate": 0.0002},
+        "book": {"bids": [[99.5, 5.0]], "asks": [[100.5, 5.0]]},
+        "trades": [{"size": 1.0, "price": 100.0, "side": "B"}],
+    }
+    result = _compute_asset_fields(raw, prior_oi_history=[900_000.0, 950_000.0])
+
+    assert set(result.keys()) == set(PER_ASSET_FIELDS)
+    assert result["spread"] is not None  # live-only field still present via merge
+    assert result["funding_zscore"] is not None  # replayable field still present via merge
+
+

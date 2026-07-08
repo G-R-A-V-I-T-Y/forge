@@ -352,14 +352,24 @@ async def _fetch_asset_snapshot(provider, asset: str) -> dict:
     }
 
 
-def _compute_asset_fields(
-    raw: dict,
+def compute_replayable_fields(
+    candles: list[list],
+    funding_history: list[dict],
+    oi_val: float | None,
+    funding_val: float | None,
     prior_oi_history: list[float],
     liq_data: dict[str, float | None] | None = None,
 ) -> dict:
-    candles = raw["candles"]
+    """Every field derivable purely from candles/funding/OI/liquidations --
+    exactly the subset store/ledger.py's ledger stores (candles_5m, funding,
+    oi, liquidations). This is the ONLY set of fields a historical backtest
+    can ever compute, since the ledger deliberately never captures order-book
+    depth or the trade tape (the retired microstructure paradigm -- see
+    docs/STRATEGIC_ASSESSMENT_2026-07-04.md). Used both by the live heartbeat
+    (via _compute_asset_fields below) and by backtest/engine.py.
+    """
     if not candles:
-        return {k: None for k in PER_ASSET_FIELDS}
+        return {}
 
     closes = [c[4] for c in candles]
     highs = [c[2] for c in candles]
@@ -374,34 +384,6 @@ def _compute_asset_fields(
     return_4h = _pct_return(closes, 48)
     return_24h = _pct_return(closes, 288)
 
-    oi_val = raw["oi"].get("openInterest")
-    funding_val = raw["funding"].get("fundingRate")
-
-    book = raw["book"]
-    bids = (book.get("bids") or [])[:5]
-    asks = (book.get("asks") or [])[:5]
-    bid_depth = sum(sz for _px, sz in bids) if bids else 0.0
-    ask_depth = sum(sz for _px, sz in asks) if asks else 0.0
-    best_bid = bids[0][0] if bids else None
-    best_ask = asks[0][0] if asks else None
-    mid = (best_bid + best_ask) / 2.0 if best_bid is not None and best_ask is not None else price
-    spread = (
-        (best_ask - best_bid) / mid
-        if best_bid is not None and best_ask is not None and mid
-        else None
-    )
-    depth_imbalance = (
-        (bid_depth - ask_depth) / (bid_depth + ask_depth)
-        if (bid_depth + ask_depth) > 0
-        else None
-    )
-    # top5_imbalance uses the exact same top-5 levels as bid_depth/ask_depth
-    # above, so it is identical by construction — kept as a separate field
-    # per spec for Task B's consumers.
-    top5_imbalance = depth_imbalance
-
-    slippage_estimate = _slippage_estimate(asks, mid, REFERENCE_NOTIONAL_USD)
-
     atr = _atr(highs, lows, closes, 14)
     rsi = _rsi(closes, 14)
     ema20 = _ema(closes, 20)
@@ -414,21 +396,11 @@ def _compute_asset_fields(
     volume_zscore = _zscore(volume, volumes[:-1]) if len(volumes) > 1 else None
 
     funding_history_vals = [
-        f.get("fundingRate") for f in raw["funding_history"] if f.get("fundingRate") is not None
+        f.get("fundingRate") for f in funding_history if f.get("fundingRate") is not None
     ]
     funding_zscore = _zscore(funding_val, funding_history_vals)
 
     oi_zscore = _zscore(oi_val, prior_oi_history)
-
-    trades = raw["trades"]
-    buy_volume = sum(t["size"] for t in trades if _is_buy(t.get("side")))
-    sell_volume = sum(t["size"] for t in trades if not _is_buy(t.get("side")))
-    total_vol = buy_volume + sell_volume
-    aggressor_ratio = buy_volume / total_vol if total_vol > 0 else 0.5
-    avg_trade_size = statistics.mean([t["size"] for t in trades]) if trades else None
-    largest_trade = max((t["size"] * t["price"] for t in trades), default=None)
-
-    # --- Liquidation proxy fields (derived from existing data, no new API) ---
 
     # OI drawdown: percentage change from the prior OI sample. Negative means
     # OI dropped between cycles, which is a hallmark of forced liquidations
@@ -438,18 +410,6 @@ def _compute_asset_fields(
     oi_drawdown_pct = (
         (oi_val - oi_prior) / oi_prior
         if oi_val is not None and oi_prior is not None and oi_prior != 0
-        else None
-    )
-
-    # Large-trade volume: sum of notional (size * price) for trades that are
-    # > 3x the average trade size. On Hyperliquid the trade tape includes all
-    # fills; outsized trades during volatile periods are statistically likely
-    # to be liquidations (forced market orders). This gives steel_crane its
-    # primary "$10M / $5M / $2M" magnitude proxy without a dedicated API.
-    large_trade_threshold = (avg_trade_size or 0) * 3
-    large_trade_volume_usd = (
-        sum(t["size"] * t["price"] for t in trades if t["size"] > large_trade_threshold)
-        if trades and avg_trade_size and large_trade_threshold > 0
         else None
     )
 
@@ -484,7 +444,6 @@ def _compute_asset_fields(
         "volume": volume,
         "open_interest": oi_val,
         "funding": funding_val,
-        "spread": spread,
         "atr": atr,
         "realized_vol": realized_vol,
         "rsi": rsi,
@@ -495,18 +454,7 @@ def _compute_asset_fields(
         "volume_zscore": volume_zscore,
         "funding_zscore": funding_zscore,
         "oi_zscore": oi_zscore,
-        "bid_depth": bid_depth,
-        "ask_depth": ask_depth,
-        "depth_imbalance": depth_imbalance,
-        "top5_imbalance": top5_imbalance,
-        "slippage_estimate": slippage_estimate,
-        "buy_volume": buy_volume,
-        "sell_volume": sell_volume,
-        "aggressor_ratio": aggressor_ratio,
-        "avg_trade_size": avg_trade_size,
-        "largest_trade": largest_trade,
         "oi_drawdown_pct": oi_drawdown_pct,
-        "large_trade_volume_usd": large_trade_volume_usd,
         "liquidation_cascade_flag": liquidation_cascade_flag,
         "candles_5m": candles_5m,
         "candles_30m": candles_30m,
@@ -517,17 +465,109 @@ def _compute_asset_fields(
         "liq_short_usd": liq_data.get("liq_short_usd") if liq_data else None,
     }
 
-    # Compute approved derived features from the feature library
+    # raw_data shape FEATURE_REGISTRY functions expect: only the replayable
+    # inputs they were ever documented to need (funding_history for
+    # funding_acceleration; nothing here needs book/trades).
+    raw_data_for_features = {"funding_history": funding_history}
     for feature_name, feature_fn in FEATURE_REGISTRY.items():
         try:
             result[feature_name] = feature_fn(
                 candles=candles, closes=closes, highs=highs,
-                lows=lows, volumes=volumes, fields=result, raw_data=raw,
+                lows=lows, volumes=volumes, fields=result,
+                raw_data=raw_data_for_features,
             )
         except Exception:
             result[feature_name] = None
 
     return result
+
+
+def _compute_live_only_fields(raw: dict, price: float) -> dict:
+    """Order-book and trade-tape fields -- never available to a backtest,
+    since the ledger deliberately never captures this data (retired
+    microstructure paradigm). Only the live heartbeat calls this."""
+    book = raw["book"]
+    bids = (book.get("bids") or [])[:5]
+    asks = (book.get("asks") or [])[:5]
+    bid_depth = sum(sz for _px, sz in bids) if bids else 0.0
+    ask_depth = sum(sz for _px, sz in asks) if asks else 0.0
+    best_bid = bids[0][0] if bids else None
+    best_ask = asks[0][0] if asks else None
+    mid = (best_bid + best_ask) / 2.0 if best_bid is not None and best_ask is not None else price
+    spread = (
+        (best_ask - best_bid) / mid
+        if best_bid is not None and best_ask is not None and mid
+        else None
+    )
+    depth_imbalance = (
+        (bid_depth - ask_depth) / (bid_depth + ask_depth)
+        if (bid_depth + ask_depth) > 0
+        else None
+    )
+    # top5_imbalance uses the exact same top-5 levels as bid_depth/ask_depth
+    # above, so it is identical by construction — kept as a separate field
+    # per spec for Task B's consumers.
+    top5_imbalance = depth_imbalance
+
+    slippage_estimate = _slippage_estimate(asks, mid, REFERENCE_NOTIONAL_USD)
+
+    trades = raw["trades"]
+    buy_volume = sum(t["size"] for t in trades if _is_buy(t.get("side")))
+    sell_volume = sum(t["size"] for t in trades if not _is_buy(t.get("side")))
+    total_vol = buy_volume + sell_volume
+    aggressor_ratio = buy_volume / total_vol if total_vol > 0 else 0.5
+    avg_trade_size = statistics.mean([t["size"] for t in trades]) if trades else None
+    largest_trade = max((t["size"] * t["price"] for t in trades), default=None)
+
+    # Large-trade volume: sum of notional (size * price) for trades that are
+    # > 3x the average trade size. On Hyperliquid the trade tape includes all
+    # fills; outsized trades during volatile periods are statistically likely
+    # to be liquidations (forced market orders). This gives steel_crane its
+    # primary "$10M / $5M / $2M" magnitude proxy without a dedicated API.
+    large_trade_threshold = (avg_trade_size or 0) * 3
+    large_trade_volume_usd = (
+        sum(t["size"] * t["price"] for t in trades if t["size"] > large_trade_threshold)
+        if trades and avg_trade_size and large_trade_threshold > 0
+        else None
+    )
+
+    return {
+        "spread": spread,
+        "bid_depth": bid_depth,
+        "ask_depth": ask_depth,
+        "depth_imbalance": depth_imbalance,
+        "top5_imbalance": top5_imbalance,
+        "slippage_estimate": slippage_estimate,
+        "buy_volume": buy_volume,
+        "sell_volume": sell_volume,
+        "aggressor_ratio": aggressor_ratio,
+        "avg_trade_size": avg_trade_size,
+        "largest_trade": largest_trade,
+        "large_trade_volume_usd": large_trade_volume_usd,
+    }
+
+
+def _compute_asset_fields(
+    raw: dict,
+    prior_oi_history: list[float],
+    liq_data: dict[str, float | None] | None = None,
+) -> dict:
+    """Live entry point: replayable + live-only fields merged. Output shape
+    is unchanged from before this function was split -- see
+    test_compute_asset_fields_unchanged_after_refactor."""
+    candles = raw["candles"]
+    if not candles:
+        return {k: None for k in PER_ASSET_FIELDS}
+
+    oi_val = raw["oi"].get("openInterest")
+    funding_val = raw["funding"].get("fundingRate")
+
+    replayable = compute_replayable_fields(
+        candles, raw["funding_history"], oi_val, funding_val, prior_oi_history, liq_data,
+    )
+    live_only = _compute_live_only_fields(raw, replayable["price"])
+
+    return {**replayable, **live_only}
 
 
 # ---------------------------------------------------------------------------
