@@ -34,8 +34,8 @@ def test_run_backtest_produces_equity_curve_and_trades(tmp_path):
     ledger_dir = tmp_path / "ledger"
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     candles = _synthetic_candles("FET-PERP", start, 400, base_price=1.0, drift=0.001)
-    _write_candles(ledger_dir, "candles_1h", "2025-01", candles[:350])
-    _write_candles(ledger_dir, "candles_1h", "2025-02", candles[350:])
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles[:350])
+    _write_candles(ledger_dir, "candles_5m", "2025-02", candles[350:])
 
     funding_rows = [
         {"ts": (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"), "asset": "FET-PERP", "rate": 0.0003}
@@ -61,9 +61,33 @@ def test_run_backtest_produces_equity_curve_and_trades(tmp_path):
     result = run_backtest(spec, ledger_dir, start, start + timedelta(hours=399), taker_fee=0.00035)
 
     assert len(result.equity_curve) > 0
-    assert result.data_window["candles_1h"]["rows"] == 400
+    assert result.data_window["candles_5m"]["rows"] == 400
     assert isinstance(result.total_return_pct, float)
     assert isinstance(result.sharpe, float)
+
+
+def test_run_backtest_ignores_candles_1h_reads_candles_5m_for_live_parity(tmp_path):
+    # Regression guard for the live/backtest feature-parity fix: every
+    # function compute_replayable_fields calls (market/features.py,
+    # market/heartbeat.py) is written and documented against live's 300 x
+    # 5m-candle / 25h window. Feeding it candles_1h instead silently
+    # recomputes every time-based feature (RSI/EMA/ATR periods, return_24h,
+    # momentum_acceleration, realized_vol's annualization) over a ~12x
+    # different window than live ever produces. run_backtest must read
+    # candles_5m, not candles_1h, even when candles_1h data exists.
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    # Only candles_1h data present -- no candles_5m at all.
+    candles = _synthetic_candles("FET-PERP", start, 40, base_price=1.0, drift=0.001)
+    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, 40))
+
+    spec = _always_enter_long_spec(universe_include=["FET-PERP"])
+
+    result = run_backtest(spec, ledger_dir, start, start + timedelta(hours=39), taker_fee=0.0)
+
+    assert result.data_window["candles_5m"]["rows"] == 0
+    assert result.trades == []
 
 
 def test_run_backtest_reports_thin_data_window_honestly(tmp_path):
@@ -76,7 +100,7 @@ def test_run_backtest_reports_thin_data_window_honestly(tmp_path):
     ]
     _write_candles(ledger_dir, "oi", "2025-01", oi_rows)
     candles = _synthetic_candles("FET-PERP", start, 10, base_price=1.0, drift=0.0)
-    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
 
     spec = Spec(
         agent_id="test_spec", spec_version=1, thesis_version=1,
@@ -128,7 +152,7 @@ def test_slippage_reduces_realized_pnl(tmp_path, monkeypatch):
     ledger_dir = tmp_path / "ledger"
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     candles = _synthetic_candles("FET-PERP", start, 40, base_price=1.0, drift=0.01)
-    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
     _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, 40))
 
     spec = _always_enter_long_spec(universe_include=["FET-PERP"])
@@ -164,8 +188,8 @@ def test_multi_asset_open_position_does_not_stall_later_assets(tmp_path):
 
     aaa_candles = _synthetic_candles("AAA-PERP", start, 40, base_price=1.0, drift=0.0)
     bbb_candles = _synthetic_candles("BBB-PERP", start, 40, base_price=1.0, drift=0.01)
-    _write_candles(ledger_dir, "candles_1h", "2025-01-aaa", aaa_candles)
-    _write_candles(ledger_dir, "candles_1h", "2025-01-bbb", bbb_candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01-aaa", aaa_candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01-bbb", bbb_candles)
     _write_candles(ledger_dir, "funding", "2025-01-aaa", _funding_rows("AAA-PERP", start, 40))
     _write_candles(ledger_dir, "funding", "2025-01-bbb", _funding_rows("BBB-PERP", start, 40))
 
@@ -192,7 +216,7 @@ def test_bisect_windowing_has_no_lookahead_and_respects_candle_cap(tmp_path, mon
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     n = 40
     candles = _synthetic_candles("FET-PERP", start, n, base_price=1.0, drift=0.001)
-    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
     _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, n))
 
     spec = _always_enter_long_spec(universe_include=["FET-PERP"], max_hold_hours=1)
@@ -246,7 +270,7 @@ def test_funding_window_bounded_to_lookback_matches_live(tmp_path, monkeypatch):
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     n = 72  # 3 days of hourly candles/funding -- spans several lookback windows
     candles = _synthetic_candles("FET-PERP", start, n, base_price=1.0, drift=0.001)
-    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
     _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, n))
 
     spec = _always_enter_long_spec(universe_include=["FET-PERP"], max_hold_hours=1)

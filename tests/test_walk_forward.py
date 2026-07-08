@@ -29,7 +29,7 @@ def _seed_ledger(tmp_path: Path) -> Path:
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     candles = _synthetic_candles("FET-PERP", start, 1000, base_price=1.0, drift=0.0005)
     for month, chunk_start in (("2025-01", 0), ("2025-02", 350), ("2025-03", 700)):
-        _write_candles(ledger_dir, "candles_1h", month, candles[chunk_start:chunk_start + 350])
+        _write_candles(ledger_dir, "candles_5m", month, candles[chunk_start:chunk_start + 350])
     funding_rows = [
         {"ts": (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"), "asset": "FET-PERP", "rate": 0.0003}
         for i in range(1000)

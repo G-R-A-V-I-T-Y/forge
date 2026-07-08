@@ -36,8 +36,10 @@ class WalkForwardReport:
 
 
 def _ledger_date_range(ledger_dir: Path, spec: Spec) -> tuple[datetime, datetime]:
-    """Full available candles_1h date range across the spec's universe."""
-    kind_dir = ledger_dir / "candles_1h"
+    """Full available candles_5m date range across the spec's universe --
+    matches backtest/engine.py's run_backtest, which now drives its per-bar
+    loop off candles_5m (not candles_1h) for live/backtest feature parity."""
+    kind_dir = ledger_dir / "candles_5m"
     all_ts = []
     for path in sorted(kind_dir.glob("*.jsonl")) + sorted(kind_dir.glob("*.parquet")):
         df = pd.read_json(path, lines=True) if path.suffix == ".jsonl" else pd.read_parquet(path)

@@ -2,6 +2,19 @@
 interpreter, using the exact same feature-computation core the live
 heartbeat uses (market.heartbeat.compute_replayable_fields).
 
+Reads candles_5m (not candles_1h) for exactly this reason: every function in
+market/features.py and market/heartbeat.py's replayable core is written and
+documented against live's 300 x 5m-candle / 25h window (LOOKBACK_CANDLES,
+LOOKBACK_HOURS in market/heartbeat.py) -- RSI/EMA/ATR periods, the
+return_5m/30m/4h/24h candle-count offsets, momentum_acceleration's per-period
+normalizers, and realized_vol's annualization constant (PERIODS_PER_YEAR_5M)
+all assume 5-minute bars. Feeding this same code hourly candles doesn't
+degrade gracefully -- it silently recomputes every one of those features over
+a ~12x-longer, differently-labeled window than live ever produces (e.g.
+"return_24h" becomes a 12-day return), which is a live/backtest parity bug,
+not a preserved behavior. candles_1h remains in the ledger for other
+consumers; the backtest engine no longer reads it.
+
 Fee model matches the paper bridge's taker_fee. Slippage is a fixed,
 conservative assumption (not execute_close's live slippage_estimate,
 which needs order-book depth the ledger never captures) -- see
@@ -20,7 +33,7 @@ import pandas as pd
 
 from backtest.dsl import Spec
 from backtest.interpreter import evaluate
-from market.heartbeat import FUNDING_LOOKBACK_HOURS, compute_replayable_fields
+from market.heartbeat import FUNDING_LOOKBACK_HOURS, LOOKBACK_CANDLES, compute_replayable_fields
 
 # Fixed backtest slippage assumption (pct of price), applied against the
 # entry direction. Conservative relative to typical observed spread+impact
@@ -107,14 +120,14 @@ def run_backtest(
     returns_per_bar: list[float] = []
 
     for asset in spec.universe_include:
-        candles_df = _read_partitions(ledger_dir, "candles_1h", asset)
+        candles_df = _read_partitions(ledger_dir, "candles_5m", asset)
         funding_df = _read_partitions(ledger_dir, "funding", asset)
         oi_df = _read_partitions(ledger_dir, "oi", asset)
 
-        result.data_window.setdefault("candles_1h", {"rows": 0})
+        result.data_window.setdefault("candles_5m", {"rows": 0})
         result.data_window.setdefault("funding", {"rows": 0})
         result.data_window.setdefault("oi", {"rows": 0})
-        result.data_window["candles_1h"]["rows"] += len(candles_df)
+        result.data_window["candles_5m"]["rows"] += len(candles_df)
         result.data_window["funding"]["rows"] += len(funding_df)
         result.data_window["oi"]["rows"] += len(oi_df)
 
@@ -133,16 +146,19 @@ def run_backtest(
         # tolist()) pass over the whole DataFrame on every single bar, which
         # was the dominant cost of run_backtest (see
         # docs/superpowers/reports/2026-07-07-seed-backtest-results.md for
-        # the profile that identified this). Candles still cap at the
-        # trailing 300 (matching the old `.tail(300)`). The funding window
-        # is capped to FUNDING_LOOKBACK_HOURS (see below) -- the earlier
-        # unbounded version was a live/backtest parity bug, not a
-        # preserved behavior: live's _fetch_asset_snapshot has fetched only
-        # a 14-day funding window since the Task-1 fix, so an unbounded
-        # multi-month window here silently fed compute_replayable_fields's
-        # funding_zscore a different population than live ever computes
-        # against. OI stays unbounded up to bar_ts since no equivalent live
-        # lookback constant exists for it yet.
+        # the profile that identified this). Candles cap at the trailing
+        # LOOKBACK_CANDLES (300), same constant live's _fetch_asset_snapshot
+        # uses -- since this loop now reads candles_5m (not candles_1h), that
+        # cap represents the same ~25h window live computes over, not just
+        # the same bar count. The funding window is capped to
+        # FUNDING_LOOKBACK_HOURS (see below) -- the earlier unbounded version
+        # was a live/backtest parity bug, not a preserved behavior: live's
+        # _fetch_asset_snapshot has fetched only a 14-day funding window
+        # since the Task-1 fix, so an unbounded multi-month window here
+        # silently fed compute_replayable_fields's funding_zscore a
+        # different population than live ever computes against. OI stays
+        # unbounded up to bar_ts since no equivalent live lookback constant
+        # exists for it yet.
         candle_ts_list, candle_rows = _candles_to_plain_list(candles_df)
         funding_ts_list, funding_rows = _funding_to_plain_list(funding_df)
         oi_ts_list, oi_val_list = _oi_to_plain_list(oi_df)
@@ -150,7 +166,7 @@ def run_backtest(
 
         for bar_ts in bar_timestamps:
             candle_cutoff = bisect.bisect_right(candle_ts_list, bar_ts)
-            candles = candle_rows[max(0, candle_cutoff - 300):candle_cutoff]
+            candles = candle_rows[max(0, candle_cutoff - LOOKBACK_CANDLES):candle_cutoff]
             if len(candles) < MIN_CANDLES_FOR_FEATURES:
                 continue
 
