@@ -52,6 +52,11 @@ REFERENCE_NOTIONAL_USD = 10_000.0
 LOOKBACK_CANDLES = 300
 LOOKBACK_HOURS = 25
 
+# Funding z-score baseline: every thesis (silver_basin's "z-score vs 14-day
+# history" is the clearest example) assumes 14 days, independent of the 25h
+# candle/EMA200 lookback above -- these were incorrectly sharing one window.
+FUNDING_LOOKBACK_HOURS = 14 * 24
+
 # Trade-tape window for buy/sell volume + aggressor fields. A reasonable
 # window for trade-tape aggregates given the 5-minute heartbeat cadence.
 TRADE_TAPE_HOURS = 1
@@ -326,11 +331,12 @@ async def _fetch_asset_snapshot(provider, asset: str) -> dict:
     single failed call degrades that asset's fields to None rather than
     crashing the whole cycle or dropping the asset from the packet."""
     now_ms = int(time.time() * 1000)
-    start_lookback_ms = now_ms - LOOKBACK_HOURS * 3600 * 1000
+    candle_start_ms = now_ms - LOOKBACK_HOURS * 3600 * 1000
+    funding_start_ms = now_ms - FUNDING_LOOKBACK_HOURS * 3600 * 1000
 
     candles, funding_history, oi, funding, book, trades = await asyncio.gather(
         _safe(lambda: provider.get_ohlcv(asset, "5m", LOOKBACK_CANDLES), []),
-        _safe(lambda: provider.get_funding_history(asset, start_lookback_ms), []),
+        _safe(lambda: provider.get_funding_history(asset, funding_start_ms), []),
         _safe(lambda: provider.get_open_interest(asset), {}),
         _safe(lambda: provider.get_funding_rate(asset), {}),
         _safe(lambda: provider.get_orderbook(asset, depth=5), {"bids": [], "asks": []}),

@@ -452,3 +452,42 @@ def test_read_heartbeat_or_none_stale_packet_returns_none(tmp_path):
     assert read_heartbeat_or_none(path, max_age_seconds=600) is None
 
 
+def test_fetch_asset_snapshot_uses_14_day_funding_lookback(monkeypatch):
+    """silver_basin's thesis assumes a 14-day funding z-score baseline;
+    the fetch must request that window, not the 25h candle lookback."""
+    import asyncio
+    from market.heartbeat import _fetch_asset_snapshot, FUNDING_LOOKBACK_HOURS
+
+    assert FUNDING_LOOKBACK_HOURS == 14 * 24
+
+    captured = {}
+
+    class StubProvider:
+        async def get_ohlcv(self, asset, interval, lookback):
+            return []
+
+        async def get_funding_history(self, asset, start_time_ms):
+            captured["start_time_ms"] = start_time_ms
+            return []
+
+        async def get_open_interest(self, asset):
+            return {}
+
+        async def get_funding_rate(self, asset):
+            return {}
+
+        async def get_orderbook(self, asset, depth=5):
+            return {"bids": [], "asks": []}
+
+        async def get_recent_trades(self, asset, hours=1):
+            return []
+
+    asyncio.run(_fetch_asset_snapshot(StubProvider(), "BTC-PERP"))
+
+    import time
+    now_ms = int(time.time() * 1000)
+    expected_start = now_ms - FUNDING_LOOKBACK_HOURS * 3600 * 1000
+    # allow a few seconds of test-execution drift
+    assert abs(captured["start_time_ms"] - expected_start) < 10_000
+
+
