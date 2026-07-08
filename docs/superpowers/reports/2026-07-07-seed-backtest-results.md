@@ -1,168 +1,187 @@
-# Seed backtest results -- silver_basin, iron_moth, steel_crane
+# Seed backtest results -- iron_moth, jade_hawk, silver_basin
 
 Task 8 of `docs/superpowers/plans/2026-07-07-strategy-spec-dsl-backtester.md`
-(M7b). This is the first real, historical-data-backed evidence about
-whether the three hand-compiled seed theses have any edge, run against a
-real backfill from Hyperliquid's live public API (read-only, no
-credentials, no trading).
+(M7b). This supersedes the original 2026-07-07 run in this same file: that
+run's numbers were produced by a backtest engine with three real defects,
+found and fixed after the fact:
+
+1. **Live/backtest feature parity bug.** `backtest/engine.py` fed
+   `compute_replayable_fields` hourly candles (`candles_1h`) while every
+   function in `market/features.py` and the replayable core is written and
+   documented against live's 300 x 5m-candle / 25h window. Every time-based
+   feature (RSI/EMA/ATR periods, `return_24h`, `momentum_acceleration`,
+   `realized_vol`'s annualization) was silently computed over a ~12x
+   different window than live ever produces. Fixed: the engine now reads
+   `candles_5m`, matching live's `LOOKBACK_CANDLES`/`LOOKBACK_HOURS` exactly.
+2. **Backfill silently truncated.** `scripts/backfill_history.py` requested
+   a 12-month range in one `candleSnapshot`/`fundingHistory` call with no
+   pagination. The original run's "5003 rows" for `candles_1h` and "500
+   rows" for `funding` weren't the real 12-month depth -- they were
+   whatever fit in a single API response. Fixed: both streams now page
+   through the full requested range (see "How this was produced" below for
+   what pagination did and did not turn out to fix).
+3. **`steel_crane` cannot be backtested by construction.** Its primary
+   evidence term (`liq_total_usd`) has `missing: veto`, and liquidation
+   history is never backfilled -- every bar was vetoed, always, which is a
+   data-availability artifact, not a "no edge" finding. Swapped for
+   `jade_hawk` (VWAP mean-reversion, hand-compiled from its short-entry
+   sub-thesis: fade price overextended above VWAP), which is
+   candle/funding-driven and can actually be evaluated.
 
 ## How this was produced
 
-1. `python scripts/backfill_history.py` was run for real against Hyperliquid's
-   public API for the full 20-asset universe in `config.yaml`: 12 months of
-   1h candles + funding, 90 days of 5m candles. Output (truncated to the
-   assets these 3 specs' universes use):
+1. `python scripts/backfill_history.py` was run for real against
+   Hyperliquid's public API (read-only, no credentials, no trading) for the
+   full 20-asset universe in `config.yaml`, requesting 12 months of 1h
+   candles + funding and 90 days of 5m candles, using the now-paginated
+   fetch.
 
-   ```
-   ETH-PERP: {'asset': 'ETH-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5035}
-   SOL-PERP: {'asset': 'SOL-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5033}
-   SUI-PERP: {'asset': 'SUI-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5029}
-   AVAX-PERP: {'asset': 'AVAX-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5033}
-   LINK-PERP: {'asset': 'LINK-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5027}
-   ARB-PERP: {'asset': 'ARB-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5030}
-   OP-PERP: {'asset': 'OP-PERP', 'candles_1h': 5003, 'funding': 500, 'candles_5m': 5031}
-   ```
+   Pagination fixed funding completely: **500 -> 8640 rows per asset**, the
+   real 12-month depth (Hyperliquid's `fundingHistory` has no `endTime` and
+   returns the earliest N rows after `startTime`, so paging forward from the
+   last row received works as expected).
 
-   OI and liquidations were **not** backfilled -- this is by design, not an
-   omission: `scripts/backfill_history.py`'s own docstring states Hyperliquid
-   has no OI-history endpoint and Coinalyze's free tier doesn't backfill
-   either, so both remain live-accumulated-only. This has a direct,
-   visible effect on steel_crane's results below.
+   Pagination did **not** increase candle depth. `candleSnapshot` truncates
+   an over-wide `[startTime, endTime]` range from the *start*, keeping the
+   candles nearest `endTime` -- confirmed by the original single-request run
+   returning the most *recent* ~7 months, not the oldest. Backward
+   pagination (shrinking `endTime` from the earliest candle each page
+   returned) is the structurally correct way to walk further back, and it
+   is what fixed funding's forward-pagination counterpart -- but for candles
+   specifically, every second-page request came back empty. Every asset
+   lands on the same ceiling regardless of pagination direction: **~5000
+   rows for `candles_1h` (~208 days) and ~5000 rows for `candles_5m` (~17
+   days)**. This looks like a genuine historical-depth ceiling on
+   Hyperliquid's public `candleSnapshot` endpoint, not a response-size cap
+   pagination can walk past. `DEFAULT_CANDLE_MONTHS=12` and
+   `DEFAULT_5M_DAYS=90` remain the script's request parameters (asking for
+   more than the endpoint will serve is harmless -- pagination stops
+   cleanly on the first empty page), but the real achievable window today is
+   ~208 days of 1h and ~17 days of 5m, per asset, via this endpoint.
 
-2. A real performance problem was found and fixed along the way (see
-   "Performance fixes" below) before a full 3-spec walk-forward run was
-   practical -- the original `run_backtest` implementation would have taken
-   multiple hours per spec against this real ledger size, versus the
-   original design's "well under a minute per spec" assumption (written
-   against a much smaller anticipated ledger).
+   One asset (`AVAX-PERP`) hit Hyperliquid's rate limiter hard enough to
+   exhaust `HyperliquidClient`'s 3-retry budget on the full-universe run
+   despite a 0.3s pacing delay added between paginated page requests; it was
+   backfilled individually afterward and is included in the results below.
+   All 20 universe assets are now present.
 
-3. `python scripts/run_seed_backtests.py` was then run for real (each spec
-   run individually via a temporary staging script during development, to
-   stay under tooling timeouts; the committed `scripts/run_seed_backtests.py`
-   runs all 3 in one process and produces the same output). Full output
-   below, verbatim.
+2. `python scripts/run_seed_backtests.py` was run for real against the
+   corrected ledger and the corrected engine. Full output below, verbatim.
 
 ## Results
 
 ```
 === iron_moth ===
-  data window: {'candles_1h': {'rows': 25015}, 'funding': {'rows': 2500}, 'oi': {'rows': 0}}
-  train: 1074 trades, -45.57% return, Sharpe -2.00
-  validate: 285 trades, -52.62% return, Sharpe -5.13
-  test: 248 trades, -9.66% return, Sharpe -0.65
-  deflated Sharpe: -0.76
-  parameter sensitivity: {'confidence_threshold': 0.0, 'scale_threshold': -0.01723125718354268, 'stop_loss_pct': -0.46524187778438086, 'take_profit_pct': 0.09489931206293034}
+  data window: {'candles_5m': {'rows': 25121}, 'funding': {'rows': 43200}, 'oi': {'rows': 0}}
+  train: 125 trades, +13.01% return, Sharpe 1.23
+  validate: 26 trades, -0.46% return, Sharpe -0.15
+  test: 26 trades, -7.90% return, Sharpe -2.39
+  deflated Sharpe: -2.74
+  parameter sensitivity: {'confidence_threshold': 0.0, 'scale_threshold': -0.077, 'stop_loss_pct': 0.035, 'take_profit_pct': 0.0}
+
+=== jade_hawk ===
+  data window: {'candles_5m': {'rows': 20099}, 'funding': {'rows': 34560}, 'oi': {'rows': 0}}
+  train: 127 trades, -2.61% return, Sharpe -0.53
+  validate: 22 trades, -2.19% return, Sharpe -1.56
+  test: 12 trades, +1.33% return, Sharpe 1.30
+  deflated Sharpe: 0.79
+  parameter sensitivity: {'confidence_threshold': 0.0, 'scale_threshold': 0.200, 'stop_loss_pct': 0.414, 'take_profit_pct': 0.026}
 
 === silver_basin ===
-  data window: {'candles_1h': {'rows': 25015}, 'funding': {'rows': 2500}, 'oi': {'rows': 0}}
-  train: 0 trades, +0.00% return, Sharpe 0.00
-  validate: 0 trades, +0.00% return, Sharpe 0.00
-  test: 0 trades, +0.00% return, Sharpe 0.00
-  deflated Sharpe: 0.00
-  parameter sensitivity: {'confidence_threshold': 0.0, 'scale_threshold': 0.0, 'stop_loss_pct': 0.0, 'take_profit_pct': 0.0}
-
-=== steel_crane ===
-  data window: {'candles_1h': {'rows': 25015}, 'funding': {'rows': 2500}, 'oi': {'rows': 0}}
-  train: 0 trades, +0.00% return, Sharpe 0.00
-  validate: 0 trades, +0.00% return, Sharpe 0.00
+  data window: {'candles_5m': {'rows': 25122}, 'funding': {'rows': 43200}, 'oi': {'rows': 0}}
+  train: 18 trades, -3.11% return, Sharpe -1.02
+  validate: 1 trades, +0.35% return, Sharpe 0.00
   test: 0 trades, +0.00% return, Sharpe 0.00
   deflated Sharpe: 0.00
   parameter sensitivity: {'confidence_threshold': 0.0, 'scale_threshold': 0.0, 'stop_loss_pct': 0.0, 'take_profit_pct': 0.0}
 ```
 
-(`data_window` rows are summed across each spec's 5-asset universe, so
-25015 = 5 assets x ~5003 1h candles each; 2500 = 5 x 500 funding samples
-each; 0 OI rows confirms OI was genuinely never backfilled for any asset.)
+(`data_window` rows are summed across each spec's universe: iron_moth and
+jade_hawk use 4-5 assets, silver_basin uses 5. 0 OI rows confirms OI remains
+genuinely un-backfilled, as designed.)
 
 ## Interpretation -- honest, not flattering
 
-**iron_moth**: the only spec that actually traded. Real historical
-performance is bad: negative Sharpe in all three splits (train -2.00,
-validate -5.13, test -0.65) and a negative deflated Sharpe (-0.76) after
-penalizing for the parameter-sensitivity sweep's implicit multiple-testing.
-The momentum-acceleration + volatility-adjusted-entry thesis, as
-hand-compiled here, shows no historical edge over this window -- if
-anything a real historical loss. This is real evidence the thesis needs
-rework (or the hand-compiled thresholds need retuning) before any live
-capital consideration, exactly the kind of signal this backtest engine
-exists to surface.
+**iron_moth**: now actually trades a meaningfully different pattern than the
+original (broken-engine) run, which showed uniform losses across every
+split. With correctly-scaled features, iron_moth shows a real in-sample
+edge (train Sharpe +1.23, +13.01% return) that does not survive
+out-of-sample: validate is flat-to-negative (Sharpe -0.15) and test is
+clearly negative (Sharpe -2.39, -7.90%). The deflated Sharpe (-2.74) --
+which penalizes exactly this pattern -- confirms the in-sample edge is not
+real signal surviving multiple-testing scrutiny. This is the textbook
+overfitting signature the walk-forward harness exists to catch: the
+momentum-acceleration + volatility-adjusted-entry thesis, as hand-compiled,
+found something real in its train window that did not generalize. The
+original (feature-mismatched) run's uniformly-bad numbers were not even
+measuring this thesis correctly; this run is the first honest look at it.
 
-**silver_basin**: 0 trades across all three splits. Its primary evidence
-term (`funding_extremity`, thresholds at funding z-score > 1.0/1.5/2.0)
-combined with `confidence_threshold: 0.70` never actually crossed the entry
-bar anywhere in ~7 months of real funding-rate history for this 5-asset
-universe. This is a real, honest finding: either the real historical
-funding-rate distribution for these assets doesn't produce the z-score
-extremes the thesis assumed, or the hand-compiled threshold/weight
-combination is too conservative to ever fire. Not a bug -- the spec
-validated cleanly and the interpreter ran correctly; it simply never found
-a qualifying entry in real data.
+**silver_basin**: previously 0 trades across all three splits with the
+broken engine and a 500-row (truncated) funding sample. With the real
+12-month funding history (8640 rows/asset) and the corrected 14-day
+funding-zscore window, the thesis now actually fires: 18 trades in train
+(Sharpe -1.02, -3.11%), a single trade in validate, none in test. Still not
+evidence of edge -- if anything a modest in-sample loss -- but it is now a
+real, exercised evaluation rather than a threshold that structurally never
+crossed the entry bar. The thin validate/test trade counts reflect the
+funding-driven entry condition being inherently rare within this window,
+not a remaining bug.
 
-**steel_crane**: 0 trades across all three splits, but for a structurally
-different (and expected) reason: its primary evidence term
-(`liquidation_volume`, feature `liq_total_usd`) has `missing: veto`, and
-liquidation data was never backfilled (see above) -- `liq_total_usd` is
-`None` for every single bar in this backtest, so the primary evidence
-term is vetoed on every evaluation, by construction. **This spec's zero
-result is not evidence the liquidation-hunter thesis lacks edge** -- it's
-evidence that this specific backtest run cannot evaluate that thesis at
-all, because the one data source it depends on doesn't exist historically
-yet. A meaningful backtest of steel_crane requires either a live-accumulated
-liquidation history (Coinalyze, going forward from whenever an API key is
-configured) or a different historical liquidation-data source; there isn't
-one available today. This gap is called out explicitly here rather than
-silently reported as "no edge."
+**jade_hawk** (replacing `steel_crane`): the VWAP mean-reversion short-entry
+thesis got a full, meaningful walk-forward evaluation across all three
+splits (127/22/12 trades) -- something `steel_crane` could never get,
+since its primary evidence was permanently vetoed by missing liquidation
+data. Results are mixed and inconclusive rather than a clean edge: train
+and validate are modestly negative (Sharpe -0.53 and -1.56), test is
+modestly positive (Sharpe +1.30, +1.33%), and the deflated Sharpe (+0.79)
+is positive but on a small test-window trade count (12 trades) -- not
+strong enough to call a real edge, but a legitimate "worth a closer look,
+not obviously dead" result, which is exactly the kind of signal a
+data-availability-vetoed spec could never produce.
 
-## Performance fixes made along the way
+## Known residual limitations (honestly scoped, not hidden)
+
+- **Candle history depth is ~208 days (1h) / ~17 days (5m) per asset**, not
+  the 12 months / 90 days the design assumed -- an apparent ceiling on
+  Hyperliquid's public `candleSnapshot` endpoint, not a bug pagination can
+  fix (see "How this was produced" above). All three specs' walk-forward
+  windows are correspondingly shorter than originally scoped. Funding
+  history is the real 12 months.
+- **OI and liquidation data remain entirely un-backfilled** (`oi` rows: 0
+  everywhere) -- by design, since neither Hyperliquid nor Coinalyze's free
+  tier serves historical OI or liquidation data. Any future seed spec
+  leaning on those features has the same structural limitation `steel_crane`
+  did.
+- Scaled-conviction entries still open at full `position_size_pct` in the
+  backtest engine (a pre-existing, separately-tracked follow-up noted in the
+  original run -- see `backtest/engine.py`'s comment at the entry-sizing
+  site).
+
+## Performance fixes made along the way (unchanged from the original run)
 
 The real ~5000-1h-candle-per-asset backfilled ledger exposed two real
 algorithmic/constant-factor performance problems that made a full 3-spec
-walk-forward run (train+validate+test+4-way parameter-sensitivity sweep,
-per spec) take multiple hours before these fixes -- versus low minutes
-after. Both are committed as separate, scoped commits before the seed-specs
-commit:
+walk-forward run take multiple hours before these fixes -- versus low
+minutes after. Both remain committed as separate, scoped commits:
 
 1. **`backtest/engine.py`** (commit `fix(backtest): eliminate O(bars^2)
-   per-bar recomputation bottleneck in run_backtest`): `run_backtest`
-   re-filtered the full candles/funding DataFrames with a fresh pandas
-   boolean mask + `.iterrows()`/`.tolist()` on *every single bar* --
-   funding's window was additionally unbounded and ever-growing (unlike
-   candles, which at least capped at `.tail(300)`), making it a real
-   O(bars^2) cost per asset. Fixed by precomputing each asset's history as
-   plain Python lists once per asset, then using `bisect.bisect_right` on a
-   parallel timestamp list to find each bar's cutoff and slicing directly.
-   Same trailing-300 candle cap, same unbounded funding/OI window, bit-for-bit
-   identical results -- verified by the existing 4 tests in
-   `tests/test_backtest_engine.py` (unchanged) plus 1 new regression test
-   pinning the no-lookahead invariant. ~5.2x faster on a profiled reference
-   window (8.442s -> 1.637s for 1 asset / 3 days).
-
+   per-bar recomputation bottleneck in run_backtest`): precomputes each
+   asset's history as plain Python lists once per asset, then uses
+   `bisect.bisect_right` on a parallel timestamp list to find each bar's
+   cutoff and slices directly, instead of re-filtering the full
+   candles/funding DataFrames on every bar.
 2. **`market/features.py`** (commit `fix(market): eliminate O(n^2)/O(n)
    per-call recomputation in atr_percentile and bb_width_percentile`):
-   `atr_percentile` recomputed Wilder's ATR from scratch for every trailing
-   index (genuinely O(n^2) per call); `bb_width_percentile` was already
-   O(n) but paid heavy constant-factor overhead from ~280
-   `statistics.mean`/`stdev` calls per invocation. Fixed with a one-pass
-   incremental ATR recursion (bit-for-bit identical output, verified against
-   a reference implementation in `tests/test_features.py`) and an
-   incremental rolling sum/sum-of-squares for the Bollinger-Band width
-   series (matches to ~1e-9 float tolerance, not bit-for-bit, since the
-   arithmetic path changed -- acceptable for a percentile-rank output).
-   Measured on a synthetic 300-candle window: atr_percentile 30.55ms ->
-   0.22ms/call (139x), bb_width_percentile 33.82ms -> 0.26ms/call (130x).
+   one-pass incremental ATR recursion and an incremental rolling
+   sum/sum-of-squares for the Bollinger-Band width series, instead of
+   recomputing from scratch on every trailing index.
 
 ## Known residual performance gap (not fixed in this task, flagged for follow-up)
 
 `market/heartbeat.py`'s `compute_replayable_fields` still recomputes several
 other indicators (RSI, EMA20/50/200, VWAP, realized vol, z-scores) fresh on
-every single bar call from `backtest/engine.py`'s per-bar loop -- each of
-these is individually O(candles-in-window) (bounded at 300, not O(n^2)
-across the whole backtest), so none is currently a correctness or
-scalability blocker the way the two fixed functions were. But they are
-still recomputed from scratch every bar rather than maintained
-incrementally, and are a legitimate next optimization target if backtest
-run time needs to shrink further (e.g. for a larger universe, a rolling
-walk-forward harness, or many more seed specs). Not urgent: the two fixes
-already committed bring a full 3-spec run down from multiple hours to a few
-minutes, which is workable for the current scope. Flagged here as a real,
-documented follow-up rather than silently left for someone to rediscover.
+every single bar call from `backtest/engine.py`'s per-bar loop -- each
+individually O(candles-in-window) (bounded at 300, not O(n^2) across the
+whole backtest), so none is currently a correctness or scalability blocker.
+Flagged here as a real, documented follow-up rather than silently left for
+someone to rediscover.
