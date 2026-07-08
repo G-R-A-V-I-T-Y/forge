@@ -73,7 +73,10 @@ def run_backtest(
     result = BacktestResult()
     balance = 10_000.0  # notional backtest starting balance; only relative return matters
     peak = balance
-    open_position: dict | None = None
+    # Keyed per-asset so one asset's still-open position (never hit SL/TP/
+    # max-hold before its own data runs out) can't block entry evaluation
+    # for any other asset in the universe.
+    open_positions: dict[str, dict | None] = {}
     returns_per_bar: list[float] = []
 
     for asset in spec.universe_include:
@@ -114,8 +117,9 @@ def run_backtest(
                 candles, funding_history, oi_val, funding_val, prior_oi_history,
             )
             price = feature_row["price"]
+            open_position = open_positions.get(asset)
 
-            if open_position is not None and open_position["asset"] == asset:
+            if open_position is not None:
                 entry = open_position["entry_price"]
                 direction = open_position["direction"]
                 pct_move = (price - entry) / entry if direction == "long" else (entry - price) / entry
@@ -125,7 +129,10 @@ def run_backtest(
                 timed_out = held_hours >= spec.max_hold_hours
                 if hit_sl or hit_tp or timed_out:
                     exit_price = price * (1 - BACKTEST_SLIPPAGE_PCT if direction == "long" else 1 + BACKTEST_SLIPPAGE_PCT)
-                    gross_pct = pct_move * spec.leverage
+                    realized_pct_move = (
+                        (exit_price - entry) / entry if direction == "long" else (entry - exit_price) / entry
+                    )
+                    gross_pct = realized_pct_move * spec.leverage
                     net_pct = gross_pct - 2 * taker_fee * spec.leverage
                     pnl_usd = balance * spec.position_size_pct * net_pct
                     balance += pnl_usd
@@ -139,16 +146,15 @@ def run_backtest(
                         "reason": "stop_loss" if hit_sl else ("take_profit" if hit_tp else "max_hold"),
                     })
                     result.equity_curve.append((bar_ts.to_pydatetime(), balance))
-                    open_position = None
+                    open_positions[asset] = None
                 continue
 
-            if open_position is None:
-                decision = evaluate(spec, feature_row)
-                if decision["action"] == "enter":
-                    open_position = {
-                        "asset": asset, "direction": decision["direction"],
-                        "entry_price": price, "opened_at": bar_ts,
-                    }
+            decision = evaluate(spec, feature_row)
+            if decision["action"] == "enter":
+                open_positions[asset] = {
+                    "asset": asset, "direction": decision["direction"],
+                    "entry_price": price, "opened_at": bar_ts,
+                }
 
     result.total_return_pct = (balance - 10_000.0) / 10_000.0
     if len(returns_per_bar) >= 2:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import backtest.engine as engine_module
 from backtest.dsl import EvidenceTerm, Spec, Threshold
 from backtest.engine import run_backtest
 
@@ -93,3 +94,84 @@ def test_run_backtest_reports_thin_data_window_honestly(tmp_path):
     result = run_backtest(spec, ledger_dir, start, start + timedelta(hours=9), taker_fee=0.00035)
 
     assert result.data_window["oi"]["rows"] == 5
+
+
+def _funding_rows(asset: str, start: datetime, n: int) -> list[dict]:
+    return [
+        {"ts": (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"), "asset": asset, "rate": 0.0003}
+        for i in range(n)
+    ]
+
+
+def _always_enter_long_spec(**overrides) -> Spec:
+    defaults = dict(
+        agent_id="test_spec", spec_version=1, thesis_version=1,
+        universe_include=["FET-PERP"], regime_exclude=[],
+        direction="long", confidence_threshold=0.5, scale_threshold=0.3,
+        evidence=[EvidenceTerm(
+            name="funding_positive", feature="funding_zscore",
+            thresholds=[Threshold(op=">", value=-100.0, weight=0.6), Threshold(op="else", weight=0.0)],
+            missing="veto",
+        )],
+        secondary_evidence=[],
+        stop_loss_pct=0.05, take_profit_pct=0.05, max_hold_hours=1000,
+        leverage=1, position_size_pct=0.10,
+    )
+    defaults.update(overrides)
+    return Spec(**defaults)
+
+
+def test_slippage_reduces_realized_pnl(tmp_path, monkeypatch):
+    # Steady 1%/hour uptrend, long-only spec that enters as soon as it has
+    # enough history and closes on take-profit -- both runs below hit the
+    # exact same bar/reason, so the only variable is slippage.
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    candles = _synthetic_candles("FET-PERP", start, 40, base_price=1.0, drift=0.01)
+    _write_candles(ledger_dir, "candles_1h", "2025-01", candles)
+    _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, 40))
+
+    spec = _always_enter_long_spec(universe_include=["FET-PERP"])
+
+    result_with_slippage = run_backtest(
+        spec, ledger_dir, start, start + timedelta(hours=39), taker_fee=0.0,
+    )
+    assert len(result_with_slippage.trades) >= 1
+
+    monkeypatch.setattr(engine_module, "BACKTEST_SLIPPAGE_PCT", 0.0)
+    result_no_slippage = run_backtest(
+        spec, ledger_dir, start, start + timedelta(hours=39), taker_fee=0.0,
+    )
+    assert len(result_no_slippage.trades) >= 1
+
+    trade_with = result_with_slippage.trades[0]
+    trade_without = result_no_slippage.trades[0]
+    # Same trigger bar/reason in both runs -- slippage doesn't change *when*
+    # a trade closes, only the realized P&L of that close.
+    assert trade_with["closed_at"] == trade_without["closed_at"]
+    assert trade_with["reason"] == trade_without["reason"]
+    assert trade_with["pnl_pct"] < trade_without["pnl_pct"]
+    assert trade_with["pnl_usd"] < trade_without["pnl_usd"]
+    assert result_with_slippage.total_return_pct < result_no_slippage.total_return_pct
+
+
+def test_multi_asset_open_position_does_not_stall_later_assets(tmp_path):
+    # Asset AAA's position opens and never closes within AAA's own data
+    # window (flat price never hits SL/TP, max_hold_hours never reached).
+    # Asset BBB must still get its entries evaluated afterwards.
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    aaa_candles = _synthetic_candles("AAA-PERP", start, 40, base_price=1.0, drift=0.0)
+    bbb_candles = _synthetic_candles("BBB-PERP", start, 40, base_price=1.0, drift=0.01)
+    _write_candles(ledger_dir, "candles_1h", "2025-01-aaa", aaa_candles)
+    _write_candles(ledger_dir, "candles_1h", "2025-01-bbb", bbb_candles)
+    _write_candles(ledger_dir, "funding", "2025-01-aaa", _funding_rows("AAA-PERP", start, 40))
+    _write_candles(ledger_dir, "funding", "2025-01-bbb", _funding_rows("BBB-PERP", start, 40))
+
+    spec = _always_enter_long_spec(universe_include=["AAA-PERP", "BBB-PERP"])
+
+    result = run_backtest(spec, ledger_dir, start, start + timedelta(hours=39), taker_fee=0.0)
+
+    bbb_trades = [t for t in result.trades if t["asset"] == "BBB-PERP"]
+    assert bbb_trades, "BBB should get entries evaluated even though AAA's position never closed"
