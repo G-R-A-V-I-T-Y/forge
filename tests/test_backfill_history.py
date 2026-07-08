@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.backfill_history import backfill
+from scripts.backfill_history import _paginated_get_funding_history, _paginated_get_ohlcv, backfill
 
 
 class _StubClient:
@@ -42,6 +42,64 @@ async def test_backfill_writes_candles_and_funding_to_ledger(tmp_path, monkeypat
     record = json.loads(candles_1h_file.read_text(encoding="utf-8").strip())
     assert record["asset"] == "BTC-PERP"
     assert record["c"] == 100.5
+
+
+class _PagedOhlcvClient:
+    """Simulates candleSnapshot's real single-response page cap: a request
+    spanning more than PAGE_SIZE candles silently returns only the first
+    PAGE_SIZE, exactly what a real 12-month "1h" backfill did (5003 rows
+    back instead of ~8760) before pagination was added."""
+
+    PAGE_SIZE = 3
+
+    def __init__(self, interval_ms: int, all_candles: list[list]):
+        self._interval_ms = interval_ms
+        self._all_candles = all_candles
+
+    async def get_ohlcv(self, asset, interval, lookback_candles=0, start_ms=None, end_ms=None):
+        page = [c for c in self._all_candles if start_ms <= c[0] < end_ms]
+        return page[: self.PAGE_SIZE]
+
+
+@pytest.mark.asyncio
+async def test_paginated_get_ohlcv_retrieves_full_range_across_multiple_pages():
+    interval_ms = 3_600_000  # 1h
+    start_ms = 0
+    all_candles = [
+        [start_ms + i * interval_ms, 100.0, 101.0, 99.0, 100.5, 10.0] for i in range(10)
+    ]
+    client = _PagedOhlcvClient(interval_ms, all_candles)
+
+    result = await _paginated_get_ohlcv(client, "BTC-PERP", "1h", start_ms, start_ms + 10 * interval_ms)
+
+    assert [c[0] for c in result] == [c[0] for c in all_candles]
+
+
+class _PagedFundingClient:
+    """Simulates fundingHistory's real per-response cap the same way."""
+
+    PAGE_SIZE = 2
+
+    def __init__(self, all_funding: list[dict]):
+        self._all_funding = all_funding
+
+    async def get_funding_history(self, asset, start_time_ms):
+        page = [f for f in self._all_funding if f["time"] >= start_time_ms]
+        return page[: self.PAGE_SIZE]
+
+
+@pytest.mark.asyncio
+async def test_paginated_get_funding_history_retrieves_full_range_across_multiple_pages():
+    interval_ms = 3_600_000
+    start_ms = 0
+    all_funding = [
+        {"time": start_ms + i * interval_ms, "fundingRate": 0.0001} for i in range(7)
+    ]
+    client = _PagedFundingClient(all_funding)
+
+    result = await _paginated_get_funding_history(client, "BTC-PERP", start_ms, start_ms + 7 * interval_ms)
+
+    assert [f["time"] for f in result] == [f["time"] for f in all_funding]
 
 
 @pytest.mark.asyncio
