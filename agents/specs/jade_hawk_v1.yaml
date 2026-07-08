@@ -1,0 +1,53 @@
+agent_id: jade_hawk
+spec_version: 1
+thesis_version: 1
+
+universe:
+  include: [SOL-PERP, ETH-PERP, AVAX-PERP, LINK-PERP]
+
+regime_filter:
+  exclude: [trending_bull, trending_bear, crisis]
+
+entry:
+  direction: short
+  confidence_threshold: 0.70
+  scale_threshold: 0.50
+  evidence:
+    - name: vwap_deviation
+      feature: vwap_distance
+      thresholds:
+        - {op: ">", value: 0.03, weight: 0.7}
+        - {op: ">", value: 0.02, weight: 0.5}
+        - {op: ">", value: 0.01, weight: 0.2}
+        - {op: "else", weight: 0.0}
+      missing: veto
+    - name: volume_climax
+      feature: volume_zscore
+      thresholds:
+        - {op: ">", value: 1.5, weight: 0.5}
+        - {op: ">", value: 0.0, weight: 0.2}
+        - {op: "else", weight: -0.3}
+      missing: skip
+  secondary_evidence:
+    - name: rsi_confirmation
+      feature: rsi
+      thresholds:
+        - {op: ">", value: 70, weight: 0.3}
+        - {op: ">", value: 60, weight: 0.1}
+        - {op: "else", weight: 0.0}
+      missing: skip
+    - name: funding_support
+      feature: funding_zscore
+      thresholds:
+        - {op: ">", value: 1.0, weight: 0.3}
+        - {op: "else", weight: -0.2}
+      missing: skip
+
+exit:
+  stop_loss_pct: 0.015
+  take_profit_pct: 0.02
+  max_hold_hours: 4
+
+position:
+  leverage: 3
+  position_size_pct: 0.10

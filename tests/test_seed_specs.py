@@ -17,6 +17,11 @@ def test_seed_spec_is_valid(spec_path):
 
 
 def test_three_seed_specs_exist():
+    # steel_crane was swapped for jade_hawk: steel_crane's primary evidence
+    # (liq_total_usd, missing: veto) can never be non-null since liquidation
+    # history is never backfilled -- permanent veto, not a real backtest.
+    # jade_hawk (VWAP mean reversion) is candle/funding-driven and can
+    # actually be evaluated against real historical data.
     paths = sorted(glob.glob("agents/specs/*.yaml"))
     agent_ids = {load_spec(p).agent_id for p in paths}
-    assert agent_ids == {"silver_basin", "iron_moth", "steel_crane"}
+    assert agent_ids == {"silver_basin", "iron_moth", "jade_hawk"}
