@@ -1,0 +1,44 @@
+agent_id: iron_moth
+spec_version: 1
+thesis_version: 1
+
+universe:
+  include: [SOL-PERP, ETH-PERP, SUI-PERP, AVAX-PERP, LINK-PERP]
+
+regime_filter:
+  exclude: [range_high_vol]
+
+entry:
+  direction: long
+  confidence_threshold: 0.70
+  scale_threshold: 0.50
+  evidence:
+    - name: momentum_acceleration
+      feature: momentum_acceleration
+      thresholds:
+        - {op: ">", value: 0.001, weight: 0.5}
+        - {op: ">", value: 0.0002, weight: 0.2}
+        - {op: "else", weight: -0.4}
+      missing: veto
+    - name: volatility_adjusted
+      feature: atr_percentile
+      thresholds:
+        - {op: "between", value: [0.3, 0.7], weight: 0.6}
+        - {op: "else", weight: 0.1}
+      missing: skip
+  secondary_evidence:
+    - name: volume_confirmation
+      feature: volume_percentile_14d
+      thresholds:
+        - {op: ">", value: 0.5, weight: 0.2}
+        - {op: "else", weight: -0.2}
+      missing: skip
+
+exit:
+  stop_loss_pct: 0.025
+  take_profit_pct: 0.05
+  max_hold_hours: 12
+
+position:
+  leverage: 3
+  position_size_pct: 0.12
