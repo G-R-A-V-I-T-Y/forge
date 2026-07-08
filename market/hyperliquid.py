@@ -149,11 +149,20 @@ class HyperliquidClient:
         return asset.replace("-PERP", "")
 
     async def get_ohlcv(
-        self, asset: str, interval: str, lookback_candles: int
+        self, asset: str, interval: str, lookback_candles: int,
+        start_ms: int | None = None, end_ms: int | None = None,
     ) -> list[list]:
+        """Fetch OHLCV candles. Default behavior (start_ms/end_ms omitted)
+        is unchanged: `lookback_candles` back from now. Pass both to fetch
+        an explicit historical range instead -- used by
+        scripts/backfill_history.py, which needs candles from a year ago,
+        not "N candles back from the current moment"."""
         now_ms = int(time.time() * 1000)
         interval_ms = _interval_to_ms(interval)
-        start_ms = now_ms - lookback_candles * interval_ms
+        if start_ms is None:
+            start_ms = now_ms - lookback_candles * interval_ms
+        if end_ms is None:
+            end_ms = now_ms
         data = await self._post(
             {
                 "type": "candleSnapshot",
@@ -161,7 +170,7 @@ class HyperliquidClient:
                     "coin": self._normalize_asset(asset),
                     "interval": interval,
                     "startTime": start_ms,
-                    "endTime": now_ms,
+                    "endTime": end_ms,
                 },
             }
         )

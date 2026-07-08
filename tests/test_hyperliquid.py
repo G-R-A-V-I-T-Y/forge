@@ -123,3 +123,27 @@ async def test_get_funding_history_casts_fundingrate_and_premium_to_float():
     # Non-numeric fields are left untouched
     assert history[0]["coin"] == "BTC"
     assert history[0]["time"] == 1000
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_ohlcv_explicit_range_overrides_default():
+    """When start_ms/end_ms are passed, they're used verbatim instead of
+    being derived from lookback_candles relative to now."""
+    import json
+
+    captured = {}
+
+    def _capture(request):
+        body = json.loads(request.content)
+        captured["startTime"] = body["req"]["startTime"]
+        captured["endTime"] = body["req"]["endTime"]
+        return httpx.Response(200, json=[])
+
+    respx.post(BASE).mock(side_effect=_capture)
+
+    async with HyperliquidClient() as client:
+        await client.get_ohlcv("BTC-PERP", "1h", lookback_candles=100, start_ms=1000, end_ms=2000)
+
+    assert captured["startTime"] == 1000
+    assert captured["endTime"] == 2000
