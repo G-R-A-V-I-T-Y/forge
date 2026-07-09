@@ -204,9 +204,73 @@ class TestSpawner:
         ).fetchone()[0]
         assert count == 1
 
-    def test_check_against_graveyard(self, conn):
-        """Stub: always returns True (unique)."""
-        assert check_against_graveyard(conn, "any thesis") is True
+    def test_check_against_graveyard_no_terminated(self, conn):
+        """No terminated agents → accepted by default."""
+        ok, reason = check_against_graveyard(conn, "any thesis text")
+        assert ok is True
+        assert reason == ""
+
+    def test_check_against_graveyard_rejects_similar(self, conn):
+        """Thesis with high word overlap to a terminated agent → rejected."""
+        ts = _now()
+        conn.execute(
+            "INSERT INTO agents (id, name, status, spawn_date, cull_date, "
+            "config_json, current_thesis_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("dead_trader", "dead_trader", "terminated", ts, ts, "{}", 1),
+        )
+        conn.execute(
+            "INSERT INTO theses (agent_id, version, text, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "dead_trader",
+                1,
+                "momentum trading using ema crossover with 20 period "
+                "and 50 period on sol perpetual futures",
+                ts,
+            ),
+        )
+        conn.commit()
+
+        # Shares most word tokens with the above thesis
+        similar = (
+            "momentum trading using ema crossover with 10 period "
+            "and 30 period on btc perpetual futures"
+        )
+        ok, reason = check_against_graveyard(conn, similar)
+        assert ok is False
+        assert "dead_trader" in reason
+        assert "Jaccard" in reason
+
+    def test_check_against_graveyard_accepts_dissimilar(self, conn):
+        """Thesis with low word overlap to a terminated agent → accepted."""
+        ts = _now()
+        conn.execute(
+            "INSERT INTO agents (id, name, status, spawn_date, cull_date, "
+            "config_json, current_thesis_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("dead_trader", "dead_trader", "terminated", ts, ts, "{}", 1),
+        )
+        conn.execute(
+            "INSERT INTO theses (agent_id, version, text, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "dead_trader",
+                1,
+                "momentum trading using ema crossover with 20 period "
+                "and 50 period on sol perpetual futures",
+                ts,
+            ),
+        )
+        conn.commit()
+
+        different = (
+            "statistical arbitrage between btc and eth using "
+            "cointegration with mean reversion in two hour window"
+        )
+        ok, reason = check_against_graveyard(conn, different)
+        assert ok is True
+        assert reason == ""
 
     def test_generate_agent_name_does_not_return_reserved(self, conn):
         seed_agent(conn, "iron_moth")

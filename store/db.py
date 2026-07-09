@@ -60,6 +60,7 @@ _AGENTS_MIGRATION_COLUMNS = {
     "wallet_address": "TEXT",
     "keystore_path": "TEXT",
     "live_enabled": "INTEGER DEFAULT 0",
+    "active_spec_version": "INTEGER NOT NULL DEFAULT 0",
 }
 
 

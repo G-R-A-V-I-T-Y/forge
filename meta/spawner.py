@@ -1,5 +1,7 @@
 """meta/spawner.py — Agent spawning and name generation."""
 
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -213,17 +215,210 @@ def spawn_agent(
     return dict(row) if row else {"id": name, "name": name, "status": status}
 
 
-def check_against_graveyard(conn, thesis_text: str) -> bool:
-    """Check if a thesis is substantively similar to a terminated agent's thesis.
+def _tokenize(text: str) -> list[str]:
+    """Tokenize thesis text into lowercase word tokens (3+ characters)."""
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return [t for t in tokens if len(t) >= 3]
 
-    For now, always returns True (unique — no similar thesis found).
-    A real implementation would do an LLM similarity check against terminated
-    agents' thesis texts stored in the `theses` table.
+
+def check_against_graveyard(
+    conn, thesis_text: str, config: dict | None = None
+) -> tuple[bool, str]:
+    """Check if a thesis is substantively similar to any terminated agent's thesis.
+
+    Uses Jaccard similarity on word-level token sets with TF-IDF-like weighting
+    via frequency filtering: words appearing in >80% of terminated theses are
+    treated as corpus-level stop words (only when >=3 terminated theses exist).
+
+    The comparison result is logged to the ``evaluations`` table.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Active DB connection.
+    thesis_text : str
+        The proposed thesis text to check.
+    config : dict or None
+        Optional config dict; may contain ``"graveyard_similarity_threshold"``
+        (default 0.45).
+
+    Returns
+    -------
+    tuple[bool, str]
+        ``(True, "")`` if the thesis is unique enough,
+        ``(False, "reason...")`` if too similar to a terminated agent's thesis.
     """
-    return True
+    if config is None:
+        config = {}
+    threshold = float(config.get("graveyard_similarity_threshold", 0.45))
+
+    # Fetch latest thesis for every terminated agent
+    rows = conn.execute("""
+        SELECT a.name AS agent_name, t.text AS thesis_text
+        FROM agents a
+        JOIN theses t ON t.agent_id = a.id
+        WHERE a.status = 'terminated'
+          AND t.version = a.current_thesis_version
+    """).fetchall()
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # --- No terminated agents → accept by default ---
+    if not rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO agents "
+            "(id, name, status, spawn_date, config_json, current_thesis_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("__graveyard__", "__graveyard__", "system", now, "{}", 0),
+        )
+        conn.execute(
+            "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, "
+            "metrics_json, decision, reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "__graveyard__",
+                now,
+                0,
+                json.dumps({"compared_count": 0, "similarity_max": None}),
+                "ACCEPT",
+                "No terminated agents found — thesis accepted by default",
+            ),
+        )
+        conn.commit()
+        return (True, "")
+
+    # Tokenize the new thesis
+    new_tokens = _tokenize(thesis_text)
+    if not new_tokens:
+        conn.execute(
+            "INSERT OR IGNORE INTO agents "
+            "(id, name, status, spawn_date, config_json, current_thesis_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("__graveyard__", "__graveyard__", "system", now, "{}", 0),
+        )
+        conn.execute(
+            "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, "
+            "metrics_json, decision, reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "__graveyard__",
+                now,
+                0,
+                json.dumps({"compared_count": len(rows), "similarity_max": 0.0}),
+                "ACCEPT",
+                "New thesis contains no tokens — accepted by default",
+            ),
+        )
+        conn.commit()
+        return (True, "")
+
+    # Tokenize all terminated theses and build document-frequency map
+    graveyard_entries: list[tuple[str, set[str]]] = []
+    doc_freq: dict[str, int] = {}
+    for row in rows:
+        tokens = _tokenize(row["thesis_text"])
+        unique = set(tokens)
+        graveyard_entries.append((row["agent_name"], unique))
+        for tok in unique:
+            doc_freq[tok] = doc_freq.get(tok, 0) + 1
+
+    if not graveyard_entries:
+        conn.execute(
+            "INSERT OR IGNORE INTO agents "
+            "(id, name, status, spawn_date, config_json, current_thesis_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("__graveyard__", "__graveyard__", "system", now, "{}", 0),
+        )
+        conn.execute(
+            "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, "
+            "metrics_json, decision, reason) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "__graveyard__",
+                now,
+                0,
+                json.dumps({"compared_count": len(rows), "similarity_max": 0.0}),
+                "ACCEPT",
+                "All terminated theses are empty — accepted by default",
+            ),
+        )
+        conn.commit()
+        return (True, "")
+
+    # TF-IDF-like frequency filtering: words appearing in >80% of terminated
+    # theses are too common to be discriminative.  Only meaningful with enough
+    # documents to estimate document frequency.
+    doc_count = len(graveyard_entries)
+    stop_words: set[str] = set()
+    if doc_count >= 3:
+        max_df_ratio = 0.80
+        stop_words = {
+            word
+            for word, freq in doc_freq.items()
+            if freq / doc_count >= max_df_ratio
+        }
+
+    new_set = set(new_tokens) - stop_words
+
+    # Compare against each terminated thesis
+    max_similarity = 0.0
+    most_similar_agent: str | None = None
+
+    for agent_name, existing_tokens in graveyard_entries:
+        existing_set = existing_tokens - stop_words
+
+        if not new_set and not existing_set:
+            similarity = 1.0
+        elif not new_set or not existing_set:
+            similarity = 0.0
+        else:
+            intersection = new_set & existing_set
+            union = new_set | existing_set
+            similarity = len(intersection) / len(union)
+
+        if similarity > max_similarity:
+            max_similarity = similarity
+            most_similar_agent = agent_name
+
+    if max_similarity > threshold:
+        reason = (
+            f"similar to terminated agent {most_similar_agent}: "
+            f"Jaccard similarity {max_similarity:.3f} exceeds threshold {threshold}"
+        )
+    else:
+        reason = (
+            f"maximum Jaccard similarity {max_similarity:.3f} "
+            f"is within threshold {threshold}"
+        )
+
+    decision = "REJECT" if max_similarity > threshold else "ACCEPT"
+
+    conn.execute(
+        "INSERT OR IGNORE INTO agents "
+        "(id, name, status, spawn_date, config_json, current_thesis_version) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("__graveyard__", "__graveyard__", "system", now, "{}", 0),
+    )
+    conn.execute(
+        "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, "
+        "metrics_json, decision, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "__graveyard__",
+            now,
+            0,
+            json.dumps({
+                "similarity_max": round(max_similarity, 4),
+                "threshold": threshold,
+                "most_similar_agent": most_similar_agent,
+                "compared_count": len(graveyard_entries),
+            }),
+            decision,
+            reason,
+        ),
+    )
+    conn.commit()
+
+    if max_similarity > threshold:
+        return (False, reason)
+    return (True, "")
 
 
 def _serialise_config(overrides: dict) -> str:
-    import json
-
     return json.dumps(overrides)

@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS agents (
     last_model_used TEXT,
     wallet_address TEXT,
     keystore_path TEXT,
-    live_enabled INTEGER DEFAULT 0
+    live_enabled INTEGER DEFAULT 0,
+    active_spec_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS theses (
@@ -153,6 +154,22 @@ CREATE TABLE IF NOT EXISTS decisions (
     counterfactual_was_better INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
+
+CREATE TABLE IF NOT EXISTS specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    thesis_version INTEGER NOT NULL,
+    yaml_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'inactive',
+    deployed_at TEXT,
+    rejection_reason TEXT,
+    validation_errors TEXT,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_specs_agent ON specs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_specs_agent_status ON specs(agent_id, status);
 
 -- INDEXES
 -- (store/db.py.init_schema executes table-creation statements, then runs
