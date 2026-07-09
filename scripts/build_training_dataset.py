@@ -2,25 +2,36 @@
 """
 build_training_dataset.py
 
-Offline, read-only post-processing of the Phase 1 heartbeat capture
-(`market/heartbeat.py`'s `append_historical()`) into a flat feature/label
-table for model training.
+Offline, read-only post-processing of the heartbeat ledger
+(``ledger/{candles_5m,funding,oi,liquidations}/{YYYY-MM}.jsonl`` or
+``data/historical_data/YYYY-MM-DD.jsonl`` for backward compatibility)
+into a flat feature/label table for model training.
 
-Reads:   data/historical_data/YYYY-MM-DD.jsonl  (one heartbeat packet per line)
+Reads:   ledger/{candles_5m,funding,oi,liquidations}/{YYYY-MM}.jsonl|parquet
+         (primary, when ``--ledger-dir`` is provided or ledger files exist)
+         OR
+         data/historical_data/YYYY-MM-DD.jsonl  (legacy fallback)
 Writes:  data/historical_data/training_dataset.parquet  (one row per asset per
          heartbeat timestamp)
 
-This script never touches the JSONL files it reads, has no import
-dependency on `market/heartbeat.py`, and is not part of the live heartbeat
-cycle -- it is meant to be run by hand or from a scheduled batch job.
+This script has no import dependency on ``market/heartbeat.py`` and is not
+part of the live heartbeat cycle -- it is meant to be run by hand or from a
+scheduled batch job.
 
-Each packet has the shape:
-    {"timestamp": "...Z", "assets": {"<ASSET>-PERP": {...fields...}, ...},
-     "cross_asset": {...}, "regime": {...}}
+Ledger data source (``--ledger-dir``):
+  Candles_5m, funding, OI, and (optionally) liquidation records are read
+  from their monthly partitions, then merged per asset on timestamp using
+  backward-fill (asof join) so that each candle row carries the most recent
+  funding rate and OI value known at that moment.
 
-Per-asset fields are flattened dynamically (whatever scalar fields exist on
-the packet at capture time -- see `_flatten_asset()`), plus forward-looking
-labels computed at each configured horizon:
+Legacy data source (no ``--ledger-dir``):
+  Reads heartbeat JSONL files from ``data/historical_data/``. Each file
+  contains one heartbeat packet per line with the shape:
+      {"timestamp": "...Z", "assets": {"<ASSET>-PERP": {...fields...}, ...},
+       "cross_asset": {...}, "regime": {...}}
+  Per-asset scalar fields are flattened dynamically.
+
+Forward-looking labels at each configured horizon:
   - fwd_return_<h>          forward pct return of price
   - fwd_vol_<h>             realized volatility (stdev of pct changes) over the window
   - fwd_maxdd_<h>           max drawdown (most negative cumulative return) over the window
@@ -77,6 +88,10 @@ DEFAULT_TP_PCT = 0.05
 # rather than a scalar -- excluded from the flattened feature columns since
 # they don't fit a flat row/column table.
 _NON_SCALAR_ASSET_FIELDS = {"candles_5m", "candles_30m", "candles_4h"}
+
+# Default ledger directory (same as store/ledger.LEDGER_DIR but independent
+# so this script has no import-time coupling to the live system).
+LEDGER_DIR = Path(__file__).resolve().parent.parent / "ledger"
 
 
 def horizon_label(minutes: int) -> str:
@@ -161,6 +176,135 @@ def _rows_from_packets(packets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for pkt in packets:
         for asset_key, asset in (pkt.get("assets") or {}).items():
             rows.append(_build_row(pkt, asset_key, asset))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Ledger reading (alternative to JSONL path)
+# ---------------------------------------------------------------------------
+
+
+def _read_ledger_partitions(
+    ledger_dir: Path, kind: str,
+    start_date: date | None, end_date: date | None,
+) -> pd.DataFrame:
+    """Read all monthly partitions for a ledger *kind*, filtered by date.
+
+    Reads both ``.parquet`` (preferred) and ``.jsonl`` files in
+    ``ledger_dir / kind /``, sorts by timestamp, and returns a DataFrame
+    with a parsed ``_ts`` column. Returns empty DataFrame if no files
+    exist.
+    """
+    kind_dir = ledger_dir / kind
+    if not kind_dir.is_dir():
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    for p in sorted(kind_dir.glob("*.parquet")):
+        frames.append(pd.read_parquet(p))
+    for p in sorted(kind_dir.glob("*.jsonl")):
+        frames.append(pd.read_json(p, lines=True))
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    df["_ts"] = pd.to_datetime(df["ts"], utc=True)
+    if start_date is not None or end_date is not None:
+        mask = pd.Series([True] * len(df))
+        if start_date is not None:
+            mask &= df["_ts"] >= pd.Timestamp(start_date, tz="UTC")
+        if end_date is not None:
+            mask &= df["_ts"] < pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+        df = df[mask]
+    return df.sort_values("_ts").reset_index(drop=True)
+
+
+def _rows_from_ledger(
+    ledger_dir: Path,
+    start_date: date | None,
+    end_date: date | None,
+) -> list[dict[str, Any]]:
+    """Reconstruct per-asset-per-timestamp rows from ledger partitions.
+
+    Candles_5m is the primary clock; funding and OI are backward-filled
+    (asof-merged) so each candle row carries the most recent funding rate
+    and OI value known at that moment. Liquidation fields are joined the
+    same way when available.
+    """
+    candles = _read_ledger_partitions(ledger_dir, "candles_5m", start_date, end_date)
+    if candles.empty:
+        return []
+
+    funding = _read_ledger_partitions(ledger_dir, "funding", start_date, end_date)
+    oi = _read_ledger_partitions(ledger_dir, "oi", start_date, end_date)
+    liq = _read_ledger_partitions(ledger_dir, "liquidations", start_date, end_date)
+
+    rows: list[dict[str, Any]] = []
+    # Process one asset at a time so merge_asof runs per-asset (avoiding
+    # cross-asset contamination during the backward-fill).
+    for asset_key in sorted(candles["asset"].unique()):
+        asset_c = candles[candles["asset"] == asset_key].sort_values("_ts").copy()
+
+        if not funding.empty:
+            asset_f = funding[funding["asset"] == asset_key].sort_values("_ts")
+            if not asset_f.empty:
+                asset_c = pd.merge_asof(
+                    asset_c, asset_f[["_ts", "asset", "rate"]],
+                    on="_ts", by="asset", direction="backward",
+                )
+                asset_c.rename(columns={"rate": "funding"}, inplace=True)
+            else:
+                asset_c["funding"] = None
+        else:
+            asset_c["funding"] = None
+
+        if not oi.empty:
+            asset_o = oi[oi["asset"] == asset_key].sort_values("_ts")
+            if not asset_o.empty:
+                asset_c = pd.merge_asof(
+                    asset_c, asset_o[["_ts", "asset", "oi"]],
+                    on="_ts", by="asset", direction="backward",
+                )
+                asset_c.rename(columns={"oi": "open_interest"}, inplace=True)
+            else:
+                asset_c["open_interest"] = None
+        else:
+            asset_c["open_interest"] = None
+
+        if not liq.empty:
+            asset_l = liq[liq["asset"] == asset_key].sort_values("_ts")
+            if not asset_l.empty:
+                asset_c = pd.merge_asof(
+                    asset_c, asset_l[["_ts", "asset", "total_usd", "long_usd", "short_usd"]],
+                    on="_ts", by="asset", direction="backward",
+                )
+                asset_c.rename(
+                    columns={
+                        "total_usd": "liq_total_usd",
+                        "long_usd": "liq_long_usd",
+                        "short_usd": "liq_short_usd",
+                    },
+                    inplace=True,
+                )
+
+        for _, r in asset_c.iterrows():
+            row: dict[str, Any] = {
+                "timestamp": r["ts"],
+                "asset_key": r["asset"],
+                "asset.price": r["c"],
+            }
+            if pd.notna(r.get("funding")):
+                row["asset.funding"] = float(r["funding"])
+            if pd.notna(r.get("volume")) and r.get("volume") is not None:
+                row["asset.volume"] = float(r["v"])
+            if pd.notna(r.get("open_interest")):
+                row["asset.open_interest"] = float(r["open_interest"])
+            if pd.notna(r.get("liq_total_usd")):
+                row["asset.liq_total_usd"] = float(r["liq_total_usd"])
+            if pd.notna(r.get("liq_long_usd")):
+                row["asset.liq_long_usd"] = float(r["liq_long_usd"])
+            if pd.notna(r.get("liq_short_usd")):
+                row["asset.liq_short_usd"] = float(r["liq_short_usd"])
+            rows.append(row)
+
     return rows
 
 
@@ -337,27 +481,54 @@ def build_dataset(
     end_date: date | None = None,
     sl_pct: float = DEFAULT_SL_PCT,
     tp_pct: float = DEFAULT_TP_PCT,
+    ledger_dir: Path | None = None,
 ) -> pd.DataFrame:
-    """Build the full training dataset from JSONL files and write it to
-    Parquet. Returns the resulting DataFrame."""
-    data_dir = data_dir if data_dir is not None else DATA_DIR
+    """Build the full training dataset and write it to Parquet.
+
+    Two data-source modes (mutually exclusive):
+      1. **Ledger** — set *ledger_dir* (or leave as ``None`` and the default
+         ``LEDGER_DIR`` will be used if its ``candles_5m`` subdirectory
+         exists). Reads from ``ledger/{candles_5m,funding,oi}/{YYYY-MM}.{jsonl,parquet}``.
+      2. **Legacy JSONL** — set *data_dir* to a directory of heartbeat JSONL
+         files each containing one heartbeat packet per line.
+
+    Returns the resulting DataFrame.
+    """
     output_path = output_path if output_path is not None else DEFAULT_OUTPUT
     horizons = (
         horizon_minutes if horizon_minutes is not None else DEFAULT_HORIZONS_MINUTES
     )
 
-    jsonl_files = _all_jsonl_files(data_dir, start_date, end_date)
-    if not jsonl_files:
-        print(f"No *.jsonl files found in {data_dir} for the requested date range")
-        return pd.DataFrame()
+    # ----- Decide data source -----
+    use_ledger = ledger_dir is not None  # explicit --ledger-dir
+    if not use_ledger and data_dir is None:
+        # Auto-detect when neither source is explicitly given: default ledger
+        # takes priority if it has a candles_5m subdirectory.
+        if (LEDGER_DIR / "candles_5m").is_dir():
+            use_ledger = True
+            ledger_dir = LEDGER_DIR
 
-    all_rows: list[dict[str, Any]] = []
-    for jsonl_path in jsonl_files:
-        all_rows.extend(_rows_from_packets(_load_jsonl(jsonl_path)))
-
-    if not all_rows:
-        print("No rows extracted from JSONL files")
-        return pd.DataFrame()
+    if use_ledger:
+        effective_ledger = ledger_dir if ledger_dir is not None else LEDGER_DIR
+        all_rows = _rows_from_ledger(effective_ledger, start_date, end_date)
+        source_desc = str(effective_ledger)
+        if not all_rows:
+            print(f"No candle rows found in ledger at {effective_ledger} for the date range")
+            return pd.DataFrame()
+    else:
+        # Legacy JSONL fallback
+        data_dir = data_dir if data_dir is not None else DATA_DIR
+        jsonl_files = _all_jsonl_files(data_dir, start_date, end_date)
+        if not jsonl_files:
+            print(f"No *.jsonl files found in {data_dir} for the requested date range")
+            return pd.DataFrame()
+        all_rows = []
+        for jsonl_path in jsonl_files:
+            all_rows.extend(_rows_from_packets(_load_jsonl(jsonl_path)))
+        source_desc = str(data_dir)
+        if not all_rows:
+            print("No rows extracted from JSONL files")
+            return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -367,7 +538,8 @@ def build_dataset(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, engine="pyarrow", index=False)
-    print(f"Wrote {len(df)} rows, {len(df.columns)} columns to {output_path}")
+    print(f"Wrote {len(df)} rows, {len(df.columns)} columns to {output_path} "
+          f"(source: {source_desc})")
 
     return df
 
@@ -383,14 +555,22 @@ def _parse_date(value: str) -> date:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build training dataset from heartbeat JSONL"
+        description="Build training dataset from heartbeat ledger or legacy JSONL"
+    )
+    parser.add_argument(
+        "-l",
+        "--ledger-dir",
+        type=Path,
+        default=None,
+        help="Ledger directory with candles_5m/funding/oi partitions "
+             "(default: auto-detect ledger/; fall back to --data-dir JSONL)",
     )
     parser.add_argument(
         "-d",
         "--data-dir",
         type=Path,
         default=None,
-        help=f"Directory with *.jsonl files (default: {DATA_DIR})",
+        help="Directory with legacy *.jsonl files (default: %(default)s)",
     )
     parser.add_argument(
         "-o",
@@ -403,13 +583,13 @@ def main() -> None:
         "--start-date",
         type=_parse_date,
         default=None,
-        help="Earliest date (YYYY-MM-DD) of *.jsonl files to include, inclusive",
+        help="Earliest date (YYYY-MM-DD) of data to include, inclusive",
     )
     parser.add_argument(
         "--end-date",
         type=_parse_date,
         default=None,
-        help="Latest date (YYYY-MM-DD) of *.jsonl files to include, inclusive",
+        help="Latest date (YYYY-MM-DD) of data to include, inclusive",
     )
     parser.add_argument(
         "-H",
@@ -441,6 +621,7 @@ def main() -> None:
         end_date=args.end_date,
         sl_pct=args.sl_pct,
         tp_pct=args.tp_pct,
+        ledger_dir=args.ledger_dir,
     )
 
 

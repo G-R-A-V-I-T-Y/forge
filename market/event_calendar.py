@@ -50,6 +50,33 @@ class EventCalendar:
                 self._cache[month_key] = pd.DataFrame()
         return self._cache[month_key]
 
+    def _filter_events(
+        self,
+        events_df: pd.DataFrame,
+        universe: list[str],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> pd.DataFrame:
+        """Filter events by time range and asset relevance to universe."""
+        if events_df.empty:
+            return events_df
+
+        mask = pd.Series(True, index=events_df.index)
+
+        # Time range filter
+        if "scheduled_time" in events_df.columns:
+            event_times = pd.to_datetime(events_df["scheduled_time"], utc=True)
+            mask &= (event_times >= pd.Timestamp(start_time, tz="UTC")) & (
+                event_times <= pd.Timestamp(end_time, tz="UTC")
+            )
+
+        # Asset relevance filter: keep events with no asset (macro) or
+        # with an asset in the tracked universe
+        if "asset" in events_df.columns and universe:
+            mask &= events_df["asset"].isna() | events_df["asset"].isin(universe)
+
+        return events_df.loc[mask].reset_index(drop=True)
+
     def get_events_for_heartbeat(
         self,
         universe: list[str],
@@ -87,20 +114,20 @@ class EventCalendar:
         for _, event in filtered_events.iterrows():
             event_dict = event.to_dict()
 
-                # Parse datetime fields
-                if "scheduled_time" in event_dict:
-                    event_dict["scheduled_time"] = datetime.fromisoformat(
-                        event_dict["scheduled_time"].replace("Z", "+00:00")
-                    )
+            # Parse datetime fields
+            if "scheduled_time" in event_dict:
+                event_dict["scheduled_time"] = datetime.fromisoformat(
+                    event_dict["scheduled_time"].replace("Z", "+00:00")
+                )
 
-                # For features, we need to flatten the event data
-                # Create a feature dict that can be used by the agent decision loop
-                event_features = self._event_to_features(event_dict)
-                if event_features["asset_relevant"] and event_features["asset_relevant"] in universe:
-                    asset = event_features["asset_relevant"]
-                    if asset not in asset_events:
-                        asset_events[asset] = []
-                    asset_events[asset].append(event_features)
+            # For features, we need to flatten the event data
+            # Create a feature dict that can be used by the agent decision loop
+            event_features = self._event_to_features(event_dict)
+            if event_features["asset_relevant"] and event_features["asset_relevant"] in universe:
+                asset = event_features["asset_relevant"]
+                if asset not in asset_events:
+                    asset_events[asset] = []
+                asset_events[asset].append(event_features)
 
         # Organize cross-asset signals by event family
         cross_asset_signals = {}

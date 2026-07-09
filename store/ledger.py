@@ -11,6 +11,10 @@ append_ledger_record() never raises -- a ledger write must never block or
 crash the caller's primary operation (heartbeat, decision cycle, trade
 close), the same best-effort contract every write path into this ledger
 follows (see e.g. market/heartbeat.py's export_heartbeat_to_ledger()).
+
+read_partition() provides read access to any monthly partition as a
+DataFrame and is used by market/event_calendar.py, scripts/build_training_dataset.py,
+and backtest/engine.py.
 """
 from __future__ import annotations
 
@@ -18,6 +22,9 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +68,32 @@ def append_ledger_record(
             f.write(json.dumps(record, default=str) + "\n")
     except Exception:
         logger.warning("failed to append ledger record kind=%s", kind, exc_info=True)
+
+
+def read_partition(
+    kind: str,
+    when: datetime,
+    ledger_dir: str | Path | None = None,
+) -> pd.DataFrame:
+    """Read one monthly partition of the ledger as a DataFrame.
+
+    Loads ``ledger/{kind}/{YYYY-MM}.{parquet,jsonl}`` for the month of
+    *when*.  Parquet is preferred when both exist (faster reads).  Returns
+    an empty DataFrame if the file does not exist or cannot be parsed.
+
+    This is the public companion to the private ``_partition_path()`` used
+    by ``append_ledger_record()``, and mirrors the partition-discovery
+    pattern in ``backtest/engine.py``'s ``_read_partitions()`` helper.
+    """
+    effective_dir = Path(ledger_dir) if ledger_dir is not None else Path(LEDGER_DIR)
+    month = when.strftime("%Y-%m")
+    path_parquet = effective_dir / kind / f"{month}.parquet"
+    path_jsonl = effective_dir / kind / f"{month}.jsonl"
+    try:
+        if path_parquet.exists():
+            return pd.read_parquet(path_parquet)
+        if path_jsonl.exists():
+            return pd.read_json(path_jsonl, lines=True)
+    except Exception:
+        logger.warning("failed to read ledger partition kind=%s month=%s", kind, month, exc_info=True)
+    return pd.DataFrame()

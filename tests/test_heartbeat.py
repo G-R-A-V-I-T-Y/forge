@@ -348,7 +348,7 @@ async def test_generate_heartbeat_end_to_end_structure(stub_config):
     async with provider:
         packet = await generate_heartbeat(provider, stub_config)
 
-    assert set(packet.keys()) == {"timestamp", "assets", "cross_asset", "regime"}
+    assert set(packet.keys()) == {"timestamp", "assets", "cross_asset", "regime", "events"}
     assert len(packet["assets"]) == len(stub_config["universe"])
     for asset in stub_config["universe"]:
         assert asset in packet["assets"]

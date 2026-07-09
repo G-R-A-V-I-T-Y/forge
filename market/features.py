@@ -237,3 +237,53 @@ def funding_acceleration(
     if len(vals) < 3:
         return None
     return (vals[-1] - vals[-3]) / 2.0
+
+
+@register("statistical_forecast")
+def statistical_forecast(
+    candles: list[list], closes: list[float], highs: list[float],
+    lows: list[float], volumes: list[float], fields: dict,
+    raw_data: dict,
+) -> dict | None:
+    """Regime-conditioned empirical return distribution statistics.
+
+    Computes the mean return, standard deviation, and probability of an up
+    move over a trailing window of N periods (default 48 x 5m = 4 hours).
+    The window size is configurable via ``raw_data.get("forecast_periods", 48)``
+    so it can be tuned per asset or per market regime without changing code.
+
+    Returns a dict with three keys:
+      - ``statistical_forecast_return`` — mean of the per-period returns
+      - ``statistical_forecast_vol`` — standard deviation of the per-period returns
+      - ``statistical_forecast_up_prob`` — fraction of periods with a positive return
+
+    Returns ``None`` if insufficient candle history exists for the requested
+    window (requires at least ``periods + 1`` closes).
+    """
+    periods = raw_data.get("forecast_periods", 48)
+    if len(closes) < periods + 1:
+        return None
+
+    # Compute per-period simple returns over the trailing window.
+    # closes[-periods-1] is the price at the start of the window;
+    # closes[-periods:] are the prices at each period boundary, giving
+    # us `periods` returns in total.
+    start_idx = len(closes) - periods - 1
+    returns = [
+        (closes[i] - closes[i - 1]) / closes[i - 1]
+        for i in range(start_idx + 1, len(closes))
+        if closes[i - 1] > 0
+    ]
+
+    if len(returns) < 2:
+        return None
+
+    mean_ret = statistics.mean(returns)
+    std_ret = statistics.stdev(returns)
+    up_prob = sum(1 for r in returns if r > 0) / len(returns)
+
+    return {
+        "statistical_forecast_return": mean_ret,
+        "statistical_forecast_vol": std_ret,
+        "statistical_forecast_up_prob": up_prob,
+    }

@@ -38,6 +38,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
+from market.event_calendar import read_events_for_heartbeat
 from market.features import FEATURE_REGISTRY
 from market.regime import classify_regime
 from store.ledger import append_ledger_record
@@ -111,6 +112,9 @@ PER_ASSET_FIELDS = [
     "candles_5m", "candles_30m", "candles_4h",
     # Liquidation fields (Coinalyze REST, 15-min lookback)
     "liq_total_usd", "liq_long_usd", "liq_short_usd",
+    # Statistical forecast features (trailing return distribution)
+    "statistical_forecast_return", "statistical_forecast_vol",
+    "statistical_forecast_up_prob",
 ]
 
 # Resampling factors (in units of 5m candles) for the longer-horizon
@@ -465,17 +469,32 @@ def compute_replayable_fields(
         "liq_short_usd": liq_data.get("liq_short_usd") if liq_data else None,
     }
 
+    # Pre-initialise multi-key feature outputs so they are always present
+    # in the result dict even when the registered function fails (the
+    # exception handler only sets the single registered key to None).
+    for _k in (
+        "statistical_forecast_return", "statistical_forecast_vol",
+        "statistical_forecast_up_prob",
+    ):
+        result[_k] = None
+
     # raw_data shape FEATURE_REGISTRY functions expect: only the replayable
     # inputs they were ever documented to need (funding_history for
     # funding_acceleration; nothing here needs book/trades).
     raw_data_for_features = {"funding_history": funding_history}
     for feature_name, feature_fn in FEATURE_REGISTRY.items():
         try:
-            result[feature_name] = feature_fn(
+            val = feature_fn(
                 candles=candles, closes=closes, highs=highs,
                 lows=lows, volumes=volumes, fields=result,
                 raw_data=raw_data_for_features,
             )
+            if isinstance(val, dict):
+                # Dict-returning features (e.g. statistical_forecast)
+                # spread their keys directly into the output.
+                result.update(val)
+            else:
+                result[feature_name] = val
         except Exception:
             result[feature_name] = None
 
@@ -998,14 +1017,19 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         async with sem:
             return asset, await _fetch_asset_snapshot(provider, asset)
 
+    # Fire concurrent I/O tasks: Fear & Greed, regime tag, Coinalyze
     fear_index_task = asyncio.create_task(_fetch_fear_greed())
     regime_tag_task = asyncio.create_task(_fetch_regime_tag(provider))
-
-    # Fetch Coinalyze liquidation data once for the full universe (batched)
     liq_task = _fetch_liquidations_batch(universe, coinalyze_key)
 
     raw_results = await asyncio.gather(*[_one(a) for a in universe])
     liq_data_by_asset = await liq_task
+    # Coinalyze returns {asset: {field: value}}; heartbeat expects {field: value}
+    # unwrap the nested structure before passing to _compute_asset_fields
+    unwrapped_liq_data = {}
+    for asset, fields in liq_data_by_asset.items():
+        if isinstance(fields, dict) and "liq_total_usd" in fields:
+            unwrapped_liq_data[asset] = fields
 
     assets_fields: dict[str, dict] = {}
     asset_returns: dict[str, list[float]] = {}
@@ -1013,7 +1037,7 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     for asset, raw in raw_results:
         raw_oi = raw["oi"].get("openInterest")
         prior_history = _update_oi_history(oi_history, asset, raw_oi)
-        liq_for_asset = liq_data_by_asset.get(asset)
+        liq_for_asset = unwrapped_liq_data.get(asset)
         assets_fields[asset] = _compute_asset_fields(
             raw, prior_history, liq_for_asset,
         )
@@ -1027,11 +1051,20 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     regime_tag = await regime_tag_task
     regime = _compute_regime(assets_fields, cross_asset, oi_history, fear_index, regime_tag)
 
+    # Event calendar — macro releases, token unlocks, scheduled events.
+    # Failure is isolated: errors return empty event dict, never crash.
+    try:
+        events = read_events_for_heartbeat(universe)
+    except Exception:
+        logger.warning("event calendar read failed, using empty events", exc_info=True)
+        events = {}
+
     packet = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "assets": assets_fields,
         "cross_asset": cross_asset,
         "regime": regime,
+        "events": events,
     }
     write_heartbeat(heartbeat_path, packet)
     export_heartbeat_to_ledger(packet)
