@@ -1,0 +1,106 @@
+{
+  "generated_at": "2026-07-08T21:49:05Z",
+  "agents": [
+    {
+      "id": "iron_moth",
+      "name": "iron_moth",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "silver_basin",
+      "name": "silver_basin",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "copper_vane",
+      "name": "copper_vane",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "gray_finch",
+      "name": "gray_finch",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "amber_wolf",
+      "name": "amber_wolf",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "steel_crane",
+      "name": "steel_crane",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "onyx_heron",
+      "name": "onyx_heron",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "jade_hawk",
+      "name": "jade_hawk",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "violet_lion",
+      "name": "violet_lion",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "crimson_fox",
+      "name": "crimson_fox",
+      "status": "rookie",
+      "current_thesis_version": 1,
+      "last_model_used": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    }
+  ],
+  "open_positions": []
+}
