@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import logging
 import math
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from market.heartbeat import (
 from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
+from store.specs import get_spec_history
 from execution.paper_bridge import PaperBridge
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -46,6 +48,92 @@ def _resolve_model_used(conn, agent_id: str, last_model_used: str | None) -> str
         (agent_id,),
     ).fetchone()
     return row["model_used"] if row else None
+
+
+def _spec_diff(spec_history: list[dict]) -> dict:
+    """Build a unified diff between the two most recent spec versions.
+
+    ``spec_history`` is the newest-first list returned by
+    ``store.specs.get_spec_history`` (each row includes ``yaml_text``).
+    Returns a dict describing what to render: ``available`` is False when
+    there are fewer than two versions to compare (a "no diff to show" state),
+    otherwise ``lines`` holds the unified diff (as a list of {text, kind}
+    dicts so the template can color +/- lines) plus the two version numbers
+    being compared.
+    """
+    if len(spec_history) < 2:
+        return {"available": False, "lines": [], "from_version": None, "to_version": None}
+
+    newer, older = spec_history[0], spec_history[1]
+    older_text = (older.get("yaml_text") or "").splitlines(keepends=True)
+    newer_text = (newer.get("yaml_text") or "").splitlines(keepends=True)
+
+    diff = difflib.unified_diff(
+        older_text,
+        newer_text,
+        fromfile=f"spec_v{older['spec_version']}",
+        tofile=f"spec_v{newer['spec_version']}",
+    )
+
+    lines = []
+    for line in diff:
+        stripped = line.rstrip("\n")
+        if line.startswith("+++") or line.startswith("---"):
+            kind = "header"
+        elif line.startswith("@@"):
+            kind = "hunk"
+        elif line.startswith("+"):
+            kind = "add"
+        elif line.startswith("-"):
+            kind = "remove"
+        else:
+            kind = "context"
+        lines.append({"text": stripped, "kind": kind})
+
+    return {
+        "available": True,
+        "lines": lines,
+        "from_version": older["spec_version"],
+        "to_version": newer["spec_version"],
+    }
+
+
+def _compute_calibration(conn, agent_id: str, bucket_size: float = 0.1) -> list[dict]:
+    """Bucket closed trades by their recorded ``confidence`` and compute the
+    realized win rate per bucket, for the agent-detail calibration report.
+
+    Trades with no confidence recorded, or not yet closed/resolved, are
+    excluded. Buckets are labelled by their lower edge, e.g. "0.6-0.7".
+    """
+    rows = conn.execute(
+        """SELECT confidence, result FROM trades
+           WHERE agent_id = ? AND status = 'closed'
+                 AND confidence IS NOT NULL AND result IS NOT NULL""",
+        (agent_id,),
+    ).fetchall()
+
+    buckets: dict[float, list[int]] = {}
+    for row in rows:
+        confidence = row["confidence"]
+        if confidence is None:
+            continue
+        confidence = max(0.0, min(0.999999, confidence))
+        lower = math.floor(confidence / bucket_size) * bucket_size
+        buckets.setdefault(round(lower, 2), []).append(1 if row["result"] == "win" else 0)
+
+    result = []
+    for lower in sorted(buckets):
+        outcomes = buckets[lower]
+        count = len(outcomes)
+        wins = sum(outcomes)
+        result.append(
+            {
+                "bucket": f"{lower:.1f}-{lower + bucket_size:.1f}",
+                "count": count,
+                "win_rate": wins / count if count else 0.0,
+            }
+        )
+    return result
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -446,6 +534,10 @@ async def agent_detail(request: Request, name: str):
     except FileNotFoundError:
         thesis_text = "Thesis file not found."
 
+    spec_history = get_spec_history(conn, aid)
+    spec_diff = _spec_diff(spec_history)
+    calibration = _compute_calibration(conn, aid)
+
     return templates.TemplateResponse(
         "agent_detail.html",
         {
@@ -460,6 +552,9 @@ async def agent_detail(request: Request, name: str):
             "thesis_text": thesis_text,
             "data_source": data_source,
             "exchange_ok": exchange_ok,
+            "spec_history": spec_history,
+            "spec_diff": spec_diff,
+            "calibration": calibration,
         },
     )
 
