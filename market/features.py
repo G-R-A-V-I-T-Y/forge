@@ -11,6 +11,9 @@ and wire it into heartbeat.py's per-asset computation.
 from __future__ import annotations
 
 import statistics
+from datetime import datetime, timezone
+
+from market.event_calendar import EVENT_TYPE_TOKEN_UNLOCKS
 
 FEATURE_REGISTRY: dict[str, callable] = {}
 
@@ -287,3 +290,86 @@ def statistical_forecast(
         "statistical_forecast_vol": std_ret,
         "statistical_forecast_up_prob": up_prob,
     }
+
+
+# ---------------------------------------------------------------------------
+# Event-calendar-driven features (M8 sage_turtle) -- computed from per-asset
+# raw event records threaded into raw_data as "asset_events" (a list of raw
+# event dicts, each carrying a parsed "_scheduled_dt" UTC datetime alongside
+# the original schema fields such as "type"/"asset_specific") and an
+# optional "event_as_of" datetime (the point in time "now" is evaluated
+# from -- wall-clock time live, the historical bar timestamp in a backtest,
+# so no event is ever treated as known before its own recorded schedule).
+# Both are wired in by market/heartbeat.py (live) and backtest/engine.py
+# (replay) -- see compute_replayable_fields's asset_events/event_as_of
+# parameters.
+# ---------------------------------------------------------------------------
+
+def _event_as_of(raw_data: dict) -> datetime:
+    return raw_data.get("event_as_of") or datetime.now(timezone.utc)
+
+
+def _upcoming_events(raw_data: dict, as_of: datetime) -> list[dict]:
+    events = raw_data.get("asset_events") or []
+    return [e for e in events if e.get("_scheduled_dt") and e["_scheduled_dt"] >= as_of]
+
+
+def _extract_unlock_pct(event: dict) -> float | None:
+    """Pull the unlock-size-as-pct-of-circulating-supply magnitude out of an
+    event record. The design doc's example payload nests this under an
+    "asset_specific" (or, inconsistently, "asset-specific") dict as
+    "unlock_percentage"; also accept a flat top-level "unlock_percentage"
+    in case a producer stores it there instead. Returns None (never raises)
+    if the field is absent or unparseable -- callers treat that the same as
+    no upcoming unlock."""
+    for key in ("asset_specific", "asset-specific"):
+        nested = event.get(key)
+        if isinstance(nested, dict) and nested.get("unlock_percentage") is not None:
+            try:
+                return float(nested["unlock_percentage"])
+            except (TypeError, ValueError):
+                return None
+    flat = event.get("unlock_percentage")
+    if flat is not None:
+        try:
+            return float(flat)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+@register("days_to_event")
+def days_to_event(
+    candles: list[list], closes: list[float], highs: list[float],
+    lows: list[float], volumes: list[float], fields: dict,
+    raw_data: dict,
+) -> float | None:
+    """Days until this asset's next scheduled event (any type), or None if
+    the event calendar has no upcoming event for this asset (or event data is
+    unavailable)."""
+    as_of = _event_as_of(raw_data)
+    upcoming = _upcoming_events(raw_data, as_of)
+    if not upcoming:
+        return None
+    nearest = min(e["_scheduled_dt"] for e in upcoming)
+    return (nearest - as_of).total_seconds() / 86400.0
+
+
+@register("unlock_size_pct")
+def unlock_size_pct(
+    candles: list[list], closes: list[float], highs: list[float],
+    lows: list[float], volumes: list[float], fields: dict,
+    raw_data: dict,
+) -> float | None:
+    """Size of this asset's next upcoming token-unlock event as a percentage
+    of circulating supply, or None if there is no upcoming unlock event (or
+    its size is unavailable)."""
+    as_of = _event_as_of(raw_data)
+    unlock_events = [
+        e for e in _upcoming_events(raw_data, as_of)
+        if e.get("type") == EVENT_TYPE_TOKEN_UNLOCKS
+    ]
+    if not unlock_events:
+        return None
+    nearest = min(unlock_events, key=lambda e: e["_scheduled_dt"])
+    return _extract_unlock_pct(nearest)

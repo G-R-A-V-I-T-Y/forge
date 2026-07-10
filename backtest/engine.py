@@ -107,6 +107,36 @@ def _oi_to_plain_list(df: pd.DataFrame) -> tuple[list, list]:
     return df["_ts"].tolist(), df["oi"].tolist()
 
 
+def _read_events_partitions(ledger_dir: Path, asset: str) -> list[dict]:
+    """Read every monthly events partition for one asset, sorted by
+    scheduled_time. Unlike candles/funding/oi, events are keyed by
+    scheduled_time, not ts -- so this can't reuse _read_partitions() above
+    (which hard-codes the "ts" column name). Token unlocks and macro prints
+    are scheduled well in advance and published to the ledger long before
+    they occur, so loading the whole events history up front (rather than
+    windowing to [start, end] like the candle/funding/OI readers) is not a
+    lookahead-bias risk: the per-bar cutoff in run_backtest() only ever
+    looks at events with scheduled_time >= the current bar_ts, exactly
+    mirroring what a live heartbeat cycle at that same wall-clock moment
+    would have seen."""
+    events_dir = ledger_dir / "events"
+    if not events_dir.exists():
+        return []
+    frames = [pd.read_parquet(p) for p in sorted(events_dir.glob("*.parquet"))]
+    frames += [pd.read_json(p, lines=True) for p in sorted(events_dir.glob("*.jsonl"))]
+    if not frames:
+        return []
+    df = pd.concat(frames, ignore_index=True)
+    if "asset" in df.columns:
+        df = df[df["asset"] == asset]
+    if df.empty or "scheduled_time" not in df.columns:
+        return []
+    df = df.copy()
+    df["_scheduled_dt"] = pd.to_datetime(df["scheduled_time"], utc=True)
+    df = df.sort_values("_scheduled_dt").reset_index(drop=True)
+    return df.to_dict("records")
+
+
 def run_backtest(
     spec: Spec, ledger_dir: Path, start: datetime, end: datetime, taker_fee: float,
 ) -> BacktestResult:
@@ -164,6 +194,12 @@ def run_backtest(
         oi_ts_list, oi_val_list = _oi_to_plain_list(oi_df)
         funding_lookback = pd.Timedelta(hours=FUNDING_LOOKBACK_HOURS)
 
+        # Event calendar (days_to_event / unlock_size_pct -- market/features.py).
+        # Loaded once per asset, outside the per-bar loop, same pattern as the
+        # candle/funding/OI series above.
+        asset_raw_events = _read_events_partitions(ledger_dir, asset)
+        event_ts_list = [e["_scheduled_dt"] for e in asset_raw_events]
+
         for bar_ts in bar_timestamps:
             candle_cutoff = bisect.bisect_right(candle_ts_list, bar_ts)
             candles = candle_rows[max(0, candle_cutoff - LOOKBACK_CANDLES):candle_cutoff]
@@ -180,8 +216,14 @@ def run_backtest(
             oi_val = oi_window[-1] if oi_window else None
             prior_oi_history = oi_window[:-1] if len(oi_window) > 1 else []
 
+            # Only events not-yet-occurred as of this bar are visible --
+            # bisect_left finds the first event with scheduled_time >= bar_ts.
+            event_cutoff = bisect.bisect_left(event_ts_list, bar_ts)
+            upcoming_events = asset_raw_events[event_cutoff:]
+
             feature_row = compute_replayable_fields(
                 candles, funding_history, oi_val, funding_val, prior_oi_history,
+                asset_events=upcoming_events, event_as_of=bar_ts,
             )
             price = feature_row["price"]
             open_position = open_positions.get(asset)
