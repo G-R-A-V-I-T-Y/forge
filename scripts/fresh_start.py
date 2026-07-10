@@ -13,8 +13,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import yaml
 
+from backtest.dsl import load_spec
 from meta.spawner import spawn_agent
 from store.db import get_connection, init_schema
+from store.specs import SPECS_DIR, deploy_spec
 
 DB_PATH = PROJECT_ROOT / "data" / "forge.db"
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
@@ -23,6 +25,63 @@ CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 def _load_starting_balance() -> float:
     cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     return float(cfg.get("desk", {}).get("starting_balance", 50000.0))
+
+
+def _load_desk_config() -> dict:
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    return cfg.get("desk", {})
+
+
+# M8 (Evolution): per-agent config_overrides applied at seed time.
+#
+# - iron_moth, silver_basin, jade_hawk are the 3 seed agents with a
+#   hand-compiled DSL spec available (agents/specs/{name}_v1.yaml, from
+#   M7b). Marking them `compiled: True` routes their decision loop through
+#   backtest/interpreter.py against the live heartbeat feature row instead
+#   of calling the LLM (see agents/decision_loop.py). Their specs are
+#   deployed into the `specs` table below, right after spawning, via
+#   store/specs.py's deploy_spec().
+# - sage_turtle (event/unlock positioning) is spawned separately by
+#   forge.py at startup with its own compiled config -- not part of this
+#   seed list.
+# - copper_vane, steel_crane, onyx_heron are designated the pure-LLM
+#   control arm: pinned to a single fixed model via config_json's
+#   `pinned_model` key -- the only per-agent model-pinning mechanism that
+#   actually exists in this codebase (see llm/model_chain.py's
+#   `_get_agent_pinned_model()`, which reads exactly this key). There is
+#   no per-agent "temperature" knob anywhere in the LLM client stack
+#   (llm/client.py, llm/model_chain.py, llm/ollama_client.py,
+#   llm/llama_server_client.py all call their backends with no
+#   temperature parameter), so one is deliberately not invented here --
+#   doing so would silently do nothing since nothing reads it.
+# - violet_lion and crimson_fox are left with no overrides: pure-LLM,
+#   default fallback chain, not part of the fixed-model control-arm
+#   comparison set.
+#
+# Net roster split after forge.py additionally retires gray_finch/amber_wolf
+# and spawns sage_turtle: 4 compiled (iron_moth, silver_basin, jade_hawk,
+# sage_turtle) + 3 fixed-model control-arm (copper_vane, steel_crane,
+# onyx_heron) + 2 default pure-LLM (violet_lion, crimson_fox) = 9 active
+# agents. This lands close to, but not exactly on, the milestone's
+# 6-7 compiled / 2-3 control-arm split -- only 3 seed agents have
+# hand-compiled specs available today, so 3 (+sage_turtle=4) compiled is
+# what the current spec roster supports.
+_CONTROL_ARM_MODEL = "openrouter/anthropic/claude-sonnet-5"
+
+CONFIG_OVERRIDES: dict[str, dict] = {
+    "iron_moth": {"compiled": True},
+    "silver_basin": {"compiled": True},
+    "jade_hawk": {"compiled": True},
+    "copper_vane": {"pinned_model": _CONTROL_ARM_MODEL},
+    "steel_crane": {"pinned_model": _CONTROL_ARM_MODEL},
+    "onyx_heron": {"pinned_model": _CONTROL_ARM_MODEL},
+}
+
+# Agents with a hand-compiled spec on disk (agents/specs/{name}_v1.yaml)
+# that should be deployed into the `specs` table right after seeding so
+# store.specs.get_active_spec() returns something for their compiled
+# decision-loop path.
+COMPILED_SPEC_AGENTS = ["iron_moth", "silver_basin", "jade_hawk"]
 
 
 SEED_AGENTS = [
@@ -806,11 +865,24 @@ def main():
             name,
             thesis,
             status="rookie",
+            config_overrides=CONFIG_OVERRIDES.get(name),
             starting_balance=starting_balance,
         )
         print(
             f"  Created agent: {name} (status={agent['status']}, balance=${starting_balance:,.0f})"
         )
+
+    # M8: Deploy the hand-compiled specs for the agents marked `compiled`
+    # above so store.specs.get_active_spec() has something to return.
+    desk_config = _load_desk_config()
+    for name in COMPILED_SPEC_AGENTS:
+        spec_path = SPECS_DIR / f"{name}_v1.yaml"
+        if not spec_path.exists():
+            print(f"  WARNING: no spec file found for {name} at {spec_path}, skipping deploy")
+            continue
+        spec = load_spec(str(spec_path))
+        deploy_spec(conn, name, spec, config=desk_config)
+        print(f"  Deployed spec: {name} v{spec.spec_version}")
 
     conn.close()
 
