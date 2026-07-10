@@ -224,6 +224,33 @@ async def agent_fleet_cycle(config: dict) -> None:
         )
 
 
+def _build_counterfactual_llm_fn(config: dict):
+    """Build the llm_fn callable the nightly counterfactual job passes to
+    agents.decision_loop.run_counterfactual(). Matches its calling contract
+    exactly: fn(system_prompt, decision_prompt, agent_id=None) ->
+    (decision_dict, model_display_name_or_None).
+
+    The prior code referenced a bare, never-defined name `llm_fn` inside a
+    lambda, raising NameError on every call (silently caught and logged,
+    so the job no-op'd every night). This callable is the fix for that
+    wiring bug only — it still asks the LLM to reason about a
+    counterfactual rather than mechanically replaying recorded candles;
+    that deeper redesign is docs/STRATEGIC_ASSESSMENT_07_09_2026.md's
+    Revision R3, not this one.
+    """
+    def _fn(
+        system_prompt: str, decision_prompt: str, agent_id: str | None = None
+    ) -> tuple[dict, str | None]:
+        from llm.model_chain import decide as mc_decide
+        return mc_decide(
+            system_prompt=system_prompt,
+            decision_prompt=decision_prompt,
+            config=config,
+            agent_id=agent_id,
+        )
+    return _fn
+
+
 async def main():
     config = load_config()
     desk_config = config["desk"]
@@ -349,6 +376,7 @@ async def main():
     async def _run_counterfactual_job():
         """Run counterfactual analysis for all agents."""
         try:
+            cf_llm_fn = _build_counterfactual_llm_fn(config)
             agents = conn.execute("SELECT id, name FROM agents").fetchall()
             for agent in agents:
                 agent_id = agent["id"]
@@ -358,7 +386,6 @@ async def main():
                     agent_id,
                     agent_name,
                 )
-                # Get the system prompt for the agent
                 from agents.persona import build_system_prompt
 
                 system_prompt = build_system_prompt(agent_id, config)
@@ -368,7 +395,7 @@ async def main():
                     conn,
                     agent_id,
                     None,
-                    lambda sp, dp, **kw: llm_fn(sp, dp),
+                    cf_llm_fn,
                     system_prompt,
                 )
         except Exception as exc:
