@@ -209,6 +209,54 @@ class EventCalendar:
         
         return features
 
+    def get_raw_events_by_asset(
+        self,
+        universe: list[str],
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> dict[str, list[dict]]:
+        """Raw (unflattened) event records grouped by asset, for feature
+        computation that needs the original event schema ("type",
+        "asset_specific", etc.) rather than the derived agent-facing feature
+        dict _event_to_features() produces for get_events_for_heartbeat().
+        Used by market/heartbeat.py and backtest/engine.py to compute
+        days_to_event / unlock_size_pct (market/features.py) per asset.
+
+        Each returned dict carries a parsed "_scheduled_dt" (UTC datetime)
+        alongside its original fields, so callers never need to re-parse
+        scheduled_time. Macro (asset-less) events are excluded -- these two
+        features are per-asset only.
+        """
+        if start_time is None:
+            start_time = DEFAULT_START_TIME
+        if end_time is None:
+            end_time = DEFAULT_END_TIME
+
+        month_start = datetime(start_time.year, start_time.month, 1, tzinfo=timezone.utc)
+        events_df = self._load_events_partition(month_start)
+        if events_df.empty:
+            return {}
+
+        filtered_events = self._filter_events(events_df, universe, start_time, end_time)
+
+        result: dict[str, list[dict]] = {}
+        for _, event in filtered_events.iterrows():
+            event_dict = event.to_dict()
+            asset = event_dict.get("asset")
+            if not asset or asset not in universe:
+                continue
+            scheduled_time = event_dict.get("scheduled_time")
+            if not scheduled_time:
+                continue
+            try:
+                event_dict["_scheduled_dt"] = datetime.fromisoformat(
+                    str(scheduled_time).replace("Z", "+00:00")
+                )
+            except Exception:
+                continue
+            result.setdefault(asset, []).append(event_dict)
+        return result
+
     def generate_feature_rows(self, universe: list[str]) -> pd.DataFrame:
         """Generate feature rows for event calendar events.
         
@@ -311,5 +359,18 @@ def read_events_for_heartbeat(
     This is the function imported and used by `market/heartbeat.py`.
     """
     return _event_calendar.get_events_for_heartbeat(
+        universe, start_time, end_time
+    )
+
+
+def read_raw_events_by_asset(
+    universe: list[str],
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> dict[str, list[dict]]:
+    """Convenience function wrapping EventCalendar.get_raw_events_by_asset()
+    for market/heartbeat.py's per-asset days_to_event/unlock_size_pct wiring.
+    """
+    return _event_calendar.get_raw_events_by_asset(
         universe, start_time, end_time
     )

@@ -127,3 +127,83 @@ def test_atr_percentile_none_below_minimum_history():
 def test_bb_width_percentile_none_below_minimum_history():
     closes, highs, lows, volumes = _synthetic_series(n=10)
     assert bb_width_percentile(None, closes, highs, lows, volumes, {}, {}) is None
+
+
+
+# ---------------------------------------------------------------------------
+# days_to_event / unlock_size_pct (M8 sage_turtle event-calendar features)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+from market.features import days_to_event, unlock_size_pct
+from market.event_calendar import EVENT_TYPE_TOKEN_UNLOCKS
+
+_NOW = datetime(2026, 7, 9, tzinfo=timezone.utc)
+
+
+def _call(fn, raw_data):
+    # candles/closes/etc. are irrelevant to these two features -- pass
+    # minimal placeholders matching every other FEATURE_REGISTRY function's
+    # signature.
+    return fn([], [], [], [], [], {}, raw_data)
+
+
+def test_days_to_event_returns_none_with_no_events():
+    assert _call(days_to_event, {"asset_events": [], "event_as_of": _NOW}) is None
+
+
+def test_days_to_event_returns_none_when_no_asset_events_key():
+    assert _call(days_to_event, {}) is None
+
+
+def test_days_to_event_picks_nearest_upcoming_event():
+    events = [
+        {"_scheduled_dt": _NOW + timedelta(days=10)},
+        {"_scheduled_dt": _NOW + timedelta(days=3)},
+        {"_scheduled_dt": _NOW - timedelta(days=1)},  # already past -- excluded
+    ]
+    result = _call(days_to_event, {"asset_events": events, "event_as_of": _NOW})
+    assert result == pytest.approx(3.0)
+
+
+def test_unlock_size_pct_returns_none_with_no_unlock_events():
+    events = [{"_scheduled_dt": _NOW + timedelta(days=2), "type": "economic_data_release"}]
+    assert _call(unlock_size_pct, {"asset_events": events, "event_as_of": _NOW}) is None
+
+
+def test_unlock_size_pct_reads_nested_asset_specific_field():
+    events = [{
+        "_scheduled_dt": _NOW + timedelta(days=5),
+        "type": EVENT_TYPE_TOKEN_UNLOCKS,
+        "asset_specific": {"unlock_percentage": 2.08},
+    }]
+    result = _call(unlock_size_pct, {"asset_events": events, "event_as_of": _NOW})
+    assert result == pytest.approx(2.08)
+
+
+def test_unlock_size_pct_picks_nearest_unlock_ignoring_other_event_types():
+    events = [
+        {"_scheduled_dt": _NOW + timedelta(days=1), "type": "economic_data_release"},
+        {
+            "_scheduled_dt": _NOW + timedelta(days=8),
+            "type": EVENT_TYPE_TOKEN_UNLOCKS,
+            "asset_specific": {"unlock_percentage": 5.0},
+        },
+        {
+            "_scheduled_dt": _NOW + timedelta(days=4),
+            "type": EVENT_TYPE_TOKEN_UNLOCKS,
+            "asset_specific": {"unlock_percentage": 1.2},
+        },
+    ]
+    result = _call(unlock_size_pct, {"asset_events": events, "event_as_of": _NOW})
+    assert result == pytest.approx(1.2)
+
+
+def test_unlock_size_pct_returns_none_when_size_unavailable():
+    events = [{
+        "_scheduled_dt": _NOW + timedelta(days=2),
+        "type": EVENT_TYPE_TOKEN_UNLOCKS,
+        "asset_specific": {},
+    }]
+    assert _call(unlock_size_pct, {"asset_events": events, "event_as_of": _NOW}) is None

@@ -297,3 +297,62 @@ def test_funding_window_bounded_to_lookback_matches_live(tmp_path, monkeypatch):
             f"funding_history included a record {age_hours:.1f}h old at the "
             f"final bar, exceeding the 24h lookback -- funding window is not bounded"
         )
+
+
+
+def _write_events(ledger_dir: Path, month: str, rows: list[dict]) -> None:
+    path = ledger_dir / "events" / f"{month}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_run_backtest_threads_asset_events_into_compute_replayable_fields(tmp_path, monkeypatch):
+    # Regression test for wiring the M7b event calendar into the M8
+    # sage_turtle event features (days_to_event / unlock_size_pct,
+    # market/features.py). run_backtest never leaked this data before --
+    # ledger/events was never read at all. This pins that compute_replayable_fields
+    # now receives, for each bar, exactly the not-yet-occurred events for that
+    # asset as of that bar's own timestamp (no lookahead past bar_ts, and
+    # past events correctly excluded once bar_ts moves beyond them).
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    candles = _synthetic_candles("FET-PERP", start, 40, base_price=1.0, drift=0.0)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
+    _write_candles(ledger_dir, "funding", "2025-01", _funding_rows("FET-PERP", start, 40))
+
+    unlock_time = start + timedelta(hours=30)
+    _write_events(ledger_dir, "2025-01", [{
+        "event_id": "test_unlock_fet",
+        "type": "token_economics",
+        "asset": "FET-PERP",
+        "scheduled_time": unlock_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "asset_specific": {"unlock_percentage": 2.5},
+    }])
+
+    spec = _always_enter_long_spec(universe_include=["FET-PERP"])
+
+    captured = []
+    import backtest.engine as engine_module
+    real_fn = engine_module.compute_replayable_fields
+
+    def _spy(*args, **kwargs):
+        captured.append(kwargs)
+        return real_fn(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "compute_replayable_fields", _spy)
+
+    run_backtest(spec, ledger_dir, start, start + timedelta(hours=39), taker_fee=0.0)
+
+    assert captured, "compute_replayable_fields was never called"
+
+    # Before the unlock: the event is still upcoming and visible.
+    before = next(c for c in captured if c["event_as_of"] < unlock_time)
+    assert len(before["asset_events"]) == 1
+    assert before["asset_events"][0]["asset_specific"]["unlock_percentage"] == 2.5
+
+    # After the unlock: it is no longer upcoming (no lookahead/leak backward).
+    after = [c for c in captured if c["event_as_of"] > unlock_time]
+    assert after, "expected at least one bar after the unlock time"
+    assert after[-1]["asset_events"] == []

@@ -38,7 +38,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
-from market.event_calendar import read_events_for_heartbeat
+from market.event_calendar import read_events_for_heartbeat, read_raw_events_by_asset
 from market.features import FEATURE_REGISTRY
 from market.regime import classify_regime
 from store.ledger import append_ledger_record
@@ -115,6 +115,8 @@ PER_ASSET_FIELDS = [
     # Statistical forecast features (trailing return distribution)
     "statistical_forecast_return", "statistical_forecast_vol",
     "statistical_forecast_up_prob",
+    # Event-calendar features (M8 sage_turtle)
+    "days_to_event", "unlock_size_pct",
 ]
 
 # Resampling factors (in units of 5m candles) for the longer-horizon
@@ -363,6 +365,8 @@ def compute_replayable_fields(
     funding_val: float | None,
     prior_oi_history: list[float],
     liq_data: dict[str, float | None] | None = None,
+    asset_events: list[dict] | None = None,
+    event_as_of: datetime | None = None,
 ) -> dict:
     """Every field derivable purely from candles/funding/OI/liquidations --
     exactly the subset store/ledger.py's ledger stores (candles_5m, funding,
@@ -481,7 +485,9 @@ def compute_replayable_fields(
     # raw_data shape FEATURE_REGISTRY functions expect: only the replayable
     # inputs they were ever documented to need (funding_history for
     # funding_acceleration; nothing here needs book/trades).
-    raw_data_for_features = {"funding_history": funding_history}
+    raw_data_for_features = {"funding_history": funding_history, "asset_events": asset_events or []}
+    if event_as_of is not None:
+        raw_data_for_features["event_as_of"] = event_as_of
     for feature_name, feature_fn in FEATURE_REGISTRY.items():
         try:
             val = feature_fn(
@@ -570,10 +576,16 @@ def _compute_asset_fields(
     raw: dict,
     prior_oi_history: list[float],
     liq_data: dict[str, float | None] | None = None,
+    asset_events: list[dict] | None = None,
 ) -> dict:
     """Live entry point: replayable + live-only fields merged. Output shape
     is unchanged from before this function was split -- see
-    test_compute_asset_fields_unchanged_after_refactor."""
+    test_compute_asset_fields_unchanged_after_refactor. `asset_events` (raw,
+    per-asset event records from read_raw_events_by_asset()) is threaded
+    through to compute_replayable_fields so days_to_event/unlock_size_pct
+    are computed live too, not just in the backtest replay path -- event_as_of
+    is left None here (defaults to wall-clock "now" inside the feature
+    functions), which is correct for the live cycle."""
     candles = raw["candles"]
     if not candles:
         return {k: None for k in PER_ASSET_FIELDS}
@@ -583,6 +595,7 @@ def _compute_asset_fields(
 
     replayable = compute_replayable_fields(
         candles, raw["funding_history"], oi_val, funding_val, prior_oi_history, liq_data,
+        asset_events=asset_events,
     )
     live_only = _compute_live_only_fields(raw, replayable["price"])
 
@@ -1031,6 +1044,23 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         if isinstance(fields, dict) and "liq_total_usd" in fields:
             unwrapped_liq_data[asset] = fields
 
+    # Event calendar — macro releases, token unlocks, scheduled events.
+    # Failure is isolated: errors return empty event dict, never crash. Fetched
+    # here (before the per-asset loop) so the raw per-asset event records can
+    # be threaded into _compute_asset_fields -> compute_replayable_fields,
+    # making days_to_event/unlock_size_pct (market/features.py) real,
+    # backtestable features rather than live-only side data.
+    try:
+        events = read_events_for_heartbeat(universe)
+    except Exception:
+        logger.warning("event calendar read failed, using empty events", exc_info=True)
+        events = {}
+    try:
+        raw_events_by_asset = read_raw_events_by_asset(universe)
+    except Exception:
+        logger.warning("raw event calendar read failed, using empty events", exc_info=True)
+        raw_events_by_asset = {}
+
     assets_fields: dict[str, dict] = {}
     asset_returns: dict[str, list[float]] = {}
 
@@ -1040,6 +1070,7 @@ async def generate_heartbeat(provider, config: dict) -> dict:
         liq_for_asset = unwrapped_liq_data.get(asset)
         assets_fields[asset] = _compute_asset_fields(
             raw, prior_history, liq_for_asset,
+            asset_events=raw_events_by_asset.get(asset, []),
         )
         closes = [c[4] for c in raw["candles"]]
         asset_returns[asset] = _log_returns(closes) if len(closes) > 1 else []
@@ -1050,14 +1081,6 @@ async def generate_heartbeat(provider, config: dict) -> dict:
     fear_index = await fear_index_task
     regime_tag = await regime_tag_task
     regime = _compute_regime(assets_fields, cross_asset, oi_history, fear_index, regime_tag)
-
-    # Event calendar — macro releases, token unlocks, scheduled events.
-    # Failure is isolated: errors return empty event dict, never crash.
-    try:
-        events = read_events_for_heartbeat(universe)
-    except Exception:
-        logger.warning("event calendar read failed, using empty events", exc_info=True)
-        events = {}
 
     packet = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
