@@ -41,6 +41,15 @@ from store.specs import SPECS_DIR, deploy_spec, get_active_spec
 from store.state_snapshot import write_current_state
 from web.app import app as web_app
 
+# M9: Selection & Daily Improvement Loop
+from meta.controller import evaluate_agent, run_evaluation_cycle
+from meta.head_of_desk import run_head_of_desk_cycle
+from meta.reflection_scheduler import (
+    check_agent_eligible,
+    get_reflection_trigger,
+)
+from meta.risk_officer import risk_check_cycle
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -427,6 +436,160 @@ async def main():
         replace_existing=True,
     )
     logger.info("Ledger compaction job scheduled -- runs monthly on day 1 at 03:00 UTC")
+
+    # ------------------------------------------------------------------
+    # M9: Meta-controller — evaluation cycle for all active agents.
+    # Runs every 30 minutes on the trade-count cadence (checks if each
+    # agent is due, enforces lifecycle rules, harvests on termination).
+    # ------------------------------------------------------------------
+    async def _run_meta_controller_job():
+        try:
+            conn = get_connection(str(DB_PATH))
+            try:
+                results = run_evaluation_cycle(conn)
+                suspensions = [r for r in results if r.get("decision") == "suspend"]
+                terminations = [r for r in results if r.get("decision") == "terminate"]
+                if suspensions or terminations:
+                    logger.info(
+                        "Meta-controller: %d suspension(s), %d termination(s) out of %d agent(s)",
+                        len(suspensions), len(terminations), len(results),
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Meta-controller cycle failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_meta_controller_job,
+        trigger=IntervalTrigger(minutes=30, timezone=timezone.utc),
+        id="meta_controller",
+        replace_existing=True,
+    )
+    logger.info("Meta-controller job scheduled — runs every 30 min")
+
+    # ------------------------------------------------------------------
+    # M9: Risk officer — central risk oversight.
+    # Runs every 5 minutes (tied to heartbeat cadence) to check desk
+    # kill switch, concentration, per-agent limits.
+    # ------------------------------------------------------------------
+    async def _run_risk_officer_job():
+        try:
+            conn = get_connection(str(DB_PATH))
+            try:
+                report = risk_check_cycle(conn, config)
+                if report.get("desk_kill_switch"):
+                    logger.warning("Risk officer: DESK KILL SWITCH ACTIVE — all entries blocked")
+                if report.get("concentration_violators"):
+                    logger.warning(
+                        "Risk officer: concentration violators: %s",
+                        ", ".join(report["concentration_violators"]),
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Risk officer cycle failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_risk_officer_job,
+        trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
+        id="risk_officer",
+        replace_existing=True,
+    )
+    logger.info("Risk officer job scheduled — runs every %ds", heartbeat_interval)
+
+    # ------------------------------------------------------------------
+    # M9: Reflection scheduler — checks agent eligibility and triggers
+    # reflection cycles for agents that have crossed their threshold.
+    # Runs every 30 minutes.
+    # ------------------------------------------------------------------
+    async def _run_reflection_scheduler_job():
+        try:
+            import sqlite3
+            conn = get_connection(str(DB_PATH))
+            try:
+                trigger_cfg = get_reflection_trigger(conn)
+                if trigger_cfg.get("mode") == "manual":
+                    return
+
+                rows = conn.execute(
+                    "SELECT id FROM agents WHERE status IN ('rookie', 'active') ORDER BY name"
+                ).fetchall()
+
+                for row in rows:
+                    agent_id = row["id"]
+                    eligible, reason = check_agent_eligible(conn, agent_id, trigger_cfg)
+                    if not eligible:
+                        continue
+
+                    logger.info("Reflection due for agent %s — starting cycle", agent_id)
+
+                    # Build an llm_fn closure using the model chain.
+                    # The reflection pipeline calls llm_fn(prompt) where
+                    # prompt is a combined system + decision message.
+                    def _llm_fn(prompt: str, _aid: str = agent_id) -> str:
+                        from llm.model_chain import decide as mc_decide
+                        result, _model_name = mc_decide(
+                            system_prompt="You are a trading strategy reflection engine.",
+                            decision_prompt=prompt,
+                            config=config,
+                            agent_id=_aid,
+                        )
+                        return json.dumps(result)
+
+                    try:
+                        from meta.reflection_scheduler import run_reflection_cycle as _run_reflection
+                        _run_reflection(conn, agent_id, config, _llm_fn)
+                    except Exception as exc:
+                        logger.error(
+                            "Reflection failed for %s: %s", agent_id, exc, exc_info=True,
+                        )
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Reflection scheduler job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_reflection_scheduler_job,
+        trigger=IntervalTrigger(minutes=30, timezone=timezone.utc),
+        id="reflection_scheduler",
+        replace_existing=True,
+    )
+    logger.info("Reflection scheduler job scheduled — runs every 30 min")
+
+    # ------------------------------------------------------------------
+    # M9: Head of desk — agent population management.
+    # Runs every hour: spawns agents if below target_agent_count, culls
+    # lowest performers if above max_agents.
+    # ------------------------------------------------------------------
+    async def _run_head_of_desk_job():
+        try:
+            conn = get_connection(str(DB_PATH))
+            try:
+                report = run_head_of_desk_cycle(conn, config)
+                if report.get("spawned") or report.get("culled"):
+                    logger.info(
+                        "Head of desk: spawned %d, culled %d (count: %d)",
+                        len(report["spawned"]),
+                        len(report["culled"]),
+                        report["agent_count"],
+                    )
+                elif report.get("distribution"):
+                    logger.debug(
+                        "Head of desk: agent distribution %s",
+                        report["distribution"],
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Head of desk cycle failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_head_of_desk_job,
+        trigger=IntervalTrigger(hours=1, timezone=timezone.utc),
+        id="head_of_desk",
+        replace_existing=True,
+    )
+    logger.info("Head of desk job scheduled — runs every hour")
 
     # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all

@@ -1,42 +1,58 @@
 {% extends "base.html" %}
-{% block title %}Forge &mdash; Desk Overview{% endblock %}
+{% block title %}Forge &mdash; Command Deck{% endblock %}
 {% block content %}
 
-<h2>Desk Overview
-  <span class="badge badge-{{ 'live-data' if exchange_ok else 'stub' }}">
-    {{ data_source }}
-  </span>
-</h2>
+<!-- Health Strip -->
+<div class="health-strip">
+  {% for item in health_items %}
+  <div class="health-item">
+    <span class="health-dot {{ item.dot }}"></span>
+    <span class="health-label">{{ item.label }}</span>
+    <span class="health-value">{{ item.value }}</span>
+  </div>
+  {% endfor %}
+</div>
 
-<div>
+<!-- Executive Action Bar -->
+<div class="action-bar">
+  <button class="btn btn-danger" onclick="openModal('Emergency Stop', 'Suspends ALL agents immediately. This action cannot be undone without manual re-activation.', '/api/exec/emergency-stop', 'POST')">Emergency Stop</button>
+  <button class="btn btn-warning" onclick="openModal('Trigger All Evaluations', 'Force an evaluation cycle for every active agent.', '/api/exec/trigger-all-evaluations', 'POST')">Trigger All Evaluations</button>
+  <span class="badge badge-{{ 'live-data' if exchange_ok else 'stub' }}">{{ data_source }}</span>
+</div>
+
+<!-- Portfolio Stat Cards -->
+<div class="stat-row">
   <div class="stat-card">
     <div class="stat-label">Active Agents</div>
-    <div class="stat-value" id="stat-agents">{{ agents|length }}</div>
+    <div class="stat-value">{{ agents|length }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Open Positions</div>
-    <div class="stat-value" id="stat-positions">{{ positions|length }}</div>
+    <div class="stat-value open">{{ positions|length }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Total Trades</div>
-    <div class="stat-value" id="stat-trades">{{ total_trades }}</div>
+    <div class="stat-value">{{ total_trades }}</div>
   </div>
 </div>
 
-<h2>Leaderboard</h2>
-<table id="leaderboard">
+<!-- Leaderboard -->
+<h3 class="section-header">Leaderboard</h3>
+<table class="data-table" id="leaderboard">
   <thead>
     <tr>
-      <th class="sortable" data-sort="name" onclick="sortTable('name')">Name <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="status" onclick="sortTable('status')">Status <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="trades" onclick="sortTable('trades')">Trades <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="win_rate" onclick="sortTable('win_rate')">Win% <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="profit_factor" onclick="sortTable('profit_factor')">PF <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="sharpe" onclick="sortTable('sharpe')" style="color:#f0883e;">Sharpe <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="weekly_return" onclick="sortTable('weekly_return')">Wkly Ret <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="max_drawdown" onclick="sortTable('max_drawdown')">Max DD <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="open_positions" onclick="sortTable('open_positions')">Open <span class="sort-arrow"></span></th>
-      <th class="sortable" data-sort="model" onclick="sortTable('model')">Model <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('name')">Name <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('status')">Status <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('trades')">Trades <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('win_rate')">Win% <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('profit_factor')">PF <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('sharpe')">Sharpe <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('weekly_return')">Wkly Ret <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('max_drawdown')">Max DD <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('open_positions')">Open <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('null_band')">vs Null <span class="sort-arrow"></span></th>
+      <th class="sortable" onclick="sortTable('model')">Model <span class="sort-arrow"></span></th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody id="leaderboard-body">
@@ -59,13 +75,27 @@
       </td>
       <td class="loss">{{ "{:.1%}".format(a.max_drawdown) }}</td>
       <td>{{ a.open_positions_count }}</td>
+      <td class="neutral">&mdash;</td>
       <td>
         {% if a.last_model_used == 'no model available' %}
-        <span class="badge" style="background:#f85149;color:#fff;">NO MODEL AVAILABLE</span>
+        <span class="badge badge-no-model">NO MODEL AVAILABLE</span>
         {% elif a.last_model_used %}
         {{ a.last_model_used }}
         {% else %}
         &mdash;
+        {% endif %}
+      </td>
+      <td>
+        <button class="btn btn-sm btn-secondary" onclick="openModal('Reflect', 'Trigger a thesis reflection cycle for {{ a.name }}.', '/api/exec/trigger-reflection/{{ a.name }}', 'POST')">Reflect</button>
+        <button class="btn btn-sm btn-secondary" onclick="openModal('Eval', 'Trigger an evaluation for {{ a.name }}.', '/api/exec/trigger-evaluation/{{ a.name }}', 'POST')">Eval</button>
+        {% if a.status in ('active', 'rookie', 'suspended') %}
+        <button class="btn btn-sm btn-warning" onclick="openModal('Demote', 'Demote {{ a.name }} to shadow mode. It will stop trading but remain in the system.', '/api/exec/demote-agent/{{ a.name }}', 'POST')">Demote</button>
+        {% endif %}
+        {% if a.status == 'shadow' %}
+        <button class="btn btn-sm btn-primary" onclick="openModal('Go Live', 'Promote {{ a.name }} from shadow to active. It will begin trading with real capital.', '/api/exec/go-live/{{ a.name }}', 'POST')">Go Live</button>
+        {% endif %}
+        {% if a.open_positions_count > 0 %}
+        <button class="btn btn-sm btn-ghost" onclick="openModal('Disable Entries', 'Prevent {{ a.name }} from opening new positions. Existing positions remain open.', '/api/exec/disable-entries/{{ a.name }}', 'POST')">Disable Entries</button>
         {% endif %}
       </td>
     </tr>
@@ -73,133 +103,201 @@
   </tbody>
 </table>
 
+<!-- Open Positions -->
 {% if positions %}
-<h2>Open Positions</h2>
-<table id="positions-table">
-  <tr>
-    <th>Agent</th><th>Asset</th><th>Direction</th><th>Entry</th><th>SL</th><th>TP</th><th>Size%</th><th>PnL%</th><th>Opened</th><th>Mode</th><th>Model</th><th></th>
-  </tr>
-  {% for p in positions %}
-  <tr>
-    <td><a href="/agents/{{ p.agent_id }}">{{ p.agent_id }}</a></td>
-    <td>{{ p.asset }}</td>
-    <td class="{{ 'win' if p.direction == 'long' else 'loss' }}">{{ p.direction.upper() }}</td>
-    <td>{{ "{:.4f}".format(p.entry_price) }}</td>
-    <td>{{ "{:.4f}".format(p.stop_loss_price) }}</td>
-    <td>{{ "{:.4f}".format(p.take_profit_price) }}</td>
-    <td>{{ "{:.0%}".format(p.position_size_pct) }}</td>
-    <td class="{{ 'win' if (p.current_pnl_pct or 0) > 0 else ('loss' if (p.current_pnl_pct or 0) < 0 else '') }}">
-      {{ "{:+.2%}".format(p.current_pnl_pct) if p.current_pnl_pct is not none else '&mdash;' }}
-    </td>
-    <td>{{ p.opened_at[:19] if p.opened_at else '' }}</td>
-    <td><span class="badge badge-{{ p.mode }}">{{ p.mode.upper() }}</span></td>
-    <td style="font-size:11px;color:#8b949e">{{ p.model_used or '&mdash;' }}</td>
-    <td><button onclick="closePosition('{{ p.id }}', '{{ p.direction.upper() }}', '{{ p.asset }}', {{ p.entry_price }})">Close</button></td>
-  </tr>
-  {% endfor %}
+<h3 class="section-header">Open Positions</h3>
+<table class="data-table" id="positions-table">
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Asset</th>
+      <th>Dir</th>
+      <th>Entry</th>
+      <th>SL</th>
+      <th>TP</th>
+      <th>Size%</th>
+      <th>PnL%</th>
+      <th>Opened</th>
+      <th>Mode</th>
+      <th>Model</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in positions %}
+    <tr>
+      <td><a href="/agents/{{ p.agent_id }}">{{ p.agent_id }}</a></td>
+      <td>{{ p.asset }}</td>
+      <td class="{{ 'win' if p.direction == 'long' else 'loss' }}">{{ p.direction.upper() }}</td>
+      <td>{{ "{:.4f}".format(p.entry_price) }}</td>
+      <td>{{ "{:.4f}".format(p.stop_loss_price) }}</td>
+      <td>{{ "{:.4f}".format(p.take_profit_price) }}</td>
+      <td>{{ "{:.0%}".format(p.position_size_pct) }}</td>
+      <td class="{{ 'win' if (p.current_pnl_pct or 0) > 0 else ('loss' if (p.current_pnl_pct or 0) < 0 else '') }}">
+        {{ "{:+.2%}".format(p.current_pnl_pct) if p.current_pnl_pct is not none else '&mdash;' }}
+      </td>
+      <td>{{ p.opened_at[:19] if p.opened_at else '' }}</td>
+      <td><span class="badge badge-{{ p.mode }}">{{ p.mode.upper() }}</span></td>
+      <td>{{ p.model_used or '&mdash;' }}</td>
+      <td><button class="btn btn-sm btn-danger" onclick="closePosition('{{ p.id }}', '{{ p.direction.upper() }}', '{{ p.asset }}', {{ p.entry_price }})">Close</button></td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
-<script>
-function closePosition(id, direction, asset, entryPrice) {
-  var label = 'Close ' + direction + ' ' + asset + ' @ ' + entryPrice.toFixed(2) + '?';
-  if (!confirm(label)) return;
-  fetch('/api/positions/' + id + '/close', { method: 'POST' })
-    .then(function(resp) {
-      if (!resp.ok) {
-        return resp.json().then(function(data) {
-          throw new Error(data.error || 'Failed to close position');
-        });
-      }
-      return resp.json();
-    })
-    .then(function() {
-      location.reload();
-    })
-    .catch(function(err) {
-      alert(err.message);
-    });
-}
-</script>
 {% endif %}
 
-<h2>Last 10 Trades</h2>
-{% if trades %}
-<table id="trades-table">
-  <tr>
-    <th></th><th>Agent</th><th>ID</th><th>Asset</th><th>Dir</th><th>Entry</th><th>Exit</th><th>PnL%</th><th>Conf</th><th>Status</th><th>Mode</th><th>Model</th><th>Time</th>
-  </tr>
-  {% for t in trades %}
-  <tr class="trade-row" data-trade="{{ t.id }}" onclick="toggleReasoning('{{ t.id }}')" style="cursor:pointer;">
-    <td style="color:#8b949e;font-size:11px;">&#9654;</td>
-    <td>{{ t.agent_id }}</td>
-    <td style="font-size:11px;color:#8b949e">{{ t.id[-20:] if t.id else '' }}</td>
-    <td>{{ t.asset }}</td>
-    <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
-    <td>{{ "{:.4f}".format(t.entry_price) if t.entry_price else '&mdash;' }}</td>
-    <td>{{ "{:.4f}".format(t.exit_price) if t.exit_price else '&mdash;' }}</td>
-    <td class="{{ 'win' if (t.pnl_pct or 0) > 0 else ('loss' if (t.pnl_pct or 0) < 0 else '') }}">
-      {{ "{:+.2%}".format(t.pnl_pct) if t.pnl_pct is not none else '&mdash;' }}
-    </td>
-    <td>{{ "{:.0%}".format(t.confidence) if t.confidence else '&mdash;' }}</td>
-    <td class="{{ 'open' if t.status == 'open' else ('win' if t.result == 'win' else 'loss') }}">
-      {{ t.status.upper() if t.status else '' }}
-    </td>
-    <td><span class="badge badge-{{ t.mode }}">{{ t.mode.upper() if t.mode else '' }}</span></td>
-    <td style="font-size:11px;color:#8b949e">{{ t.model_used or '&mdash;' }}</td>
-    <td style="font-size:11px">{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
-  </tr>
-  <tr id="reasoning-{{ t.id }}" class="reasoning-row" style="display:none;">
-    <td colspan="13" style="padding:12px 20px;background:#0d1117;border:1px solid #21262d;border-radius:4px;">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div>
-          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Hypothesis</div>
-          <div style="color:#e6edf3;font-size:13px;">{{ t.hypothesis or '&mdash;' }}</div>
-        </div>
-        <div>
-          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Expected Value</div>
-          <div style="color:#e6edf3;font-size:13px;">{{ t.expected_value or '&mdash;' }}</div>
-        </div>
-        <div>
-          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Key Conditions Met</div>
-          <div style="color:#3fb950;font-size:13px;">{{ t.key_conditions_met or '&mdash;' }}</div>
-        </div>
-        <div>
-          <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Key Conditions Missing</div>
-          <div style="color:#f85149;font-size:13px;">{{ t.key_conditions_missing or '&mdash;' }}</div>
-        </div>
-      </div>
-      {% if t.agent_postmortem %}
-      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #21262d;">
-        <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Postmortem</div>
-        <div style="color:#e6edf3;font-size:13px;">{{ t.agent_postmortem }}</div>
-      </div>
-      {% endif %}
-      {% if t.exit_reason %}
-      <div style="margin-top:4px;">
-        <div style="color:#8b949e;font-size:11px;margin-bottom:2px;">Exit Reason</div>
-        <div style="color:#e6edf3;font-size:13px;">{{ t.exit_reason }}</div>
-      </div>
-      {% endif %}
-    </td>
-  </tr>
+<!-- Activity Feed -->
+<h3 class="section-header">Activity Feed</h3>
+<div class="activity-feed">
+  {% for item in activity %}
+  <div class="activity-item">
+    <span class="activity-time">{{ item.created_at[11:19] if item.created_at else '' }}</span>
+    <span class="activity-agent">{{ item.agent_id or 'DESK' }}</span>
+    <span class="activity-action">{{ item.action }}</span>
+    <span class="activity-detail">{{ item.reason or '' }}</span>
+  </div>
+  {% else %}
+  <div class="activity-item"><span class="activity-detail">No recent activity</span></div>
   {% endfor %}
+</div>
+
+<!-- Last 10 Trades -->
+<h3 class="section-header">Last 10 Trades</h3>
+{% if trades %}
+<table class="data-table" id="trades-table">
+  <thead>
+    <tr>
+      <th></th>
+      <th>Agent</th>
+      <th>ID</th>
+      <th>Asset</th>
+      <th>Dir</th>
+      <th>Entry</th>
+      <th>Exit</th>
+      <th>PnL%</th>
+      <th>Conf</th>
+      <th>Status</th>
+      <th>Mode</th>
+      <th>Model</th>
+      <th>Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in trades %}
+    <tr class="trade-row" data-trade="{{ t.id }}" onclick="toggleReasoning('{{ t.id }}')">
+      <td class="neutral">&#9654;</td>
+      <td>{{ t.agent_id }}</td>
+      <td class="neutral">{{ t.id[-20:] if t.id else '' }}</td>
+      <td>{{ t.asset }}</td>
+      <td class="{{ 'win' if t.direction == 'long' else 'loss' }}">{{ t.direction[0].upper() if t.direction else '' }}</td>
+      <td>{{ "{:.4f}".format(t.entry_price) if t.entry_price else '&mdash;' }}</td>
+      <td>{{ "{:.4f}".format(t.exit_price) if t.exit_price else '&mdash;' }}</td>
+      <td class="{{ 'win' if (t.pnl_pct or 0) > 0 else ('loss' if (t.pnl_pct or 0) < 0 else '') }}">
+        {{ "{:+.2%}".format(t.pnl_pct) if t.pnl_pct is not none else '&mdash;' }}
+      </td>
+      <td>{{ "{:.0%}".format(t.confidence) if t.confidence else '&mdash;' }}</td>
+      <td class="{{ 'open' if t.status == 'open' else ('win' if t.result == 'win' else 'loss') }}">
+        {{ t.status.upper() if t.status else '' }}
+      </td>
+      <td><span class="badge badge-{{ t.mode }}">{{ t.mode.upper() if t.mode else '' }}</span></td>
+      <td>{{ t.model_used or '&mdash;' }}</td>
+      <td>{{ t.entry_timestamp[:19] if t.entry_timestamp else '' }}</td>
+    </tr>
+    <tr id="reasoning-{{ t.id }}" class="reasoning-row hidden">
+      <td colspan="13">
+        <div class="panel">
+          <div class="info-grid">
+            <dt>Hypothesis</dt>
+            <dd>{{ t.hypothesis or '&mdash;' }}</dd>
+            <dt>Expected Value</dt>
+            <dd>{{ t.expected_value or '&mdash;' }}</dd>
+            <dt>Key Conditions Met</dt>
+            <dd class="win">{{ t.key_conditions_met or '&mdash;' }}</dd>
+            <dt>Key Conditions Missing</dt>
+            <dd class="loss">{{ t.key_conditions_missing or '&mdash;' }}</dd>
+          </div>
+          {% if t.agent_postmortem %}
+          <div class="panel-divider panel-header">Postmortem</div>
+          <div class="panel-body">{{ t.agent_postmortem }}</div>
+          {% endif %}
+          {% if t.exit_reason %}
+          <div class="panel-header panel-gap">Exit Reason</div>
+          <div class="panel-body">{{ t.exit_reason }}</div>
+          {% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
+{% else %}
+<p class="neutral">No trades yet. Agents wake every 60 seconds.</p>
+{% endif %}
+
+<!-- Confirmation Modal -->
+<div id="confirm-modal" class="modal-overlay">
+  <div class="modal-dialog">
+    <div class="modal-title" id="modal-title">Confirm Action</div>
+    <div class="modal-body" id="modal-body">Are you sure?</div>
+    <textarea class="modal-note" id="modal-reason" placeholder="Reason for this action (required)"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="modal-confirm-btn">Confirm</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/forge.js"></script>
 <script>
+/* ── Modal System ──────────────────────────────────────────────── */
+function openModal(title, body, endpoint, method) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').textContent = body;
+  document.getElementById('confirm-modal').classList.add('open');
+  var confirmBtn = document.getElementById('modal-confirm-btn');
+  confirmBtn.onclick = function() {
+    var reason = document.getElementById('modal-reason').value.trim();
+    if (!reason) { alert('Reason is required'); return; }
+    var url = endpoint + '?reason=' + encodeURIComponent(reason);
+    fetch(url, { method: method || 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.ok || d.ok === undefined) { location.reload(); }
+        else { alert(d.error || 'Action failed'); }
+      })
+      .catch(function(e) { alert(e.message); });
+  };
+}
+
+function closeModal() {
+  document.getElementById('confirm-modal').classList.remove('open');
+  document.getElementById('modal-reason').value = '';
+}
+
+document.getElementById('confirm-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+/* ── Close Position via Modal ──────────────────────────────────── */
+function closePosition(id, direction, asset, entryPrice) {
+  var label = 'Close ' + direction + ' ' + asset + ' @ ' + entryPrice.toFixed(2) + '?';
+  openModal('Close Position', label, '/api/positions/' + id + '/close', 'POST');
+}
+
+/* ── Toggle Trade Reasoning ────────────────────────────────────── */
 function toggleReasoning(id) {
   var row = document.getElementById('reasoning-' + id);
   if (!row) return;
-  var hidden = row.style.display === 'none' || row.style.display === '';
-  row.style.display = hidden ? 'table-row' : 'none';
+  var wasHidden = row.classList.contains('hidden');
+  row.classList.toggle('hidden');
   var arrow = row.previousElementSibling.querySelector('td:first-child');
-  if (arrow) arrow.innerHTML = hidden ? '&#9660;' : '&#9654;';
+  if (arrow) arrow.innerHTML = wasHidden ? '&#9660;' : '&#9654;';
 }
-</script>
-{% else %}
-<p style="color:#8b949e; margin-top: 12px;">No trades yet. Agents wake every 60 seconds.</p>
-{% endif %}
 
-<script src="/static/forge.js"></script>
-<script>
-/* Sortable leaderboard columns. Live updates arrive via forge.js's connectDeskWs(). */
+/* ── Sortable Leaderboard ──────────────────────────────────────── */
 var sortDir = {};
 var currentSort = 'sharpe';
 var currentDir = 'desc';
@@ -213,7 +311,19 @@ function sortTable(col) {
   }
   var tbody = document.getElementById('leaderboard-body');
   var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
-  var colIdx = {name:0, status:1, trades:2, win_rate:3, profit_factor:4, sharpe:5, weekly_return:6, max_drawdown:7, open_positions:8, model:9};
+  var colIdx = {
+    name: 0,
+    status: 1,
+    trades: 2,
+    win_rate: 3,
+    profit_factor: 4,
+    sharpe: 5,
+    weekly_return: 6,
+    max_drawdown: 7,
+    open_positions: 8,
+    null_band: 9,
+    model: 10
+  };
   var idx = colIdx[col] || 0;
   rows.sort(function(a, b) {
     var va = a.cells[idx] ? a.cells[idx].innerText.trim() : '';

@@ -1,10 +1,11 @@
 import asyncio
 import difflib
+import json as _json
 import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +16,8 @@ from market.heartbeat import (
     read_heartbeat,
     read_heartbeat_or_none,
 )
-from agents.reflection import compute_calibration_curve
+from agents.reflection import compute_calibration_curve, run_reflection
+from meta.evaluator import get_lifecycle_decision, get_null_metrics
 from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
@@ -34,6 +36,60 @@ if STATIC_DIR.exists():
 logger = logging.getLogger("forge.web")
 
 data_source_map = {"stub": "STUB", "hyperliquid": "LIVE"}
+
+
+def _build_health_strip(conn, config, provider):
+    """Build health strip data for the command deck header."""
+    data_source = data_source_map.get(config.get("data_source", "stub"), "STUB") if config else "STUB"
+    exchange_ok = provider is not None and getattr(provider._backend, "available", True)
+
+    db_path = Path("data/forge.db")
+    db_exists = db_path.exists()
+
+    heartbeat_age = None
+    heartbeat_path = (config or {}).get("desk", {}).get("heartbeat_path", DEFAULT_HEARTBEAT_PATH)
+    packet = read_heartbeat_or_none(heartbeat_path, heartbeat_max_age_seconds(config) if config else 60)
+    if packet and packet.get("timestamp"):
+        try:
+            written_at = datetime.strptime(packet["timestamp"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            heartbeat_age = round((datetime.now(timezone.utc) - written_at).total_seconds(), 1)
+        except (ValueError, TypeError):
+            pass
+
+    items = [
+        {"id": "data_source", "label": "DATA", "value": data_source, "dot": "ok" if exchange_ok else "error"},
+        {"id": "heartbeat", "label": "HB", "value": f"{heartbeat_age}s ago" if heartbeat_age is not None else "—", "dot": "ok" if heartbeat_age is not None and heartbeat_age < 120 else ("degraded" if heartbeat_age is not None else "error")},
+        {"id": "db", "label": "DB", "value": f"{round(db_path.stat().st_size / (1024 * 1024), 1) if db_exists else 0} MB", "dot": "ok" if db_exists else "error"},
+    ]
+
+    agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+    active_count = conn.execute("SELECT COUNT(*) FROM agents WHERE status IN ('active','rookie','shadow')").fetchone()[0]
+    items.insert(0, {"id": "agents", "label": "AGENTS", "value": f"{active_count}/{agent_count}", "dot": "ok" if active_count > 0 else "error"})
+
+    return items
+
+
+def _build_activity_feed(conn):
+    """Return the last 20 audit_log entries as dicts."""
+    rows = conn.execute(
+        "SELECT agent_id, action, details_json, performed_by, reason, created_at FROM audit_log ORDER BY created_at DESC LIMIT 20"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _get_evaluation_summaries(conn):
+    """Get latest evaluation per agent as a dict keyed by agent_id."""
+    rows = conn.execute("""
+        SELECT e.* FROM evaluations e
+        INNER JOIN (
+            SELECT agent_id, MAX(evaluated_at) AS max_at
+            FROM evaluations GROUP BY agent_id
+        ) latest ON e.agent_id = latest.agent_id AND e.evaluated_at = latest.max_at
+    """).fetchall()
+    result = {}
+    for r in rows:
+        result[r["agent_id"]] = dict(r)
+    return result
 
 
 def _resolve_model_used(conn, agent_id: str, last_model_used: str | None) -> str | None:
@@ -177,12 +233,16 @@ async def overview(request: Request):
         "overview.html",
         {
             "request": request,
+            "active_page": "overview",
             "agents": agents,
             "trades": trades_list,
             "positions": [dict(p) for p in positions],
             "total_trades": total_trades,
             "data_source": data_source,
             "exchange_ok": exchange_ok,
+            "health_items": _build_health_strip(conn, config, provider),
+            "activity": _build_activity_feed(conn),
+            "evaluation_summaries": _get_evaluation_summaries(conn),
         },
     )
 
@@ -593,19 +653,171 @@ async def api_trade_detail(trade_id: str):
     return JSONResponse(trade)
 
 
+def _audit(conn, action: str, agent_id: str | None, reason: str | None, details: str | None = None):
+    conn.execute(
+        "INSERT INTO audit_log (agent_id, action, details_json, performed_by, reason, created_at) VALUES (?, ?, ?, 'human', ?, ?)",
+        (agent_id, action, details, reason, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+    )
+    conn.commit()
+
+
+@app.post("/api/exec/trigger-reflection/{agent_id}")
+async def exec_trigger_reflection(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    config = getattr(app.state, "config", None) or {}
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    agent_config = conn.execute("SELECT config_json FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    agent_cfg = _json.loads(agent_config["config_json"]) if agent_config and agent_config["config_json"] else {}
+    llm_fn = getattr(app.state, "llm_fn", None)
+    if llm_fn is None:
+        return JSONResponse({"error": "LLM function not available"}, status_code=503)
+
+    run_reflection(conn, agent_id, config, llm_fn)
+    _audit(conn, "trigger_reflection", agent_id, reason)
+    return {"ok": True, "detail": f"Reflection triggered for {agent_id}"}
+
+
+@app.post("/api/exec/trigger-evaluation/{agent_id}")
+async def exec_trigger_evaluation(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    metrics = compute_metrics(conn, agent_id)
+    null_metrics = get_null_metrics(conn)
+    decision = get_lifecycle_decision(conn, agent_id, metrics, null_metrics)
+
+    conn.execute(
+        "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, metrics_json, decision, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            agent_id,
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            metrics.get("closed_trades", 0),
+            _json.dumps(metrics),
+            decision.get("decision", "review"),
+            decision.get("reason", ""),
+        ),
+    )
+    conn.commit()
+    _audit(conn, "trigger_evaluation", agent_id, reason)
+    return {"ok": True, "decision": decision}
+
+
+@app.post("/api/exec/disable-entries/{agent_id}")
+async def exec_disable_entries(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason, enabled_at) VALUES (?, 'human', ?, ?, NULL)",
+        (agent_id, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), reason),
+    )
+    conn.commit()
+    _audit(conn, "disable_entries", agent_id, reason)
+    return {"ok": True}
+
+
+@app.post("/api/exec/enable-entries/{agent_id}")
+async def exec_enable_entries(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    conn.execute(
+        "UPDATE entry_disables SET enabled_at = ? WHERE agent_id = ? AND enabled_at IS NULL",
+        (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), agent_id),
+    )
+    conn.commit()
+    _audit(conn, "enable_entries", agent_id, reason)
+    return {"ok": True}
+
+
+@app.post("/api/exec/demote-agent/{agent_id}")
+async def exec_demote_agent(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    conn.execute("UPDATE agents SET status = 'suspended' WHERE id = ?", (agent_id,))
+    conn.commit()
+    _audit(conn, "demote_agent", agent_id, reason)
+    return {"ok": True, "status": "suspended"}
+
+
+@app.post("/api/exec/promote-shadow/{agent_id}")
+async def exec_promote_shadow(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id, status FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent["status"] not in ("active", "rookie", "suspended"):
+        return JSONResponse({"error": "Agent not eligible"}, status_code=400)
+
+    conn.execute("UPDATE agents SET status = 'shadow' WHERE id = ?", (agent_id,))
+    conn.commit()
+    _audit(conn, "promote_shadow", agent_id, reason)
+    return {"ok": True, "status": "shadow"}
+
+
+@app.post("/api/exec/go-live/{agent_id}")
+async def exec_go_live(agent_id: str, reason: str = Query(...)):
+    conn = app.state.conn
+    agent = conn.execute("SELECT id, status FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent["status"] != "shadow":
+        return JSONResponse({"error": "Agent must be in shadow status first"}, status_code=400)
+
+    conn.execute("UPDATE agents SET status = 'live' WHERE id = ?", (agent_id,))
+    conn.commit()
+    _audit(conn, "go_live", agent_id, reason)
+    return {"ok": True, "status": "live"}
+
+
+@app.post("/api/exec/emergency-stop")
+async def exec_emergency_stop(reason: str = Query(...)):
+    conn = app.state.conn
+    agent_count = conn.execute("SELECT COUNT(*) FROM agents WHERE status != 'suspended'").fetchone()[0]
+    conn.execute("UPDATE agents SET status = 'suspended'")
+    conn.commit()
+    _audit(conn, "emergency_stop", None, reason)
+    return {"ok": True, "agents_affected": agent_count}
+
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     conn = app.state.conn
     current = settings_store.load_all(conn)
     llama_srv = getattr(app.state, "llama_server", None)
     server_status = llama_srv.status() if llama_srv else {"running": False, "pid": None}
+    agent_names = [r["id"] for r in conn.execute("SELECT id FROM agents ORDER BY id")]
+    evaluation_settings = {
+        "eval_interval_minutes": 60,
+        "reflection_interval_default": 10,
+        "max_drawdown_threshold": 0.15,
+        "min_win_rate_threshold": 0.40,
+        "max_concentration_pct": 0.30,
+        "daily_loss_limit": 0.05,
+    }
     return templates.TemplateResponse(
         "settings.html",
         {
             "request": request,
+            "active_page": "settings",
             "settings": current,
+            "all_settings": current,
             "server_status": server_status,
             "min_context_size": settings_store.MIN_CONTEXT_SIZE,
+            "agent_names": agent_names,
+            "evaluation_settings": evaluation_settings,
         },
     )
 

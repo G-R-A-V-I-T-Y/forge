@@ -155,6 +155,37 @@ CREATE TABLE IF NOT EXISTS decisions (
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
+CREATE TABLE IF NOT EXISTS seeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_agent_id TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    harvested_at TEXT NOT NULL,
+    pnl_pct REAL NOT NULL,
+    agent_reasoning_json TEXT,
+    thesis_excerpt TEXT,
+    used INTEGER NOT NULL DEFAULT 0,
+    spawned_agent_id TEXT,
+    FOREIGN KEY (source_agent_id) REFERENCES agents(id),
+    FOREIGN KEY (trade_id) REFERENCES trades(id)
+);
+
+CREATE TABLE IF NOT EXISTS briefings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS entry_disables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    disabled_by TEXT NOT NULL DEFAULT 'human',
+    disabled_at TEXT NOT NULL,
+    reason TEXT,
+    enabled_at TEXT,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
 CREATE TABLE IF NOT EXISTS specs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
@@ -176,6 +207,18 @@ CREATE INDEX IF NOT EXISTS idx_specs_agent_status ON specs(agent_id, status);
 -- the trades-column migration, then this block — so indexes on columns
 -- added after the original M1-M3 schema, e.g. regime, can never run
 -- against a table that doesn't have them yet.)
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT,
+    action TEXT NOT NULL,
+    details_json TEXT,
+    performed_by TEXT NOT NULL DEFAULT 'human',
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
 CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_asset ON trades(asset);

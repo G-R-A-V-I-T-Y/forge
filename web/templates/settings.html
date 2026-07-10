@@ -149,6 +149,76 @@
   <button type="button" class="btn btn-secondary" style="margin-top:10px;" onclick="addChainRow()">+ Add tier</button>
 </div>
 
+<!-- Desk Management -->
+<div class="panel">
+  <div class="panel-header">DESK MANAGEMENT</div>
+
+  <div class="form-row">
+    <label>Default Agent Wake Cadence (seconds)</label>
+    <input type="number" name="desk_default_wake_interval" value="{{ settings.desk_default_wake_interval or 300 }}" min="30" max="3600">
+    <span class="help-text">Default interval between agent decision cycles (30-3600s)</span>
+  </div>
+
+  <div class="form-row">
+    <label>Starting Balance ($)</label>
+    <input type="number" name="starting_balance" value="{{ settings.starting_balance or 50000 }}" min="1000" max="10000000">
+    <span class="help-text">New agent paper account starting balance</span>
+  </div>
+
+  <div class="form-row">
+    <label>Max Concurrent Agents</label>
+    <input type="number" name="max_concurrent_agents" value="{{ settings.max_concurrent_agents or 20 }}" min="1" max="100">
+    <span class="help-text">Hard cap on number of running agents</span>
+  </div>
+
+  <div class="form-row">
+    <label>Head of Desk Evaluation Interval (minutes)</label>
+    <input type="number" name="eval_interval_minutes" value="{{ settings.eval_interval_minutes or 30 }}" min="5" max="1440">
+    <span class="help-text">How often the desk controller evaluates each agent</span>
+  </div>
+</div>
+
+<!-- Agent Risk Configuration -->
+<div class="panel">
+  <div class="panel-header">AGENT RISK CONFIGURATION</div>
+
+  <div class="form-row">
+    <label>Max Drawdown Before Suspension (%)</label>
+    <input type="number" name="risk_max_drawdown_pct" value="{{ settings.risk_max_drawdown_pct or 25 }}" min="1" max="100">
+    <span class="help-text">Agent auto-suspended if drawdown exceeds this %</span>
+  </div>
+
+  <div class="form-row">
+    <label>Min Win Rate to Avoid Termination</label>
+    <input type="number" name="risk_min_win_rate" value="{{ settings.risk_min_win_rate or 0.35 }}" min="0" max="1" step="0.05">
+    <span class="help-text">Minimum win rate threshold (0-1)</span>
+  </div>
+
+  <div class="form-row">
+    <label>Max Position Concentration (%)</label>
+    <input type="number" name="risk_max_concentration_pct" value="{{ settings.risk_max_concentration_pct or 40 }}" min="1" max="100">
+    <span class="help-text">Max % of account in a single position</span>
+  </div>
+
+  <div class="form-row">
+    <label>Daily Loss Limit (%)</label>
+    <input type="number" name="risk_daily_loss_limit_pct" value="{{ settings.risk_daily_loss_limit_pct or 10 }}" min="1" max="50">
+    <span class="help-text">Max daily portfolio loss before desk kill-switch</span>
+  </div>
+
+  <div class="form-row">
+    <label>Reflection Trigger Interval (trades)</label>
+    <input type="number" name="reflection_trade_interval" value="{{ settings.reflection_trade_interval or 10 }}" min="1" max="100">
+    <span class="help-text">Agent reflects after this many closed trades</span>
+  </div>
+
+  <div class="form-row">
+    <label>Reflection Calendar Days</label>
+    <input type="number" name="reflection_calendar_days" value="{{ settings.reflection_calendar_days or 7 }}" min="1" max="90">
+    <span class="help-text">Agent reflects if no reflection in this many days</span>
+  </div>
+</div>
+
 <button type="button" class="btn btn-primary" onclick="saveSettings()" style="font-size:14px;padding:10px 24px;">
   Save &amp; Apply
 </button>
@@ -236,6 +306,18 @@ function saveSettings() {
     gpu_layers: parseInt(form.querySelector('[name=gpu_layers]').value, 10),
     n_cpu_moe: parseInt(form.querySelector('[name=n_cpu_moe]').value, 10),
     model_chain: gatherChain(),
+    // Desk Management
+    desk_default_wake_interval: parseInt(form.querySelector('[name=desk_default_wake_interval]').value, 10),
+    starting_balance: parseInt(form.querySelector('[name=starting_balance]').value, 10),
+    max_concurrent_agents: parseInt(form.querySelector('[name=max_concurrent_agents]').value, 10),
+    eval_interval_minutes: parseInt(form.querySelector('[name=eval_interval_minutes]').value, 10),
+    // Agent Risk Configuration
+    risk_max_drawdown_pct: parseInt(form.querySelector('[name=risk_max_drawdown_pct]').value, 10),
+    risk_min_win_rate: parseFloat(form.querySelector('[name=risk_min_win_rate]').value),
+    risk_max_concentration_pct: parseInt(form.querySelector('[name=risk_max_concentration_pct]').value, 10),
+    risk_daily_loss_limit_pct: parseInt(form.querySelector('[name=risk_daily_loss_limit_pct]').value, 10),
+    reflection_trade_interval: parseInt(form.querySelector('[name=reflection_trade_interval]').value, 10),
+    reflection_calendar_days: parseInt(form.querySelector('[name=reflection_calendar_days]').value, 10),
   };
 
   fetch('/api/settings', {
