@@ -209,10 +209,35 @@ async def run_decision(
                     model_used = f"compiled/v{active_spec.spec_version}"
                     update_last_model_used(conn, agent_id, model_used)
                 else:
+                    candidate_info = None
+                    if best_decision and best_asset:
+                        price = assets.get(best_asset, {}).get("price", 0)
+                        if price and price > 0:
+                            sl_price = (
+                                price * (1 - active_spec.stop_loss_pct)
+                                if active_spec.direction == "long"
+                                else price * (1 + active_spec.stop_loss_pct)
+                            )
+                            tp_price = (
+                                price * (1 + active_spec.take_profit_pct)
+                                if active_spec.direction == "long"
+                                else price * (1 - active_spec.take_profit_pct)
+                            )
+                            candidate_info = {
+                                "candidate": {
+                                    "asset": best_asset,
+                                    "direction": active_spec.direction,
+                                    "entry_price": price,
+                                    "stop_loss_price": sl_price,
+                                    "take_profit_price": tp_price,
+                                    "confidence": best_decision["confidence"],
+                                    "max_hold_hours": getattr(active_spec, "max_hold_hours", 48),
+                                }
+                            }
                     log_decision(
                         conn, agent_id, "wait",
                         f"compiled: no asset met threshold (best={best_confidence:.2f})",
-                        None,
+                        candidate_info,
                         confidence=best_decision["confidence"] if best_decision else 0.0,
                         evidence_strength=best_decision.get("evidence_strength") if best_decision else {},
                         model_used=f"compiled/v{active_spec.spec_version}",

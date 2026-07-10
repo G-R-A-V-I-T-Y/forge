@@ -278,6 +278,12 @@ async def health():
         except (ValueError, TypeError):
             heartbeat_age_seconds = None
 
+    try:
+        from store.counterfactuals import get_counterfactual_coverage as _get_coverage
+        counterfactual_coverage = _get_coverage(conn)
+    except Exception:
+        counterfactual_coverage = {}
+
     return {
         "status": "ok" if exchange_available else "degraded",
         "agents": agent_count,
@@ -286,6 +292,7 @@ async def health():
         "exchange_available": exchange_available,
         "db_size_mb": db_size_mb,
         "heartbeat_age_seconds": heartbeat_age_seconds,
+        "counterfactual_coverage": counterfactual_coverage,
     }
 
 

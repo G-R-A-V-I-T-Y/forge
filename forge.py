@@ -312,34 +312,20 @@ async def main():
 
     # ------------------------------------------------------------------
     # Counterfactual analysis — runs nightly at 02:00 UTC.
-    # Analyzes past "wait" decisions to determine if taking the trade
-    # would have been profitable.
+    # Deterministic replay of unfilled wait decisions through recorded
+    # 5m candles — no LLM calls.
     # ------------------------------------------------------------------
     async def _run_counterfactual_job():
-        """Run counterfactual analysis for all agents."""
+        """Run deterministic counterfactual replay for all unfilled waits."""
         try:
-            agents = conn.execute("SELECT id, name FROM agents").fetchall()
-            for agent in agents:
-                agent_id = agent["id"]
-                agent_name = agent["name"]
-                logger.info(
-                    "Running counterfactual analysis for agent %s (%s)",
-                    agent_id,
-                    agent_name,
-                )
-                # Get the system prompt for the agent
-                from agents.persona import build_system_prompt
+            from store.counterfactuals import run_counterfactual_replay
 
-                system_prompt = build_system_prompt(agent_id, config)
-                from agents.decision_loop import run_counterfactual
-
-                await run_counterfactual(
-                    conn,
-                    agent_id,
-                    None,
-                    lambda sp, dp, **kw: llm_fn(sp, dp),
-                    system_prompt,
-                )
+            ledger_dir = config.get("ledger_dir", "ledger")
+            summary = run_counterfactual_replay(conn, config, ledger_dir)
+            logger.info(
+                "Counterfactual replay complete: %s",
+                summary,
+            )
         except Exception as exc:
             logger.error("Counterfactual analysis failed: %s", exc, exc_info=True)
 
