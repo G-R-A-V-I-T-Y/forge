@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -45,6 +46,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "forge.db"
 DEFAULT_LEDGER_DIR = PROJECT_ROOT / "ledger"
 DEFAULT_STATE_PATH = PROJECT_ROOT / "state" / "current.json"
+
+logger = logging.getLogger(__name__)
 
 
 def _read_partitions(ledger_dir: Path, kind: str) -> pd.DataFrame:
@@ -80,12 +83,38 @@ def rebuild(
     init_schema(conn)
 
     for agent in state["agents"]:
-        insert_agent(conn, agent["id"], agent["name"], state["generated_at"], "{}")
+        insert_agent(conn, agent["id"], agent["name"], state["generated_at"], agent.get("config_json", "{}"))
         conn.execute(
             "UPDATE agents SET status = ?, current_thesis_version = ?, last_model_used = ? WHERE id = ?",
             (agent["status"], agent["current_thesis_version"], agent["last_model_used"], agent["id"]),
         )
     conn.commit()
+
+    # --- Restore active specs from agents/specs/{id}_v*.yaml files --------
+    from backtest.dsl import load_spec  # noqa: PLC0415 – lazy import avoids cycle
+    from store.specs import deploy_spec, SPECS_DIR  # noqa: PLC0415
+
+    restored_specs = 0
+    for agent in state["agents"]:
+        agent_id = agent["id"]
+        spec_files = sorted(SPECS_DIR.glob(f"{agent_id}_v*.yaml"))
+        for spec_path in spec_files:
+            # Skip if this spec version already exists in the DB
+            existing = conn.execute(
+                "SELECT 1 FROM specs WHERE agent_id = ? AND spec_version = ?",
+                (agent_id, spec_path.stem.split("_v")[-1]),
+            ).fetchone()
+            if existing is not None:
+                continue
+            try:
+                spec = load_spec(str(spec_path))
+                deploy_spec(conn, agent_id, spec, config=None)
+                restored_specs += 1
+            except Exception:
+                logger.warning(
+                    "failed to restore spec %s for %s", spec_path.name, agent_id,
+                    exc_info=True,
+                )
 
     trades_df = _read_partitions(ledger_dir, "trades")
     for _, row in trades_df.iterrows():
@@ -159,6 +188,7 @@ def rebuild(
     return {
         "db_path": str(db_path),
         "agents": len(state["agents"]),
+        "specs_restored": restored_specs,
         "trades": len(trades_df),
         "accounts": len(accounts_df),
         "open_positions_in_state": len(state.get("open_positions", [])),
@@ -180,6 +210,7 @@ def main() -> None:
 
     print(
         f"Rebuilt {summary['db_path']}: {summary['agents']} agent(s), "
+        f"{summary['specs_restored']} spec(s) restored, "
         f"{summary['trades']} trade(s), {summary['accounts']} account snapshot(s), "
         f"{summary['open_positions_in_state']} open position(s) restored.\n"
         f"Note: decision history and market data are not replayed into "

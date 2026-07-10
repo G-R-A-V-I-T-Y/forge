@@ -26,7 +26,7 @@ def build_current_state(conn) -> dict:
     agents = [
         dict(r)
         for r in conn.execute(
-            "SELECT id, name, status, current_thesis_version, last_model_used FROM agents"
+            "SELECT id, name, status, config_json, current_thesis_version, last_model_used FROM agents"
         ).fetchall()
     ]
     for agent in agents:
