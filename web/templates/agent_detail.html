@@ -149,6 +149,53 @@ function closePos(id) {
 </table>
 {% endif %}
 
+<h2>Spec Version History</h2>
+{% if spec_history %}
+<table>
+  <tr><th>Version</th><th>Thesis Version</th><th>Status</th><th>Deployed</th><th>Rejection Reason</th></tr>
+  {% for s in spec_history %}
+  <tr>
+    <td>v{{ s.spec_version }}</td>
+    <td>{{ s.thesis_version }}</td>
+    <td><span class="badge badge-{{ s.status }}">{{ s.status.upper() }}</span></td>
+    <td style="font-size:11px">{{ s.deployed_at[:19] if s.deployed_at else '—' }}</td>
+    <td style="font-size:11px;color:#8b949e">{{ s.rejection_reason or '—' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3 style="margin-top:16px;">Spec Diff</h3>
+{% if spec_diff.available %}
+<div style="color:#8b949e;font-size:11px;margin-bottom:8px;">
+  Comparing spec_v{{ spec_diff.from_version }} &rarr; spec_v{{ spec_diff.to_version }}
+</div>
+<pre style="background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:12px;font-size:12px;overflow-x:auto;line-height:1.5;">{% for line in spec_diff.lines %}<span style="{% if line.kind == 'add' %}color:#3fb950;{% elif line.kind == 'remove' %}color:#f85149;{% elif line.kind == 'header' %}color:#58a6ff;{% elif line.kind == 'hunk' %}color:#8b949e;{% else %}color:#e6edf3;{% endif %}display:block;">{{ line.text }}</span>{% endfor %}</pre>
+{% else %}
+<div style="color:#8b949e;font-size:12px;">No diff to show &mdash; only one spec version has been deployed for this agent.</div>
+{% endif %}
+{% else %}
+<div style="color:#8b949e;font-size:12px;">No spec versions deployed yet for this agent.</div>
+{% endif %}
+
+<h2>Calibration Report</h2>
+{% if calibration %}
+<div style="color:#8b949e;font-size:11px;margin-bottom:8px;">
+  Realized win rate by recorded confidence bucket, computed from closed trades.
+</div>
+<table>
+  <tr><th>Confidence Bucket</th><th>Count</th><th>Realized Win Rate</th></tr>
+  {% for row in calibration %}
+  <tr>
+    <td>{{ row.bucket }}</td>
+    <td>{{ row.count }}</td>
+    <td class="{{ 'win' if row.win_rate >= 0.5 else 'loss' }}">{{ "{:.1%}".format(row.win_rate) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<div style="color:#8b949e;font-size:12px;">Not enough closed trades with recorded confidence yet to compute a calibration report.</div>
+{% endif %}
+
 <h2>Thesis</h2>
 <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-top:8px;">
   <div style="color:#8b949e;font-size:11px;margin-bottom:8px;">

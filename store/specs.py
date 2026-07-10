@@ -198,7 +198,7 @@ def get_spec_history(conn: sqlite3.Connection, agent_id: str) -> list[dict]:
     """Return every spec version deployed for *agent_id*, newest first."""
     rows = conn.execute(
         """SELECT id, spec_version, thesis_version, status,
-                  deployed_at, rejection_reason, validation_errors
+                  deployed_at, rejection_reason, validation_errors, yaml_text
            FROM specs
            WHERE agent_id = ?
            ORDER BY spec_version DESC""",
