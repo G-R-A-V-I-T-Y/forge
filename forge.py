@@ -25,6 +25,7 @@ import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from backtest.dsl import load_spec
 from llm.llama_server import server_manager as llama_server
 from market import heartbeat
 from market.provider import MarketProvider
@@ -36,6 +37,7 @@ from store.positions import (
     update_position_pnl,
 )
 from store.settings import load_all as load_settings
+from store.specs import SPECS_DIR, deploy_spec, get_active_spec
 from store.state_snapshot import write_current_state
 from web.app import app as web_app
 
@@ -282,6 +284,18 @@ async def main():
         _thesis_path.write_text(_SAGE_TURTLE_THESIS, encoding="utf-8")
         conn.commit()
         logger.info("Spawned sage_turtle (compiled event/unlock agent)")
+
+    # M8: Deploy sage_turtle's hand-compiled spec if it doesn't have an
+    # active one yet -- otherwise its compiled decision loop has nothing to
+    # evaluate and it never actually trades (get_active_spec returns None).
+    if get_active_spec(conn, "sage_turtle") is None:
+        _spec_path = SPECS_DIR / "sage_turtle_v1.yaml"
+        if _spec_path.exists():
+            _spec = load_spec(str(_spec_path))
+            deploy_spec(conn, "sage_turtle", _spec, config=desk_config)
+            logger.info("Deployed sage_turtle spec v%d", _spec.spec_version)
+        else:
+            logger.warning("sage_turtle has no active spec and no spec file found at %s", _spec_path)
 
     web_app.state.conn = conn
     web_app.state.provider = provider
