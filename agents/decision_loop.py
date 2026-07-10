@@ -146,7 +146,7 @@ async def run_decision(
                             "stop_loss_price": entry_price * 0.90,
                             "take_profit_price": entry_price * 5.0,
                             "leverage": 1,
-                            "position_size_pct": 0.50,
+                            "position_size_pct": 0.10,
                             "confidence": 1.0,
                         }
                     else:
