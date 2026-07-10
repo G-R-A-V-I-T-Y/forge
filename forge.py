@@ -14,6 +14,7 @@ starved the heartbeat.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -46,6 +47,29 @@ logger = logging.getLogger("forge")
 
 DB_PATH = Path("data/forge.db")
 CONFIG_PATH = Path("config.yaml")
+
+_SAGE_TURTLE_THESIS = """\
+# sage_turtle -- Thesis v1: Event & Unlock Positioning
+
+## Edge Hypothesis
+
+Scheduled supply and macro events are public, dated, and repeatedly under-anticipated by the market until they are imminent. Token unlocks release a known quantity of new supply to holders (often early investors/team with a low cost basis and a high propensity to sell) at a known timestamp; the market chronically underprices the sell pressure until the unlock is within days, then overcorrects. Macro events (FOMC, CPI) do not move any single asset's supply, but they reset the funding/leverage backdrop for the entire book in ways theses cannot see coming. This agent does not predict price from price -- it predicts price from the calendar: what is scheduled, how large is it relative to float, and how has the market historically reacted to this specific event type.
+
+## Entry Decision
+
+- Confident entry (confidence >= 0.70): full position size at standard parameters
+- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
+- No entry (confidence < 0.50): firm rule -- wait, but log to the watchlist if an event is within 10 days
+
+## Position Parameters
+
+- Direction: Short into large unlocks (dilution); long only in the rare case of a documented buyback/burn event with equivalent evidence structure inverted.
+- Leverage: 3x
+- Position size: 10% of account per trade
+- Stop loss: 3.0% from entry
+- Take profit: 6.0% from entry
+- Max hold time: through the event plus 24 hours, then exit regardless of P&L
+"""
 
 
 def load_config() -> dict:
@@ -230,6 +254,34 @@ async def main():
         logger.info(
             "Seeded %d default agents with $%.0f each", len(TRADER_NAMES), balance
         )
+
+    # M8: Retire gray_finch and amber_wolf (microstructure agents confirmed unviable)
+    for _retire_id in ("gray_finch", "amber_wolf"):
+        conn.execute(
+            "UPDATE agents SET status = 'terminated' WHERE id = ? AND status != 'terminated'",
+            (_retire_id,),
+        )
+    conn.commit()
+
+    # M8: Spawn sage_turtle (compiled event/unlock agent) if not already present
+    if not conn.execute("SELECT id FROM agents WHERE id = 'sage_turtle'").fetchone():
+        _now_s = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _cfg_json = json.dumps({"compiled": True, "wake_interval": 300})
+        conn.execute(
+            """INSERT INTO agents (id, name, status, spawn_date, config_json, current_thesis_version)
+               VALUES (?, ?, ?, ?, ?, 1)""",
+            ("sage_turtle", "sage_turtle", "rookie", _now_s, _cfg_json),
+        )
+        insert_account_snapshot(
+            conn, "sage_turtle", "paper",
+            desk_config.get("starting_balance", 50000.0),
+            desk_config.get("starting_balance", 50000.0),
+        )
+        _thesis_path = Path("agents/theses") / "sage_turtle_v1.md"
+        _thesis_path.parent.mkdir(parents=True, exist_ok=True)
+        _thesis_path.write_text(_SAGE_TURTLE_THESIS, encoding="utf-8")
+        conn.commit()
+        logger.info("Spawned sage_turtle (compiled event/unlock agent)")
 
     web_app.state.conn = conn
     web_app.state.provider = provider

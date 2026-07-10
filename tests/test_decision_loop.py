@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -401,3 +402,239 @@ async def test_decision_loop_wait_logs_confidence_and_evidence_to_ledger(conn, t
     assert record["confidence"] == 0.35
     assert record["evidence_strength"] == {"unlock_size": 0.0, "days_to_event": 0.3}
     assert record["model"] == "Test Wait Model"
+
+
+# ---------------------------------------------------------------------------
+# M8: Compiled agent tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compiled_agent_uses_spec(conn, tmp_path, monkeypatch):
+    """A compiled agent calls the interpreter instead of the LLM.
+
+    The spec's evidence term fires on favorable funding → enter decision
+    with model_used="compiled/v1".
+    """
+    from backtest.dsl import EvidenceTerm, Spec, Threshold
+    from store.specs import deploy_spec, get_active_spec
+
+    monkeypatch.setattr("store.specs.SPECS_DIR", Path(str(tmp_path / "specs")))
+
+    insert_agent(
+        conn,
+        "sage_turtle",
+        "sage_turtle",
+        "2026-07-09T00:00:00Z",
+        json.dumps({"compiled": True}),
+    )
+    insert_account_snapshot(conn, "sage_turtle", "paper", 50000.0, 50000.0)
+
+    spec = Spec(
+        agent_id="sage_turtle",
+        spec_version=1,
+        thesis_version=1,
+        universe_include=["SOL-PERP"],
+        regime_exclude=[],
+        direction="long",
+        confidence_threshold=0.5,
+        scale_threshold=0.3,
+        evidence=[
+            EvidenceTerm(
+                name="funding_dislocation",
+                feature="funding",
+                thresholds=[
+                    Threshold(op="<", weight=0.8, value=-0.001),
+                    Threshold(op="else", weight=0.0),
+                ],
+                missing="skip",
+            ),
+        ],
+        secondary_evidence=[],
+        stop_loss_pct=0.03,
+        take_profit_pct=0.06,
+        max_hold_hours=72,
+        leverage=3,
+        position_size_pct=0.10,
+    )
+    deploy_spec(conn, "sage_turtle", spec)
+
+    deployed = get_active_spec(conn, "sage_turtle")
+    assert deployed is not None, "spec should be active after deploy"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    packet = _fresh_heartbeat_packet()
+    packet["assets"]["SOL-PERP"]["funding"] = -0.005
+    write_heartbeat(heartbeat_path, packet)
+    config = _config(heartbeat_path)
+
+    called_llm = False
+
+    def sentinel_llm(sp, dp, **kw):
+        nonlocal called_llm
+        called_llm = True
+        return ({"action": "wait", "reason": "should not be called"}, None)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id="sage_turtle",
+            thesis_text="test thesis",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=sentinel_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "enter", f"expected enter, got {result}"
+    assert not called_llm, "compiled agent must not call the LLM"
+
+    from store.db import get_agent
+
+    agent = get_agent(conn, "sage_turtle")
+    assert agent["last_model_used"] == "compiled/v1"
+
+    from store.db import get_trades
+
+    trades = get_trades(conn, "sage_turtle")
+    assert len(trades) >= 1
+
+    # The decision's model field goes into the ledger via log_decision.
+    import store.ledger as ledger_module
+
+    month_file = (
+        Path(str(tmp_path / "ledger"))
+        / "decisions"
+        / f"{datetime.now(timezone.utc):%Y-%m}.jsonl"
+    )
+    if month_file.exists():
+        lines = month_file.read_text(encoding="utf-8").strip().splitlines()
+        record = json.loads(lines[-1])
+        assert record["agent"] == "sage_turtle"
+        assert record["model"] == "compiled/v1"
+
+
+@pytest.mark.asyncio
+async def test_control_arm_uses_llm(conn, tmp_path, monkeypatch):
+    """A pure-LLM agent still calls the LLM even when a spec is present.
+
+    The compiled check only fires when config_json has compiled=True.
+    Without that flag, the regular LLM path runs regardless of any
+    deployed spec.
+    """
+    from backtest.dsl import EvidenceTerm, Spec, Threshold
+    from store.specs import deploy_spec
+
+    monkeypatch.setattr("store.specs.SPECS_DIR", Path(str(tmp_path / "specs2")))
+
+    # Insert agent WITHOUT compiled: true
+    insert_agent(
+        conn,
+        "silver_basin",
+        "silver_basin",
+        "2026-07-09T00:00:00Z",
+        json.dumps({"wake_interval": 300}),
+    )
+    insert_account_snapshot(conn, "silver_basin", "paper", 50000.0, 50000.0)
+
+    # Deploy a spec (should be ignored by non-compiled agents)
+    spec = Spec(
+        agent_id="silver_basin",
+        spec_version=1,
+        thesis_version=1,
+        universe_include=["SOL-PERP"],
+        regime_exclude=[],
+        direction="long",
+        confidence_threshold=0.5,
+        scale_threshold=0.3,
+        evidence=[
+            EvidenceTerm(
+                name="funding_dislocation",
+                feature="funding",
+                thresholds=[
+                    Threshold(op="<", weight=0.8, value=-0.001),
+                    Threshold(op="else", weight=0.0),
+                ],
+                missing="skip",
+            ),
+        ],
+        secondary_evidence=[],
+        stop_loss_pct=0.03,
+        take_profit_pct=0.06,
+        max_hold_hours=72,
+        leverage=3,
+        position_size_pct=0.10,
+    )
+    deploy_spec(conn, "silver_basin", spec)
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id="silver_basin",
+            thesis_text="Test thesis",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=_stub_llm_fn,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    # Should go through normal LLM path, not compiled
+    assert result["action"] == "enter", f"expected enter, got {result}"
+
+    from store.db import get_agent
+
+    agent = get_agent(conn, "silver_basin")
+    assert agent["last_model_used"] == STUB_MODEL_LABEL
+
+
+@pytest.mark.asyncio
+async def test_compiled_no_spec_falls_back_to_wait(conn, tmp_path):
+    """A compiled agent with no active spec logs a wait decision."""
+    insert_agent(
+        conn,
+        "sage_turtle",
+        "sage_turtle",
+        "2026-07-09T00:00:00Z",
+        json.dumps({"compiled": True}),
+    )
+    insert_account_snapshot(conn, "sage_turtle", "paper", 50000.0, 50000.0)
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    called_llm = False
+
+    def sentinel_llm(sp, dp, **kw):
+        nonlocal called_llm
+        called_llm = True
+        return ({"action": "wait", "reason": "should not be called"}, None)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id="sage_turtle",
+            thesis_text="test thesis",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=sentinel_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result == {"action": "wait", "detail": "compiled: no active spec deployed"}
+    assert not called_llm, "compiled agent must not call the LLM"
+
+    row = conn.execute(
+        "SELECT decision_action, decision_reason FROM decisions WHERE agent_id = ?",
+        ("sage_turtle",),
+    ).fetchone()
+    assert row is not None
+    assert row["decision_action"] == "wait"
+    assert row["decision_reason"] == "compiled: no active spec deployed"

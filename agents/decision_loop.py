@@ -155,6 +155,70 @@ async def run_decision(
 
                 update_last_model_used(conn, agent_id, model_used)
 
+        # --- M8: Compiled agent support ------------------------------------
+        if agent_row and response is None:
+            cfg = _json.loads(agent_row["config_json"])
+            if cfg.get("compiled", False):
+                from store.specs import get_active_spec
+                from backtest.interpreter import evaluate
+
+                active_spec = get_active_spec(conn, agent_id)
+                if active_spec is None:
+                    log_decision(
+                        conn, agent_id, "wait", "compiled: no active spec deployed", None,
+                        model_used="compiled/none",
+                    )
+                    return {"action": "wait", "detail": "compiled: no active spec deployed"}
+
+                assets = heartbeat.get("assets", {})
+                best_asset = None
+                best_decision = None
+                best_confidence = active_spec.confidence_threshold
+
+                for asset_name, asset_fields in assets.items():
+                    feature_row = dict(asset_fields)
+                    decision = evaluate(active_spec, feature_row)
+
+                    if decision["action"] == "enter" and decision["confidence"] >= best_confidence:
+                        best_confidence = decision["confidence"]
+                        best_asset = asset_name
+                        best_decision = decision
+
+                if best_decision:
+                    price = assets.get(best_asset, {}).get("price", 0)
+                    response = {
+                        "action": "enter",
+                        "asset": best_asset,
+                        "direction": active_spec.direction,
+                        "entry_price": price,
+                        "stop_loss_price": (
+                            price * (1 - active_spec.stop_loss_pct)
+                            if active_spec.direction == "long"
+                            else price * (1 + active_spec.stop_loss_pct)
+                        ),
+                        "take_profit_price": (
+                            price * (1 + active_spec.take_profit_pct)
+                            if active_spec.direction == "long"
+                            else price * (1 - active_spec.take_profit_pct)
+                        ),
+                        "leverage": active_spec.leverage,
+                        "position_size_pct": active_spec.position_size_pct,
+                        "confidence": best_decision["confidence"],
+                        "evidence_strength": best_decision.get("evidence_strength", {}),
+                    }
+                    model_used = f"compiled/v{active_spec.spec_version}"
+                    update_last_model_used(conn, agent_id, model_used)
+                else:
+                    log_decision(
+                        conn, agent_id, "wait",
+                        f"compiled: no asset met threshold (best={best_confidence:.2f})",
+                        None,
+                        confidence=best_decision["confidence"] if best_decision else 0.0,
+                        evidence_strength=best_decision.get("evidence_strength") if best_decision else {},
+                        model_used=f"compiled/v{active_spec.spec_version}",
+                    )
+                    return {"action": "wait", "detail": "compiled: no asset met threshold"}
+
         if response is None:
             system_prompt = build_system_prompt(agent_id, config)
             decision_prompt = await build_decision_prompt(
