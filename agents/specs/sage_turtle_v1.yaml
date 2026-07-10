@@ -1,0 +1,63 @@
+agent_id: sage_turtle
+spec_version: 1
+thesis_version: 1
+universe:
+  include:
+    - BTC-PERP
+    - ETH-PERP
+    - SOL-PERP
+    - SUI-PERP
+    - AVAX-PERP
+    - LINK-PERP
+    - AAVE-PERP
+    - ARB-PERP
+    - OP-PERP
+entry:
+  direction: long
+  confidence_threshold: 0.65
+  scale_threshold: 0.45
+  evidence:
+    - name: unlock_size_relative
+      feature: unlock_size_pct  # hypothetical — adjust if feature name differs
+      thresholds:
+        - op: ">"
+          value: 1.0
+          weight: 0.3
+        - op: else
+          weight: 0.0
+      missing: skip
+    - name: days_to_unlock
+      feature: days_to_event
+      thresholds:
+        - op: "<="
+          value: 7
+          weight: 0.3
+        - op: else
+          weight: 0.0
+      missing: skip
+    - name: funding_dislocation_pre_event
+      feature: funding_zscore
+      thresholds:
+        - op: "<"
+          value: -1.5
+          weight: 0.25
+        - op: else
+          weight: 0.0
+      missing: skip
+  secondary_evidence:
+    - name: macro_event_proximity
+      feature: days_to_event
+      thresholds:
+        - op: "<="
+          value: 2
+          weight: 0.15
+        - op: else
+          weight: 0.0
+      missing: skip
+exit:
+  stop_loss_pct: 0.03
+  take_profit_pct: 0.06
+  max_hold_hours: 72
+position:
+  leverage: 3
+  position_size_pct: 0.10

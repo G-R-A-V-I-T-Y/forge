@@ -10,6 +10,7 @@ data/keystores/
 data/forge.log
 data/heartbeat.json
 data/heartbeat_oi_history.json
+data/historical_data/
 .opencode/status
 .claude/settings.local.json
 logs/

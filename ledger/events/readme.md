@@ -1,0 +1,1 @@
+# Event Calendar (ledger/events.jsonl)
