@@ -117,6 +117,7 @@ class PaperBridge(TradingBridge):
             "position_size_pct": order["position_size_pct"],
             "notional_usd": notional,
             "opened_at": now,
+            "max_hold_hours": order.get("max_hold_hours", 48.0),
             "mode": "paper",
             "trade_id": trade_id,
         }

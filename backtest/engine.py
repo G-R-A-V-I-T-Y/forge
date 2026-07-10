@@ -243,7 +243,7 @@ def run_backtest(
                     )
                     gross_pct = realized_pct_move * spec.leverage
                     net_pct = gross_pct - 2 * taker_fee * spec.leverage
-                    pnl_usd = balance * spec.position_size_pct * net_pct
+                    pnl_usd = balance * open_position.get("size_pct", spec.position_size_pct) * net_pct
                     balance += pnl_usd
                     peak = max(peak, balance)
                     returns_per_bar.append(net_pct)
@@ -260,21 +260,20 @@ def run_backtest(
 
             decision = evaluate(spec, feature_row)
             if decision["action"] == "enter":
-                # Deliberately deferred, not an oversight: the interpreter
-                # distinguishes a "scaled" entry (confidence between
-                # scale_threshold and confidence_threshold) from a full-size
-                # one only via decision["reason"]'s text (backtest/interpreter.py),
-                # not a structured field. Every backtest entry here opens at
-                # full spec.position_size_pct regardless of that distinction,
-                # so scaled-conviction sizing is not yet reflected in P&L or
-                # Sharpe. Implementing it needs a structured signal from the
-                # interpreter (e.g. a numeric size multiplier), which is out
-                # of scope for M7b -- tracked as follow-up before any spec's
-                # backtest results are used to justify scaled position sizing
-                # in a live/paper deployment (M8+).
+                confidence = decision["confidence"]
+                if confidence >= spec.confidence_threshold:
+                    size_pct = spec.position_size_pct
+                elif confidence >= spec.scale_threshold:
+                    scale = (confidence - spec.scale_threshold) / (spec.confidence_threshold - spec.scale_threshold)
+                    size_pct = spec.position_size_pct * (0.5 + 0.5 * scale)
+                else:
+                    size_pct = spec.position_size_pct
+
                 open_positions[asset] = {
                     "asset": asset, "direction": decision["direction"],
                     "entry_price": price, "opened_at": bar_ts,
+                    "size_pct": size_pct,
+                    "confidence": confidence,
                 }
 
     result.total_return_pct = (balance - 10_000.0) / 10_000.0

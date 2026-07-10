@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS positions (
     notional_usd REAL NOT NULL,
     opened_at TEXT NOT NULL,
     current_pnl_pct REAL DEFAULT 0.0,
+    max_hold_hours REAL NOT NULL DEFAULT 48.0,
     mode TEXT NOT NULL DEFAULT 'paper',
     trade_id TEXT NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id),

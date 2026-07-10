@@ -26,6 +26,15 @@ def get_all_open_positions(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def has_open_position_for_asset(conn, agent_id: str, asset: str) -> bool:
+    """Check if an agent has any open position for a given asset."""
+    row = conn.execute(
+        "SELECT 1 FROM trades WHERE agent_id = ? AND asset = ? AND status = 'open' LIMIT 1",
+        (agent_id, asset),
+    ).fetchone()
+    return row is not None
+
+
 def find_first_cross(candles_5m, entry_ts_unix, direction, sl, tp):
     """Scan 5m candles from entry timestamp forward to find first SL/TP cross.
 
@@ -361,23 +370,51 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
         tp = pos["take_profit_price"]
         direction = pos["direction"]
 
-        if direction == "long":
-            if sl is not None and tp is not None and sl < current_price < tp:
-                continue
-            if sl is None and tp is not None and current_price < tp:
-                continue
-            if tp is None and sl is not None and current_price > sl:
-                continue
-        else:
-            if sl is not None and tp is not None and tp < current_price < sl:
-                continue
-            if sl is None and tp is not None and current_price > tp:
-                continue
-            if tp is None and sl is not None and current_price < sl:
-                continue
-
         entry_ts = _parse_entry_ts(pos.get("opened_at"))
         now_ts = time.time()
+
+        sltp_within = False
+        if direction == "long":
+            if sl is not None and tp is not None and sl < current_price < tp:
+                sltp_within = True
+            elif sl is None and tp is not None and current_price < tp:
+                sltp_within = True
+            elif tp is None and sl is not None and current_price > sl:
+                sltp_within = True
+        else:
+            if sl is not None and tp is not None and tp < current_price < sl:
+                sltp_within = True
+            elif sl is None and tp is not None and current_price > tp:
+                sltp_within = True
+            elif tp is None and sl is not None and current_price < sl:
+                sltp_within = True
+
+        if sltp_within:
+            max_hold_hours = pos.get("max_hold_hours")
+            if max_hold_hours is not None and entry_ts is not None:
+                elapsed_hours = (now_ts - entry_ts) / 3600
+                if elapsed_hours >= max_hold_hours:
+                    logger.info("max_hold reached for %s at %.2f (held %.1fh)", asset, current_price, elapsed_hours)
+                    funding_history = asset_data.get("funding_history", []) or []
+                    result = execute_close(
+                        conn=conn,
+                        position_id=pos["id"],
+                        exit_price=current_price,
+                        reason="max_hold",
+                        config={"taker_fee": taker_fee},
+                        position_dict=pos,
+                        funding_history=funding_history,
+                    )
+                    if result:
+                        logger.info(
+                            "Max hold closed %s at %.2f (net pnl=%.2f%%, fees=%.4f)",
+                            result["trade_id"],
+                            current_price,
+                            (result.get("pnl_pct") or 0) * 100,
+                            result.get("fees_paid", 0),
+                        )
+                        closed_count += 1
+            continue
 
         candles = list(asset_data.get("candles_5m", []) or [])
         cross = find_first_cross(candles, entry_ts, direction, sl, tp)

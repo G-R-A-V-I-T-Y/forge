@@ -18,6 +18,7 @@ from market.heartbeat import (
 )
 from risk.gate import RiskViolation, validate_order
 from store.db import get_positions, update_last_model_used
+from store.positions import has_open_position_for_asset
 from store.fingerprint import write_entry, write_outcome
 
 logger = logging.getLogger(__name__)
@@ -173,18 +174,32 @@ async def run_decision(
                 assets = heartbeat.get("assets", {})
                 best_asset = None
                 best_decision = None
-                best_confidence = active_spec.confidence_threshold
+                best_confidence = 0.0
 
                 for asset_name, asset_fields in assets.items():
                     feature_row = dict(asset_fields)
                     decision = evaluate(active_spec, feature_row)
 
-                    if decision["action"] == "enter" and decision["confidence"] >= best_confidence:
+                    if decision["confidence"] > best_confidence:
                         best_confidence = decision["confidence"]
                         best_asset = asset_name
                         best_decision = decision
 
+                    if decision["action"] == "enter" and decision["confidence"] >= active_spec.confidence_threshold:
+                        break
+
                 if best_decision:
+                    if has_open_position_for_asset(conn, agent_id, best_asset):
+                        log_decision(
+                            conn, agent_id, "wait",
+                            f"compiled: already holds {best_asset}",
+                            None,
+                            confidence=best_decision["confidence"],
+                            evidence_strength=best_decision.get("evidence_strength"),
+                            model_used=f"compiled/v{active_spec.spec_version}",
+                        )
+                        return {"action": "wait", "detail": f"already holds {best_asset}"}
+
                     price = assets.get(best_asset, {}).get("price", 0)
                     response = {
                         "action": "enter",
@@ -205,6 +220,7 @@ async def run_decision(
                         "position_size_pct": active_spec.position_size_pct,
                         "confidence": best_decision["confidence"],
                         "evidence_strength": best_decision.get("evidence_strength", {}),
+                        "max_hold_hours": getattr(active_spec, "max_hold_hours", 48),
                     }
                     model_used = f"compiled/v{active_spec.spec_version}"
                     update_last_model_used(conn, agent_id, model_used)
