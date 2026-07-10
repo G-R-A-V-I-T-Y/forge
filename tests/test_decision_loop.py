@@ -638,3 +638,100 @@ async def test_compiled_no_spec_falls_back_to_wait(conn, tmp_path):
     assert row is not None
     assert row["decision_action"] == "wait"
     assert row["decision_reason"] == "compiled: no active spec deployed"
+
+
+@pytest.mark.asyncio
+async def test_close_action_awaits_postmortem_before_returning(conn, tmp_path, monkeypatch):
+    """A just-closed trade's postmortem must complete before run_decision
+    returns — not be fire-and-forgotten via asyncio.ensure_future, which
+    agent_runner's one-shot asyncio.run(...) subprocess model silently
+    drops before it ever executes. See
+    docs/STRATEGIC_ASSESSMENT_07_09_2026.md defect C1 (postmortem half) /
+    Revision R1 AC#4."""
+    # Set up agent with an open position
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    # Insert both trade and position (mimics what bridge.enter() does)
+    from store.db import insert_trade, insert_position
+    from datetime import datetime, timezone
+
+    trade_id = "test_trade_001"
+    pos_id = "pos_test_trade_001"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    trade = {
+        "id": trade_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "account_balance_at_entry": 50000.0,
+        "entry_timestamp": now,
+        "status": "open",
+        "mode": "paper",
+        "thesis_version": 1,
+    }
+    insert_trade(conn, trade)
+
+    position = {
+        "id": pos_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "opened_at": now,
+        "mode": "paper",
+        "trade_id": trade_id,
+    }
+    insert_position(conn, position)
+
+    # Monkeypatch run_postmortem to track completion
+    postmortem_completed = False
+
+    async def fake_run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt):
+        nonlocal postmortem_completed
+        postmortem_completed = True
+
+    monkeypatch.setattr("agents.decision_loop.run_postmortem", fake_run_postmortem)
+
+    # LLM returns close action with the position we created
+    def close_llm(sys, prompt, **kwargs):
+        return {
+            "action": "close",
+            "position_id": pos_id,
+            "reason": "test_close",
+        }, "Test Close Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=close_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    # Essential assertion: postmortem_completed must be True immediately
+    # after run_decision returns, with no asyncio.sleep/gather needed in
+    # the test to "wait for it to catch up" — if the test needs to sleep,
+    # the implementation is still fire-and-forget.
+    assert postmortem_completed is True
+    assert result["action"] == "close"

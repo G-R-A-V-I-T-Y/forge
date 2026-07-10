@@ -5,7 +5,6 @@ run_decision never raises. All exceptions are caught, logged, and returned
 as {"action": "error", "detail": str(exc)}.
 """
 
-import asyncio
 import json
 import logging
 
@@ -288,9 +287,7 @@ async def run_decision(
             logger.info("[%s] Closed position %s: %s", agent_id, pos_id, fill)
             trade_id = fill.get("trade_id")
             if trade_id:
-                asyncio.ensure_future(
-                    run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
-                )
+                await run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
             log_decision(
                 conn, agent_id, "close", reason,
                 {"position_id": pos_id, "fill": str(fill)},
