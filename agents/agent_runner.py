@@ -33,6 +33,26 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOG_PATH = Path("data/forge.log")
 
 
+def _build_llm_fn(config: dict):
+    """Build the llm_fn callable passed to run_decision().
+
+    Must match agents/decision_loop.py's _call_llm_with_retry calling
+    contract exactly: fn(system_prompt, decision_prompt, agent_id=None) ->
+    (decision_dict, model_display_name_or_None). Forwarding agent_id lets
+    model_chain.decide() resolve this agent's pinned model (see
+    llm/model_chain.py's decide()) — without it, every agent silently falls
+    through to the default chain regardless of any pin. See
+    docs/STRATEGIC_ASSESSMENT_07_09_2026.md defect C1.
+    """
+    def llm_fn(
+        system_prompt: str, decision_prompt: str, agent_id: str | None = None
+    ) -> tuple[dict, str | None]:
+        return model_chain.decide(
+            system_prompt, decision_prompt, config=config, agent_id=agent_id
+        )
+    return llm_fn
+
+
 def _configure_logging(log_path: Path = DEFAULT_LOG_PATH) -> None:
     """Set up stderr + persistent file logging for this agent subprocess.
 
@@ -75,8 +95,7 @@ async def _run_once(agent_id: str, db_path: str, config_path: str) -> dict:
             return {"action": "error", "detail": "agent not found in database"}
         thesis_text = _resolve_thesis(agent_id, agent_row)
 
-        def llm_fn(system_prompt: str, decision_prompt: str) -> tuple[dict, str | None]:
-            return model_chain.decide(system_prompt, decision_prompt, config=config)
+        llm_fn = _build_llm_fn(config)
 
         def bridge_factory(aid: str, c, provider):
             return PaperBridge(aid, conn=c, provider=provider, config=config)
