@@ -383,12 +383,13 @@ class TestHeadOfDesk:
 
     def test_ensure_agent_count_below_target(self, conn):
         from meta.head_of_desk import ensure_agent_count
-        # 4 active/rookie agents (alpha, beta, gamma, benchmark_random_walk)
+        # 3 non-benchmark active/rookie agents (alpha, beta, gamma).
+        # benchmark_random_walk is excluded from the population count.
         spawned = ensure_agent_count(conn, {
             "target_agent_count": 5,
             "max_agents": 20,
         })
-        assert len(spawned) == 1  # deficit = 5 - 4 = 1
+        assert len(spawned) == 2  # deficit = 5 - 3 = 2
 
     def test_ensure_agent_count_already_at_target(self, conn):
         from meta.head_of_desk import ensure_agent_count

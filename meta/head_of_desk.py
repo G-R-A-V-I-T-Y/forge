@@ -33,6 +33,7 @@ def get_agent_roster(conn) -> list[dict[str, Any]]:
                   COUNT(t.id) AS closed_trades
            FROM agents a
            LEFT JOIN trades t ON t.agent_id = a.id AND t.status = 'closed' AND t.voided = 0
+           WHERE a.id NOT LIKE 'benchmark_%'
            GROUP BY a.id
            ORDER BY a.name"""
     ).fetchall()
@@ -86,7 +87,7 @@ def ensure_agent_count(conn, config: dict | None = None) -> list[str]:
     max_agents = int(config.get("max_agents", 20))
 
     current_count = conn.execute(
-        "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active')"
+        "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active') AND id NOT LIKE 'benchmark_%'"
     ).fetchone()[0]
 
     if current_count >= target:
@@ -140,7 +141,7 @@ def cull_if_overpopulated(conn, config: dict | None = None) -> list[str]:
 
     max_agents = int(config.get("max_agents", 20))
     current_count = conn.execute(
-        "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active', 'suspended')"
+        "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active', 'suspended') AND id NOT LIKE 'benchmark_%'"
     ).fetchone()[0]
 
     if current_count <= max_agents:
@@ -153,7 +154,7 @@ def cull_if_overpopulated(conn, config: dict | None = None) -> list[str]:
         """SELECT a.id, COALESCE(SUM(t.pnl_usd), 0) AS total_pnl, COUNT(t.id) AS trade_count
            FROM agents a
            LEFT JOIN trades t ON t.agent_id = a.id AND t.status = 'closed' AND t.voided = 0
-           WHERE a.status IN ('rookie', 'active', 'suspended')
+           WHERE a.status IN ('rookie', 'active', 'suspended') AND a.id NOT LIKE 'benchmark_%'
            GROUP BY a.id
            HAVING trade_count >= 10
            ORDER BY total_pnl ASC
@@ -191,7 +192,7 @@ def run_head_of_desk_cycle(conn, config: dict | None = None) -> dict[str, Any]:
         "spawned": spawned,
         "culled": culled,
         "agent_count": conn.execute(
-            "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active')"
+            "SELECT COUNT(*) FROM agents WHERE status IN ('rookie', 'active') AND id NOT LIKE 'benchmark_%'"
         ).fetchone()[0],
         "distribution": get_strategy_distribution(conn),
     }

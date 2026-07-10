@@ -75,6 +75,10 @@ def evaluate_agent(
 
     Returns the evaluation result dict.
     """
+    # Skip benchmark agents — they are permanent baselines, not lifecycle targets.
+    if agent_id.startswith("benchmark_"):
+        return {"skipped": True, "reason": "benchmark agent"}
+
     agent = get_agent(conn, agent_id)
     if agent is None:
         return {"error": f"Agent {agent_id} not found"}
@@ -188,7 +192,7 @@ def run_evaluation_cycle(conn) -> list[dict[str, Any]]:
     Returns a list of evaluation result dicts.
     """
     rows = conn.execute(
-        "SELECT id FROM agents WHERE status IN ('rookie', 'active', 'suspended') ORDER BY name"
+        "SELECT id FROM agents WHERE status IN ('rookie', 'active', 'suspended') AND id NOT LIKE 'benchmark_%' ORDER BY name"
     ).fetchall()
 
     results = []
