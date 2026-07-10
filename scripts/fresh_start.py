@@ -83,6 +83,34 @@ CONFIG_OVERRIDES: dict[str, dict] = {
 # decision-loop path.
 COMPILED_SPEC_AGENTS = ["iron_moth", "silver_basin", "jade_hawk"]
 
+# sage_turtle's thesis lives here (not in forge.py) so all seed data is
+# centralised in one file.
+_SAGE_TURTLE_THESIS = """\
+# sage_turtle -- Thesis v1: Event & Unlock Positioning
+
+## Edge Hypothesis
+
+Scheduled supply and macro events are public, dated, and repeatedly under-anticipated by the market until they are imminent. Token unlocks release a known quantity of new supply to holders (often early investors/team with a low cost basis and a high propensity to sell) at a known timestamp; the market chronically underprices the sell pressure until the unlock is within days, then overcorrects. Macro events (FOMC, CPI) do not move any single asset's supply, but they reset the funding/leverage backdrop for the entire book in ways theses cannot see coming. This agent does not predict price from price -- it predicts price from the calendar: what is scheduled, how large is it relative to float, and how has the market historically reacted to this specific event type.
+
+## Entry Decision
+
+- Confident entry (confidence >= 0.70): full position size at standard parameters
+- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
+- No entry (confidence < 0.50): firm rule -- wait, but log to the watchlist if an event is within 10 days
+
+## Position Parameters
+
+- Direction: Short into large unlocks (dilution); long only in the rare case of a documented buyback/burn event with equivalent evidence structure inverted.
+- Leverage: 3x
+- Position size: 10% of account per trade
+- Stop loss: 3.0% from entry
+- Take profit: 6.0% from entry
+- Max hold time: through the event plus 24 hours, then exit regardless of P&L
+"""
+
+# All agents that carry a compiled spec (seed + sage_turtle).
+_COMPILED_AGENTS = [*COMPILED_SPEC_AGENTS, "sage_turtle"]
+
 
 SEED_AGENTS = [
     (
@@ -808,6 +836,60 @@ Avoid: Small-cap perps -- session patterns are unreliable when the asset itself 
 ]
 
 
+def seed_desk(conn, config: dict) -> list[str]:
+    """Seed all initial agents and deploy their compiled specs.
+
+    Spawns the 10 SEED_AGENTS, spawns sage_turtle (compiled event/unlock
+    agent), and deploys hand-compiled spec YAML files into the ``specs``
+    table for every compiled agent.
+
+    Parameters
+    ----------
+    conn
+        An initialised SQLite connection.
+    config
+        The *full* config dict (``config.yaml`` loaded via yaml.safe_load).
+
+    Returns
+    -------
+    list[str]
+        Agent IDs that were seeded.
+    """
+    desk_config = config.get("desk", {})
+    starting_balance = float(desk_config.get("starting_balance", 50000.0))
+    created: list[str] = []
+
+    for name, thesis in SEED_AGENTS:
+        spawn_agent(
+            conn,
+            name,
+            thesis,
+            status="rookie",
+            config_overrides=CONFIG_OVERRIDES.get(name),
+            starting_balance=starting_balance,
+        )
+        created.append(name)
+
+    spawn_agent(
+        conn,
+        "sage_turtle",
+        _SAGE_TURTLE_THESIS,
+        status="rookie",
+        config_overrides={"compiled": True, "wake_interval": 300},
+        starting_balance=starting_balance,
+    )
+    created.append("sage_turtle")
+
+    for name in _COMPILED_AGENTS:
+        spec_path = SPECS_DIR / f"{name}_v1.yaml"
+        if not spec_path.exists():
+            continue
+        spec = load_spec(str(spec_path))
+        deploy_spec(conn, name, spec, config=desk_config)
+
+    return created
+
+
 def main():
     print("=" * 60)
     print("FORGE -- Fresh Start")
@@ -857,32 +939,15 @@ def main():
     conn = get_connection(str(DB_PATH))
     init_schema(conn)
 
-    # Seed agents
-    starting_balance = _load_starting_balance()
-    for name, thesis in SEED_AGENTS:
-        agent = spawn_agent(
-            conn,
-            name,
-            thesis,
-            status="rookie",
-            config_overrides=CONFIG_OVERRIDES.get(name),
-            starting_balance=starting_balance,
-        )
+    full_config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    created = seed_desk(conn, full_config)
+    starting_balance = float(
+        full_config.get("desk", {}).get("starting_balance", 50000.0)
+    )
+    for name in created:
         print(
-            f"  Created agent: {name} (status={agent['status']}, balance=${starting_balance:,.0f})"
+            f"  Created agent: {name} (status=rookie, balance=${starting_balance:,.0f})"
         )
-
-    # M8: Deploy the hand-compiled specs for the agents marked `compiled`
-    # above so store.specs.get_active_spec() has something to return.
-    desk_config = _load_desk_config()
-    for name in COMPILED_SPEC_AGENTS:
-        spec_path = SPECS_DIR / f"{name}_v1.yaml"
-        if not spec_path.exists():
-            print(f"  WARNING: no spec file found for {name} at {spec_path}, skipping deploy")
-            continue
-        spec = load_spec(str(spec_path))
-        deploy_spec(conn, name, spec, config=desk_config)
-        print(f"  Deployed spec: {name} v{spec.spec_version}")
 
     conn.close()
 

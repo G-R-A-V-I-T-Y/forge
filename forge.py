@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -29,7 +29,7 @@ from backtest.dsl import load_spec
 from llm.llama_server import server_manager as llama_server
 from market import heartbeat
 from market.provider import MarketProvider
-from store.db import get_connection, init_schema, insert_account_snapshot, insert_agent
+from store.db import get_connection, init_schema
 from store.git_sync import sync_to_git
 from store.positions import (
     get_all_open_positions,
@@ -58,29 +58,6 @@ logger = logging.getLogger("forge")
 
 DB_PATH = Path("data/forge.db")
 CONFIG_PATH = Path("config.yaml")
-
-_SAGE_TURTLE_THESIS = """\
-# sage_turtle -- Thesis v1: Event & Unlock Positioning
-
-## Edge Hypothesis
-
-Scheduled supply and macro events are public, dated, and repeatedly under-anticipated by the market until they are imminent. Token unlocks release a known quantity of new supply to holders (often early investors/team with a low cost basis and a high propensity to sell) at a known timestamp; the market chronically underprices the sell pressure until the unlock is within days, then overcorrects. Macro events (FOMC, CPI) do not move any single asset's supply, but they reset the funding/leverage backdrop for the entire book in ways theses cannot see coming. This agent does not predict price from price -- it predicts price from the calendar: what is scheduled, how large is it relative to float, and how has the market historically reacted to this specific event type.
-
-## Entry Decision
-
-- Confident entry (confidence >= 0.70): full position size at standard parameters
-- Moderate entry (confidence 0.50-0.70): scale position size by confidence factor
-- No entry (confidence < 0.50): firm rule -- wait, but log to the watchlist if an event is within 10 days
-
-## Position Parameters
-
-- Direction: Short into large unlocks (dilution); long only in the rare case of a documented buyback/burn event with equivalent evidence structure inverted.
-- Leverage: 3x
-- Position size: 10% of account per trade
-- Stop loss: 3.0% from entry
-- Take profit: 6.0% from entry
-- Max hold time: through the event plus 24 hours, then exit regardless of P&L
-"""
 
 
 def load_config() -> dict:
@@ -245,28 +222,11 @@ async def main():
 
     agent_count = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
     if agent_count == 0:
-        TRADER_NAMES = [
-            "iron_moth",
-            "silver_basin",
-            "copper_vane",
-            "gray_finch",
-            "amber_wolf",
-            "steel_crane",
-            "onyx_heron",
-            "jade_hawk",
-            "violet_lion",
-            "crimson_fox",
-        ]
-        balance = desk_config.get("starting_balance", 50000.0)
-        for name in TRADER_NAMES:
-            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            insert_agent(conn, name, name, now, "{}")
-            insert_account_snapshot(conn, name, "paper", balance, balance)
-        logger.info(
-            "Seeded %d default agents with $%.0f each", len(TRADER_NAMES), balance
-        )
+        from scripts.fresh_start import seed_desk
+        seeded = seed_desk(conn, config)
+        logger.info("Seeded %d agents via seed_desk", len(seeded))
 
-    # M8: Retire gray_finch and amber_wolf (microstructure agents confirmed unviable)
+    # Retire gray_finch and amber_wolf (microstructure agents confirmed unviable)
     for _retire_id in ("gray_finch", "amber_wolf"):
         conn.execute(
             "UPDATE agents SET status = 'terminated' WHERE id = ? AND status != 'terminated'",
@@ -274,37 +234,46 @@ async def main():
         )
     conn.commit()
 
-    # M8: Spawn sage_turtle (compiled event/unlock agent) if not already present
-    if not conn.execute("SELECT id FROM agents WHERE id = 'sage_turtle'").fetchone():
-        _now_s = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        _cfg_json = json.dumps({"compiled": True, "wake_interval": 300})
-        conn.execute(
-            """INSERT INTO agents (id, name, status, spawn_date, config_json, current_thesis_version)
-               VALUES (?, ?, ?, ?, ?, 1)""",
-            ("sage_turtle", "sage_turtle", "rookie", _now_s, _cfg_json),
-        )
-        insert_account_snapshot(
-            conn, "sage_turtle", "paper",
-            desk_config.get("starting_balance", 50000.0),
-            desk_config.get("starting_balance", 50000.0),
-        )
-        _thesis_path = Path("agents/theses") / "sage_turtle_v1.md"
-        _thesis_path.parent.mkdir(parents=True, exist_ok=True)
-        _thesis_path.write_text(_SAGE_TURTLE_THESIS, encoding="utf-8")
-        conn.commit()
-        logger.info("Spawned sage_turtle (compiled event/unlock agent)")
+    # Reconcile compiled agents: for every active/rookie agent whose
+    # config_json marks it as compiled, check whether a spec file exists
+    # on disk and no active spec row is in the DB.  If so, deploy the
+    # latest version so the compiled decision loop has something to
+    # evaluate.
+    for row in conn.execute(
+        "SELECT id, config_json FROM agents WHERE status IN ('rookie', 'active')"
+    ).fetchall():
+        agent_id = row["id"]
+        try:
+            agent_cfg = json.loads(row["config_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not agent_cfg.get("compiled"):
+            continue
+        if get_active_spec(conn, agent_id) is not None:
+            continue
 
-    # M8: Deploy sage_turtle's hand-compiled spec if it doesn't have an
-    # active one yet -- otherwise its compiled decision loop has nothing to
-    # evaluate and it never actually trades (get_active_spec returns None).
-    if get_active_spec(conn, "sage_turtle") is None:
-        _spec_path = SPECS_DIR / "sage_turtle_v1.yaml"
-        if _spec_path.exists():
-            _spec = load_spec(str(_spec_path))
-            deploy_spec(conn, "sage_turtle", _spec, config=desk_config)
-            logger.info("Deployed sage_turtle spec v%d", _spec.spec_version)
-        else:
-            logger.warning("sage_turtle has no active spec and no spec file found at %s", _spec_path)
+        spec_files = list(SPECS_DIR.glob(f"{agent_id}_v*.yaml"))
+        if not spec_files:
+            logger.warning(
+                "Compiled agent %s has no spec files at %s",
+                agent_id, SPECS_DIR / f"{agent_id}_v*.yaml",
+            )
+            continue
+
+        latest = max(
+            spec_files,
+            key=lambda p: int(re.search(r"_v(\d+)\.yaml$", p.name).group(1)),
+        )
+        _spec = load_spec(str(latest))
+        deploy_spec(conn, agent_id, _spec, config=desk_config)
+        logger.info(
+            "Deployed %s spec v%d (compiled-agent reconciliation)",
+            agent_id, _spec.spec_version,
+        )
+
+    # M6: Seed benchmark agents (idempotent — INSERT OR IGNORE).
+    from scripts.seed_benchmarks import seed_benchmark_agents
+    seed_benchmark_agents(conn, config)
 
     web_app.state.conn = conn
     web_app.state.provider = provider

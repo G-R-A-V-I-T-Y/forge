@@ -1,54 +1,83 @@
 agent_id: sage_turtle
 spec_version: 1
 thesis_version: 1
-
 universe:
-  include: [TAO-PERP, FET-PERP, ARB-PERP, OP-PERP, TIA-PERP]
-
+  include:
+  - TAO-PERP
+  - FET-PERP
+  - ARB-PERP
+  - OP-PERP
+  - TIA-PERP
 regime_filter:
-  exclude: [crisis]
-
+  exclude:
+  - crisis
 entry:
   direction: short
-  confidence_threshold: 0.70
-  scale_threshold: 0.50
+  confidence_threshold: 0.7
+  scale_threshold: 0.5
   evidence:
-    - name: unlock_size_vs_float
-      feature: unlock_size_pct
-      thresholds:
-        - {op: ">", value: 3.0, weight: 0.7}
-        - {op: ">", value: 1.5, weight: 0.5}
-        - {op: ">", value: 0.5, weight: 0.2}
-        - {op: "else", weight: 0.0}
-      missing: veto
-    - name: days_to_event_window
-      feature: days_to_event
-      thresholds:
-        - {op: "between", value: [1, 4], weight: 0.6}
-        - {op: "between", value: [4, 10], weight: 0.3}
-        - {op: "between", value: [0, 1], weight: 0.2}
-        - {op: "else", weight: 0.0}
-      missing: veto
+  - name: unlock_size_vs_float
+    feature: unlock_size_pct
+    thresholds:
+    - op: '>'
+      weight: 0.7
+      value: 3.0
+    - op: '>'
+      weight: 0.5
+      value: 1.5
+    - op: '>'
+      weight: 0.2
+      value: 0.5
+    - op: else
+      weight: 0.0
+    missing: veto
+  - name: days_to_event_window
+    feature: days_to_event
+    thresholds:
+    - op: between
+      weight: 0.6
+      value:
+      - 1
+      - 4
+    - op: between
+      weight: 0.3
+      value:
+      - 4
+      - 10
+    - op: between
+      weight: 0.2
+      value:
+      - 0
+      - 1
+    - op: else
+      weight: 0.0
+    missing: veto
   secondary_evidence:
-    - name: funding_positioning_drift
-      feature: funding_zscore
-      thresholds:
-        - {op: "<", value: -1.0, weight: 0.3}
-        - {op: ">", value: 1.0, weight: -0.3}
-        - {op: "else", weight: 0.0}
-      missing: skip
-    - name: oi_building_into_event
-      feature: oi_drawdown_pct
-      thresholds:
-        - {op: ">", value: 0.0, weight: 0.2}
-        - {op: "else", weight: 0.0}
-      missing: skip
-
+  - name: funding_positioning_drift
+    feature: funding_zscore
+    thresholds:
+    - op: <
+      weight: 0.3
+      value: -1.0
+    - op: '>'
+      weight: -0.3
+      value: 1.0
+    - op: else
+      weight: 0.0
+    missing: skip
+  - name: oi_building_into_event
+    feature: oi_drawdown_pct
+    thresholds:
+    - op: '>'
+      weight: 0.2
+      value: 0.0
+    - op: else
+      weight: 0.0
+    missing: skip
 exit:
   stop_loss_pct: 0.03
   take_profit_pct: 0.06
   max_hold_hours: 48
-
 position:
   leverage: 3
-  position_size_pct: 0.10
+  position_size_pct: 0.1
