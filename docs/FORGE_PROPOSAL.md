@@ -1036,56 +1036,245 @@ Each milestone is independently demonstrable. You can start Forge after any mile
 
 ### M8 — Evolution (the actual product)
 
-**Goal:** The reflection loop that turns Forge from a trading system into an evolutionary system — agents that produce and validate new strategies faster than old ones decay.
+> The reflection loop that turns Forge from a trading system into an evolutionary system — agents that produce and validate new strategies faster than old ones decay.
 
-**You can verify:** An agent completes reflection → spec revision → backtest validation → hot deploy with zero human touches, and a rejected overfit revision is visible in the reflection log.
+#### Goal
+Build the end-to-end agent evolution pipeline: an agent running a backtested strategy spec (from M7b) completes a reflection cycle — reviewing its trade log, the decisions table with counterfactuals, and its backtest results — and autonomously produces a revised strategy spec. The new spec is validated with walk-forward backtesting, checked against anti-overfitting rules, and if it passes, hot-deployed to the fast loop. The agent's body then trades the new spec mechanically until the next reflection cycle.
 
-**Tasks:**
-1. Reflection pipeline (frontier LLM): inputs = trade bank + decisions/counterfactuals + regime breakdown + backtest tools + (optional) web research; output = revised thesis + revised spec + self-declared invalidation conditions
-2. Anti-overfit gates as *code*, wrapping the proposal's rules 1–7 around the backtester: min-trades, holdout, cross-agent validation, throttle, pattern persistence, adversarial pass (second LLM call attacking the spec), regime flags
-3. Deploy pipeline: validated spec → versioned file + DB row → fast loop hot-reloads; full diff view in UI
-4. Convert the desk: 6–7 compiled agents + 2–3 pure-LLM control-arm agents (temp 0, pinned local model). Retire gray_finch/amber_wolf; spawn event/unlock agent.
-5. Calibration report: per-agent confidence vs realized win-rate curves (data already exists in `confidence` column)
+#### Acceptance Criteria
+1. A frontier LLM (Claude) is wired as the reflection engine: inputs include the agent's trade bank, decisions/counterfactuals, regime breakdown, backtest results from M7b, and (optionally) web research; output is a revised thesis markdown + a revised strategy spec YAML + self-declared invalidation conditions.
+2. Anti-overfit gates (FORGE_PROPOSAL §Anti-Overfitting rules 1–7) execute as *code* wrapping the backtester — min-trade threshold, holdout split, cross-agent validation, update throttle, pattern persistence, adversarial second LLM pass attacking the revised spec, regime-flag awareness — and a rejected revision is logged in the reflection log with the specific gate that blocked it.
+3. A deploy pipeline writes a validated spec to a versioned YAML file (named `{agent}_{spec_vN}.yaml` under `agents/specs/`), records a corresponding row in a new `specs` SQLite table, and hot-reloads the fast loop body so the next heartbeat executes the new spec. The web UI's agent detail page shows a diff view between spec versions.
+4. The desk converts: 6–7 of the 10 agents become compiled agents (their decision loop calls `backtest/interpreter.py` with their active spec against the live heartbeat feature row instead of calling the LLM). 2–3 agents remain as a pure-LLM control arm (pinned local model, temperature 0, full decision logging including the `decision_details_json` that captures the agent's full reasoning). `gray_finch` and `amber_wolf` are retired; `sage_turtle` (event/unlock positioning) is spawned with a hand-compiled spec from M7b.
+5. A calibration report is computed per-agent from the `confidence` column in the decisions table (data already exists) — a simple tabular or SVG plot of realized win rate per confidence bucket — visible on the agent detail page.
+6. The `meta/spawner.py` `check_against_graveyard()` stub is replaced with a real thesis-similarity check that prevents spawning an agent with a thesis substantively similar to any terminated agent.
 
-**Done when:** End-to-end reflection cycle completes on a live agent. Rejected overfit revision visible in reflection log.
+#### Dependencies
+- **M7b must ship first**: the strategy-spec DSL (`backtest/dsl.py`, `backtest/validator.py`, `backtest/interpreter.py`) and backtest engine (`backtest/engine.py`, `backtest/walk_forward.py`) produce the outputs (validated specs, walk-forward reports) M8's reflection pipeline and anti-overfit gates consume. Without M7b, M8's reflection loop has nothing to produce, validate against, or compare.
+- The ledger's `decisions` stream must have ≥7 days of "wait" decisions with counterfactuals filled in (M6's nightly job) so the calibration report and anti-overfit gate #3 (pattern persistence across non-overlapping 7-day windows) have real data.
+- The feature vocabulary in `market/features.py` (`FEATURE_REGISTRY`) must include every term the first generation of compiled-agent specs references — the `funding_zscore`/`oi_zscore`/`atr_percentile`/`sector_relative_strength` features `silver_basin`/`steel_crane`/`iron_moth` specs require. (Feature names follow the same convention `backtest/dsl.py` validates against.)
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m8-reflection-pipeline` | Reflection loop (frontier LLM call chain + anti-overfit gates + deploy pipeline) | After M7b done |
+| `m8-compiled-agents` | Convert 6-7 agents to compiled mode; retire gray_finch/amber_wolf; spawn sage_turtle | After M7b + reflection pipeline |
+| `m8-calibration-ui` | Calibration report rendering, spec diff view in web UI | Yes (independent UI work) |
+| `m8-graveyard-similarity` | Real `check_against_graveyard()` using embedding or LLM compare | Yes (independent) |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_reflection.py` — `test_end_to_end_reflection_cycle()` | Reflection pipeline accepts trade bank + decisions + backtest results, returns a valid spec YAML, deploys it, agent's next decision uses the new spec |
+| `tests/test_reflection.py` — `test_anti_overfit_rejects_overfit()` | A deliberately overfit spec revision (fits noise in the evidence window) is rejected by the holdout gate |
+| `tests/test_reflection.py` — `test_anti_overfit_adversarial_pass()` | The second LLM call produces at least 1 invalidation condition; the spec is flagged if the adversarial pass finds a critical flaw |
+| `tests/test_reflection.py` — `test_min_trade_gate()` | Reflection is skipped if the agent has fewer than 20 trades since the last update |
+| `tests/test_reflection.py` — `test_update_throttle()` | A second reflection attempt within 30 trades or 14 days is blocked |
+| `tests/test_reflection.py` — `test_pattern_persistence()` | A condition that appears in only 1 of 3 non-overlapping week windows fails the persistence gate |
+| `tests/test_reflection.py` — `test_calibration_curve()` | Given synthetic decisions with known confidence/outcome pairs, the calibration report produces correct bucket-level win rates |
+| `tests/test_spawner.py` — `test_graveyard_similarity_blocks_duplicate()` | Spawning an agent with a thesis substantively similar to a terminated agent is rejected |
+| `tests/test_spec_deploy.py` — `test_spec_hot_reload()` | Writing a new spec version to the DB causes the agent's next heartbeat to use it without a restart |
+| `tests/test_decision_loop.py` — `test_compiled_agent_uses_spec()` | A compiled agent (config flag `compiled: true`) calls the interpreter instead of the LLM, and the `model` field is set to `compiled/{spec_version}` |
+| `tests/test_decision_loop.py` — `test_control_arm_uses_llm()` | A pure-LLM control-arm agent still calls the LLM even when a spec is present |
+
+#### Done when
+End-to-end reflection cycle completes on a live compiled agent: the agent has ≥20 post-reflection trades, triggers a reflection, produces a revised spec, the spec passes all anti-overfit gates, the pipeline deploys it hot, and the next heartbeat's decision uses `backtest/interpreter.py` (not the LLM). A rejected overfit revision is visible in the reflection log with the specific gate name that blocked it. The web UI shows both spec versions with a diff view and the calibration curve. `sage_turtle` is spawned and trading on its event/unlock spec.
 
 ---
 
 ### M9 — Selection
 
-**Goal:** The meta-controller that manages agent lifecycle with statistics that respect small samples.
+> The meta-controller that manages agent lifecycle with statistics that respect small samples. The Head of Desk and risk officer turn the desk from a collection of agents into a self-regulating firm.
 
-**You can verify:** The desk runs 2+ weeks unattended: evaluated, culled, spawned, throttled — with a coherent morning summary in the chat.
+#### Goal
+Build the meta-controller layer: a scheduled evaluation job that runs periodically (every N trades per agent), compares each agent's performance against the null distribution using small-sample-aware statistics, and — based on configurable thresholds — promotes to ACTIVE, suspends with probation, or terminates and sends to the graveyard. The terminated agent's best fingerprints are harvested as seeds for the next spawn. The Head of Desk (frontier LLM with query tools over the full trade bank) provides a daily briefing and a chat interface where a human can ask "why did you cull copper_vane?" and get a data-backed answer. The desk risk officer runs as a mid-loop background job, producing hourly regime memos, enforcing gross-exposure limits and event blackout windows, and holding kill-switch authority — with the constitutional constraint that it can *only* reduce risk, never add it.
 
-**Tasks:**
-1. Meta-controller evaluation job with statistics that respect small samples: compare each agent to the null distribution, probation before termination, evaluation cadence in *trades* not days
-2. Cull/spawn/graveyard + harvest seeds; head-of-desk chat (frontier LLM with query tools over the bank) — daily briefing interface
-3. Desk risk officer (mid loop): hourly regime memo, gross-exposure throttle, event blackout windows (no new entries 2h pre-FOMC etc.), kill-switch authority. Constraint: it can only *reduce* risk, never add.
-4. Diversity maintenance: spawn thesis-similarity check (embedding or LLM compare against graveyard)
+#### Acceptance Criteria
+1. A scheduled meta-controller evaluation job (`meta/controller.py` + `meta/evaluator.py`) runs every N trades per agent (configurable, default 30). For each agent, it computes a significance test against the null distribution (from `benchmark_random_walk`'s trade history) — an agent that does not beat the null at p < 0.05 after 50 trades enters probation; after 100 trades without improvement, it is terminated.
+2. The evaluation cadence is measured in *trades* (not calendar days) — agents that trade infrequently accumulate evaluations slowly, agents that trade 15/day are evaluated frequently.
+3. Probation before termination: a borderline agent (p between 0.05 and 0.15, or PF between 0.8 and 1.0) is flagged SUSPENDED rather than terminated, triggering a review cycle. After the review (10 more trades or 7 days), it is either restored to ACTIVE or terminated.
+4. Cull triggers from FORGE_PROPOSAL §Agent Lifecycle are enforced: PF < 0.8 for two consecutive evaluations → suspend; max drawdown > 20% → immediate suspension; win rate < 35% after 50 trades → terminate; zero trades in 5 days → thesis review required.
+5. On termination, `meta/spawner.py` harvests the agent's 5 best fingerprints (highest PnL%, cleanest thesis execution) and stores them in a `seeds` table for the next spawn generation. The full agent record — all thesis versions, trade history, termination reason, and harvested fingerprints — persists permanently in the graveyard.
+6. The Head of Desk (`meta/head_of_desk.py`) is a frontier LLM with query tools (`store/query.py`'s full interface, access to the graveyard via SQLite, and access to all agent performance summaries). It runs a daily morning briefing job that synthesizes: desk-wide P&L, regime change alerts, agent-level divergence signals ("jade_hawk is losing in range_high_vol but winning everywhere else"), and any pending Human review actions (agents in probation, promotion candidates). The briefing is stored in the `evaluations` table and rendered on the `/` overview page as a collapsible "Morning Brief" panel.
+7. A WebSocket-backed chat interface at `/chat` connects to the Head of Desk, accepting natural-language queries: "Why is jade_hawk underperforming in ranging markets?", "What patterns are working best across the desk right now?", "Which agents are running similar theses?" The Head of Desk responds in streaming text with inline data references. Chat history is persisted in `chat_history` SQLite table.
+8. The desk risk officer (`meta/risk_officer.py`) runs at a configurable mid-loop cadence (default 30–60 minutes). Each cycle: (a) fetches the current market state from `market/provider.py`, (b) tags the market regime (reusing `market/regime.py`), (c) computes aggregate gross exposure across all agents (long notional + short notional, absolute sum), (d) if gross exposure exceeds a configurable desk-wide limit (default 2× total account equity), it disables entries on a prorated set of the highest-exposure agents until the desk level drops below threshold, (e) checks the event calendar for blackout windows (no new entries 2h before FOMC, CPI, OPEC meetings), (f) writes a risk memo to the `evaluations` table and (optionally) sets kill flags on individual agent configs. **Constraint: the risk officer can only reduce risk** — it can increase SL tightness, reduce position size, disable agents, or close positions. It can never increase size, reduce SL distance, or add new positions.
+9. Diversity maintenance (`meta/spawner.py`'s `check_against_graveyard()` — already built in M8 as a real function) is called before every spawn. If the proposed thesis embedding (or LLM summary comparison) is above a similarity threshold against any terminated agent, the spawn is rejected and a different seed is generated. The rejection is logged to the `evaluations` table.
 
-**Done when:** The desk runs 2+ weeks unattended with coherent morning summary.
+#### Dependencies
+- **M8 must ship first**: the compiled-agent pipeline (reflection, spec deployment, hot reload) creates the substrate that M9 manages. Without evolution, there is nothing to evaluate and cull — agents running the same static spec forever don't need a meta-controller; the Head of Desk's daily briefing would have nothing interesting to say because no agent changes its behavior. The anti-overfit gates from M8 also provide the calibration data M9 needs for the statistical comparison against the null.
+- The `decisions` table + counterfactual job (M6) must be running so the meta-controller's statistical comparison has the full decision set per agent, not just the traded subset.
+- The `evaluations` table and `chat_history` table must exist in the SQLite schema (they're in `data/schema.sql` if it kept M1's table list — verify and add if missing).
+- `meta/spawner.py` and `meta/evaluator.py` exist as stubs from M5; they need their full implementations.
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m9-meta-controller` | Evaluation job + cull/spawn/graveyard logic + statistical comparison against null | After M8, but not dependent on M9 worktrees |
+| `m9-head-of-desk` | Head of Desk LLM chain + daily briefing + chat interface + WebSocket streaming | Yes (independent of risk officer) |
+| `m9-risk-officer` | Mid-loop risk officer: regime memo, gross-exposure throttle, event blackout, kill flags | Yes (independent of Head of Desk / controller) |
+| `m9-diversity-spawn` | Integration test: spawn with graveyard similarity check rejects duplicates | Part of controller worktree or standalone |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_meta_controller.py` — `test_evaluation_runs_on_schedule()` | The meta-controller job fires at the configured trade interval and produces an `evaluations` row |
+| `tests/test_meta_controller.py` — `test_cull_below_null()` | An agent that underperforms the null distribution at p < 0.05 after 100 trades is terminated |
+| `tests/test_meta_controller.py` — `test_probation_suspension()` | An agent at PF 0.85 after 60 trades is SUSPENED, not terminated |
+| `tests/test_meta_controller.py` — `test_cull_on_drawdown()` | Agent with >20% max drawdown is immediately suspended |
+| `tests/test_meta_controller.py` — `test_cull_on_win_rate()` | Agent with <35% win rate after 50 trades is terminated |
+| `tests/test_meta_controller.py` — `test_zero_trade_review()` | Agent with 0 trades in 5 days triggers thesis review |
+| `tests/test_head_of_desk.py` — `test_daily_briefing_produces_text()` | The Head of Desk briefing call returns a non-empty string that references at least one agent by name |
+| `tests/test_head_of_desk.py` — `test_chat_query_returns_stream()` | A `/chat` query returns a streaming WebSocket response that references actual trade data |
+| `tests/test_risk_officer.py` — `test_gross_exposure_throttle()` | With aggregate notional > 2× equity, the risk officer disables entries on enough agents to bring exposure under the threshold |
+| `tests/test_risk_officer.py` — `test_event_blackout_blocks_entries()` | Within the 2h pre-FOMC window, new trade entries are blocked across all agents (existing positions unaffected) |
+| `tests/test_risk_officer.py` — `test_risk_officer_cannot_add_risk()` | A risk officer's output dict is validated: any field that *increases* size, reduces SL distance, or adds entries results in an `assert` failure |
+| `tests/test_spawner.py` — `test_harvest_seeds_on_termination()` | On termination, the agent's 5 best fingerprints are written to the `seeds` table |
+| `tests/test_spawner.py` — `test_spawn_from_harvest()` | A new agent can be spawned from a harvested seed fingerprint |
+
+#### Done when
+The desk runs 2+ weeks unattended: agents are evaluated on a trade-based cadence, underperforming agents are suspended or terminated with harvested seeds stored, the Head of Desk produces a coherent morning summary daily, the risk officer enforces exposure limits and blackout windows, and the /chat interface responds to natural-language questions about desk performance. All 9 acceptance criteria tests pass with synthetic data.
 
 ---
 
 ### M10 — Live, Small
 
-**Goal:** The first real-money trades — small, controlled, and only after clearing the null-model gauntlet.
+> The first real-money trades — small, controlled, and only after clearing the null-model gauntlet. This is the milestone where the entire system justifies its existence: does the edge that survived paper trading survive the transition to real execution?
 
-**You can verify:** First agent in shadow mode with real orders visible on Hyperliquid. Paper vs live comparison report shows reasonable slippage numbers.
+#### Goal
+Harden the live bridge, implement shadow mode (paper + live simultaneously for the same agent), establish the promotion gate (statistical + human), and execute the first real-money trades on Hyperliquid with $500–1,000 of capital on a single agent. Paper and live fills are compared in a daily divergence report. If slippage, fills, or execution quality are materially worse than paper, the agent is demoted back to paper-only until the gap is understood.
 
-**Tasks:**
-1. Live-bridge hardening: exchange-native trigger orders for SL/TP (never rely on the 5-min local loop for real stops), asset-specific size/price decimals (szDecimals), partial-fill and IOC-miss handling, position reconciliation against exchange state on every heartbeat
-2. Shadow mode (paper + live simultaneously): slippage report, fill comparison
-3. Promotion gate: ≥ 100 paper trades, beats null at 95%, positive after modeled costs, calibrated confidence, human click. Start with $500–1,000 on ONE agent (likely a funding-family agent).
-4. Live audit log, webhook alerts, live emergency stop; daily automated paper-vs-live divergence report
+#### Acceptance Criteria
+1. **Live bridge (`execution/live_bridge.py`) is production-hardened:**
+   - Exchange-native trigger orders for stop-loss and take-profit: submits a limit order + a trigger SL/TP order via Hyperliquid's conditional order API at entry time. Never relies on the 5-minute local loop for real stops — even if the machine loses power or the process crashes, exchange-managed triggers protect the position.
+   - Asset-specific decimal handling: reads each asset's `szDecimals` and `pxDecimals` from the exchange info endpoint at startup and rounds all order parameters accordingly. A test proves that `submit_order(SOL, notional=100.00)` produces the correct integer `sz` for SOL's szDecimals.
+   - Partial-fill handling: if a limit order fills partially, the bridge records the filled size, updates the position state, and only triggers the SL/TP orders for the filled quantity. Unfilled remainder is either cancelled (IOC) or left working (GTC) according to the order type.
+   - IOC-miss handling: if an IOC order gets zero fills, the bridge logs the miss, does NOT create a phantom position, and returns a clear "no_fill" status that the agent's runtime handles gracefully (skips the cycle, logs the miss).
+   - Position reconciliation: on every heartbeat, the live bridge fetches the agent's actual exchange positions via `get_positions()` and compares them against `store/positions.py`'s local view. Any mismatch (phantom position in local DB that exchange doesn't have, size discrepancy > 0.01 units) triggers a position reconciliation log entry and corrects the local state to the exchange's view. The reconciliation is **exchange-authoritative** — the exchange is always right.
+   - A `live_trades` table (already in `data/schema.sql`) is the immutable append-only record of all real-money trades. Every live fill writes a row. No row is ever updated, only appended. (The local `trades` table still tracks paper and shadow equivalents; `live_trades` is the audit log.)
+
+2. **Shadow mode:**
+   - A configuration flag per agent (`config_json.shadow = true`) causes `agents/runtime.py` to run both `paper_bridge` and `live_bridge` in parallel for every decision. The paper bridge executes as today; the live bridge submits the exact same order to the exchange (if `action == "enter"`) or closes the exchange position (if `action == "close"`).
+   - Paper and live positions are tracked independently (two `positions` rows with `bridge='paper'` and `bridge='live'`). `risk/gate.py` validates each bridge independently — paper follows paper rules, live follows live rules.
+   - A shadow comparison report (`execution/shadow_reporter.py`) runs automatically at every live trade close: entry price diff (paper vs live), exit price diff, slippage (actual vs paper's estimated), fill timing (did the live fill at the expected heartbeat price?), and a one-sentence assessment ("acceptable", "needs investigation", "bridge failure"). The report is stored in a `shadow_comparisons` SQLite table.
+   - The daily automated divergence report queries the last 7 days of shadow comparisons: aggregate slippage stats, worst fills, and a recommendation (promote to full live, continue shadow, or demote).
+   - Human review trigger: any single trade with slippage > 0.3% (or 3× the paper model's estimate) generates an alert. Three such trades in a row triggers a review flag requiring a human click before the agent can enter another live trade.
+
+3. **Promotion gate:**
+   - Statistical requirement: agent has ≥100 paper trades, beats null at 95% confidence, positive return after modeled costs (fees + estimated slippage), and a calibrated confidence curve (M8's calibration report shows < 10 percentage points gap between stated confidence and realized win rate in any bucket with ≥10 decisions).
+   - Human requirement: the web UI shows a "Promote to Shadow" or "Promote to Live" button with a confirmation dialog that displays: the agent's full performance summary, the shadow comparison stats (if applicable), and a required text input for the human's review notes. The promotion action is logged in the `evaluations` table.
+   - One agent only for the first promotion: likely a funding-carry agent (`silver_basin`) or a simple funding-harvest strategy with the smoothest equity curve. The agent must have the most consistent regime-adjusted PnL, not the highest absolute return.
+   - Starting capital: $500–1,000 (configurable in `config.yaml`'s `live.starting_balance`). Fixed at this level for at least 30 trading days before any capital increase or additional agent promotion.
+
+4. **Audit and safety:**
+   - Live audit log: every live event (order submission, fill, partial fill, miss, cancellation, SL/TP trigger, reconciliation event, error) is written to a JSONL file at `data/live_audit/{YYYY-MM-DD}.jsonl` (gitignored). Each line has a timestamp, event type, and full payload. Never deleted — a raw-byte record for post-mortem analysis.
+   - Webhook alerts on: live position opened, live position closed, live SL/TP filled, reconciliation mismatch, live bridge error, shadow divergence > 0.3%, any live drawdown > 5%. Configured via the `alert.webhooks` block in `config.yaml` (array of URL strings, each POST with a JSON body).
+   - Emergency stop: the "/settings" page has a large red "EMERGENCY STOP" button. When clicked: (a) immediately closes ALL exchange positions via IOC market orders (no SL/TP — get out now), (b) disables all live bridges, (c) logs the action in the audit log and fires the webhook, (d) requires a deliberate human "Restart Live" action to re-enable. The emergency stop cannot be automated — it is always human-initiated.
+   - Daily automated paper-vs-live divergence report: runs at a configurable time (default 05:00 UTC), reads the `shadow_comparisons` table, produces a concise Markdown report emailed or logged, and surfaces it on the web dashboard's overview page.
+
+#### Dependencies
+- **M9 must ship first**: the meta-controller's evaluation and culling logic is how an agent proves it deserves promotion. An agent that cannot survive M9's selection pressure at paper scale has no business near real capital. The M9 risk officer also provides the desk-level exposure logic M10 extends for the emergency stop and live-specific risk rules.
+- **M8 must ship first**: the calibration report (confidence vs realized win rate) is a promotion-gate requirement. Without M8's calibration infrastructure, we cannot verify the agent's confidence is meaningful.
+- **$500–1,000 in a Hyperliquid wallet**: real capital is required for testing. The wallet must be funded and the private key configured in `.env` (not `config.yaml`). The account should be funded with a small test transaction first — no live bridge test runs until the wallet is confirmed to have funds and the exchange API responds correctly with a $10 test order.
+- **Hyperliquid exchange-native conditional orders**: If conditional (trigger) SL/TP orders are not yet supported on Hyperliquid for the account tier being used, acceptance criterion #1's "exchange-native triggers" must be replaced with a fallback: a redundant watchdog process on a separate machine/timer that polls positions every 60 seconds and closes them if the SL/TP is breached. Document which approach is in use and why.
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m10-live-bridge` | LiveBridge: order submission, szDecimals/pxDecimals, partial-fill, IOC-miss, position reconciliation, exchange-native triggers | Yes (core engineering, independent of others) |
+| `m10-shadow-mode` | Shadow mode routing, parallel paper+live execution, shadow_comparisons table, divergence reporter | After live bridge |
+| `m10-promotion-gate` | Promotion gate UI + logic: statistical checks, human confirmation dialog, config hygiene | Yes (independent of live bridge implementation) |
+| `m10-audit-safety` | Live audit log, webhook alerts, emergency stop button, daily divergence report | Yes (independent of bridge implementation) |
+| `m10-wallet-setup` | Wallet funding + .env configuration + test order + exchange API readiness verification | Must run first (prerequisite) |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_live_bridge.py` — `test_submit_order()` (mock exchange) | A valid order dict is translated into the correct Hyperliquid API payload and returns a fill |
+| `tests/test_live_bridge.py` — `test_sz_decimals_rounding()` | For an asset with `szDecimals=4`, a computed size of `0.12345` rounds to `0.1234` |
+| `tests/test_live_bridge.py` — `test_partial_fill_handles_sl_tp()` | A 50% partial fill creates a position with half the requested size and valid SL/TP for that half |
+| `tests/test_live_bridge.py` — `test_ioc_miss_returns_no_fill()` | Zero-fill IOC returns `status="no_fill"`, no position row is created |
+| `tests/test_live_bridge.py` — `test_position_reconciliation_overwrites_local()` | When exchange reports a position the local DB doesn't have, the local DB is updated to match exchange |
+| `tests/test_live_bridge.py` — `test_exchange_trigger_sl_tp_submitted()` | On entry, an exchange-native conditional SL/TP order is submitted alongside the market order |
+| `tests/test_shadow.py` — `test_shadow_dual_execution()` | With `config_json.shadow = true`, both bridges are called and two `positions` rows (mode='paper', mode='live') are created |
+| `tests/test_shadow.py` — `test_shadow_violation_independent()` | A paper order that passes the risk gate but violates a live-specific rule (e.g., exchange minimum notional) is rejected for live but executed for paper |
+| `tests/test_shadow.py` — `test_divergence_report()` | Given synthetic paper and live fills with known price differences, the divergence report computes correct slippage stats |
+| `tests/test_emergency_stop.py` — `test_emergency_stop_closes_all()` | The emergency stop API endpoint closes all exchange positions and sets all live bridges to disabled |
+| `tests/test_emergency_stop.py` — `test_emergency_stop_requires_human()` | After emergency stop, the "Restore Live" action requires explicit human confirmation via the web UI |
+| `tests/test_promotion_gate.py` — `test_promotion_requires_100_trades()` | An agent with 99 trades cannot be promoted |
+| `tests/test_promotion_gate.py` — `test_promotion_requires_beats_null()` | An agent that does not beat the null at 95% confidence cannot be promoted |
+| `tests/test_promotion_gate.py` — `test_promotion_requires_calibrated_confidence()` | An agent with a 20pp gap between confidence and win rate in any bucket cannot be promoted |
+| `tests/test_promotion_gate.py` — `test_promotion_requires_human_reason()` | The promotion API endpoint rejects a request without a human reason string |
+| `tests/test_live_audit.py` — `test_audit_log_writes_on_every_event()` | Each live bridge event appends a line to the audit JSONL file |
+| `tests/test_live_audit.py` — `test_webhook_fires_on_live_fill()` | A live fill triggers a POST to the configured webhook URL |
+| `tests/test_live_audit.py` — `test_daily_divergence_report_generates()` | The daily divergence report produces a Markdown string with correct aggregate stats |
+
+#### Done when
+A single agent (likely `silver_basin` or the simplest funding-carry agent) has been promoted through the full pipeline: ≥100 paper trades → statistical + calibration checks pass → human review → shadow mode (paper + live simultaneously, with a divergence report acceptable for 7 days → human confirms) → full live mode trading $500–1,000 real capital. An emergency stop button exists and works. All 18 acceptance tests pass. The daily divergence report shows that live fills are within 0.2% of paper fills on average.
 
 ---
 
 ### M11 — Compounding Operations (ongoing)
 
-1. Capital allocation across live agents ∝ shrunk Sharpe (fractional-Kelly capped); weekly rebalance by meta-controller, human-approved.
-2. Ops hardening: settings UI completion, restart recovery tests, DB backups, Docker, health metrics.
-3. Research flywheel: monthly "strategy review" reflection at desk level — retire crowded edges, propose new families (this is where LLM creativity compounds into robustness-over-time).
+> The desk graduates from a prototype to an operation. Capital allocation follows fractional Kelly across live agents. Infrastructure is hardened for unattended 24/7 running. The research flywheel produces new strategy families faster than old ones decay.
+
+#### Goal
+Scale from a single live agent (M10) to multiple live agents with deposit-sized capital allocations proportional to risk-adjusted performance. Harden operations so the system runs unattended for weeks at a time — restart recovery, containerization, health monitoring, automated backups. Institutionalize the research flywheel: a monthly desk-level strategy review where the Head of Desk surveys all active theses, identifies crowded edges, and proposes new strategy families for seeding.
+
+#### Acceptance Criteria
+1. **Capital allocation engine (`meta/capital_allocation.py`):**
+   - Each live agent's deposit is determined by fractional Kelly criterion: optimal fraction = (expected return / variance) × fudge_factor (default 0.25 for fractional Kelly). The expected return and variance are computed from the agent's paper and shadow trade history (combined, with shadow trades weighted 0.3× and paper trades weighted 1× to avoid over-weighting the smaller sample).
+   - If an agent's optimal Kelly fraction is negative or zero (no expected edge), its live capital is returned to the desk reserve and the agent is demoted to paper-only until it proves edge again.
+   - Weekly rebalance: every Monday 00:00 UTC, the meta-controller recomputes optimal fractions from the trailing 8 weeks of trade data and proposes a new allocation. The proposal is written to the `evaluations` table and surfaced in the Head of Desk's daily briefing. A human must approve or override the proposal within 48 hours, after which the old allocation persists.
+   - Total live capital is capped at a configurable maximum (default: 50% of the wallet balance; the rest is held as a desk reserve for margin, new agent seeds, and emergency).
+   - No agent receives more than 25% of total live capital (default diversification floor — no single point of failure).
+
+2. **Ops hardening:**
+   - **Docker**: A `Dockerfile` at the repo root builds a single image that includes the Python environment, all dependencies, and the entrypoint (`python forge.py`). A `docker-compose.yml` mounts `config.yaml`, `.env`, and the `ledger/` / `state/` data directories as volumes so data persists across container restarts. The LLM server (`llama-server`) can run either inside the same container (bundled binary) or as a separate service (recommended for GPU passthrough) — document both configurations in a `DOCKER.md`.
+   - **Restart recovery**: The existing `scripts/rebuild_local_cache.py` (from M7a) is verified to work correctly when run inside a fresh container: a `docker-compose down` + `docker-compose up` must restore the exact desk state without manual intervention. A `test_restart_recovery` integration test proves this by starting forge, running 10 heartbeats, killing the process, restarting, and verifying that all open positions, account balances, and agent statuses are identical.
+   - **DB persistence and backup**: `data/forge.db` and `data/live_audit/` are on a docker volume (not the container's ephemeral filesystem). A `scripts/backup.sh` script creates a timestamped archive of `ledger/`, `state/`, and `data/forge.db` to a configurable backup directory (default `./backups/`). The backup runs daily at 03:00 UTC via APScheduler.
+   - **Health metrics endpoint**: `/health` (from M2) is extended with: (a) time since last successful heartbeat for each agent, (b) time since last counterfactual job, (c) LLM server latency p50/p95 over the last 100 calls, (d) Hyperliquid API error rate over the last 500 calls, (e) SQLite file size, (f) ledger growth rate (MB/day over last 7 days). A Prometheus-compatible `/metrics` endpoint exports these as gauge metrics for external monitoring.
+   - **Settings UI completion**: All fields in the `/settings` page that were stubs in earlier milestones are now functional: universe assets (add/remove triggers a regeneration of the heartbeat feature list), reflection trigger mode (trades-vs-days-vs-manual actually controls when reflection fires), evaluation thresholds are editable and the meta-controller reads them from the `settings` table on every evaluation cycle.
+   - **Log rotation**: The web UI server and APScheduler logs are rotated daily (max 30 days retention) via Python's `TimedRotatingFileHandler`. The audit JSONL files in `data/live_audit/` follow the same retention. An alert is raised if disk usage exceeds 90% of the available volume.
+
+3. **Research flywheel:**
+   - Monthly desk-level strategy review: a scheduled job (cron `day=1, hour=06:00 UTC`) invokes the Head of Desk with a "strategy review" prompt payload that includes: cumulative PnL and Sharpe by strategy family (funding, momentum, event, liquidations, relative value), agent-level adjacency matrix (which theses are most correlated in daily PnL), terminated-agent patterns from the graveyard, and a summary of all open spec versions and their last backtest dates.
+   - The Head of Desk produces a written monthly review (stored as a markdown file in `data/monthly_reviews/{YYYY-MM}.md`): at least three sections — "Retire" (edges that are crowded or decaying), "Maintain" (edges working as expected), "Seed" (new strategy families the desk should try next, with specific seed thesis sketches). The review is also posted as a `chat_history` message visible in the web UI.
+   - The "Seed" section of the review becomes a spawn queue: the next time an agent slot opens (cull or promotion frees a slot), the meta-controller checks the latest monthly review's "Seed" recommendations before applying the default spawn logic. If a seed thesis matches an unspawned recommendation, that thesis is used.
+   - A strategy-family adjacency metric is tracked over time: by month, compute the average pairwise PnL correlation within each family. A family whose correlations are rising over 3 consecutive months is flagged for forced de-correlation (reduce size of the correlated members, force thesis divergence on their next reflection cycle).
+
+#### Dependencies
+- **M10 must ship first**: without at least one live agent with real trading history, capital allocation has nothing to allocate. The Docker/ops hardening can partially start in parallel with M10's testing phase but M10's shadow-mode pipeline gives the first real operational data to harden against.
+- **M9 must ship first**: the meta-controller (evaluation, culling, spawning) is the mechanism the research flywheel feeds into. The monthly review's "Seed" recommendations are only useful if the desk can actually spawn new agents from them.
+- **M8 must ship first**: the compiled-agent pipeline means new strategy families are spec-first, so seeding a new family is as fast as writing and backtesting a spec.
+- **At least 3 months of trading data** for meaningful Kelly estimation (the weekly allocation engine uses 8-week trailing windows). If the system has been running for less time than that, capital allocation falls back to equal-weight, and the monthly review is proportionally shorter.
+- **Docker installed on the host machine** for the ops-hardening Dockerfile + docker-compose acceptance criteria. (If Docker is unavailable, the ops-hardening criteria are verified with equivalent manual steps and documented accordingly.)
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m11-capital-allocation` | Fractional Kelly engine, weekly rebalance job, proposal+approval UI | Can start after M10's first live agent exists |
+| `m11-docker-ops` | Dockerfile + docker-compose.yml + restart-recovery integration test + backup script + /metrics endpoint | Yes (independent of capital allocation) |
+| `m11-settings-completion` | Complete all stub settings fields, wired to real behavior | Yes (independent) |
+| `m11-research-flywheel` | Monthly review LLM prompt template, desk-level synthesis, human-readable report, seed injection into spawn queue | Can start after M9 (needs the spawn mechanism) |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_capital_allocation.py` — `test_kelly_fraction_computed()` | Given synthetic trade history with known mean/variance, fractional Kelly is computed correctly |
+| `tests/test_capital_allocation.py` — `test_negative_allocation_demotes()` | An agent with negative optimal Kelly is demoted to paper-only |
+| `tests/test_capital_allocation.py` — `test_weekly_rebalance_proposal()` | The weekly rebalance job produces a proposal with non-negative fractions summing to ≤ max_total_live_capital |
+| `tests/test_capital_allocation.py` — `test_no_single_agent_over_25pct()` | No proposed allocation exceeds 25% of total live capital |
+| `tests/test_capital_allocation.py` — `test_rebalance_requires_human_approval()` | After a week, the new allocation is visible in evaluations but not applied until a human clicks "Approve" |
+| `tests/test_docker.py` — `test_restart_recovery()` (integration) | Container restart preserves open positions, balances, and trade history |
+| `tests/test_health.py` — `test_metrics_endpoint()` | `/metrics` returns Prometheus-format gauges with valid values |
+| `tests/test_logging.py` — `test_log_rotation()` | Log files rotate at the configured size/schedule and old files are cleaned up |
+| `tests/test_research_flywheel.py` — `test_monthly_review_generates()` | The monthly review job produces a markdown file with "Retire", "Maintain", and "Seed" sections |
+| `tests/test_research_flywheel.py` — `test_seed_injected_into_spawn_queue()` | After a monthly review with a "Seed" entry, the next spawn uses the recommended thesis |
+| `tests/test_research_flywheel.py` — `test_correlation_rising_triggers_action()` | A strategy family with rising inter-agent correlation over 3 months triggers a forced thesis-refinement flag on those agents |
+| `tests/test_settings.py` — `test_universe_add_triggers_rebuild()` | Adding a new asset to the universe via settings triggers a heartbeat feature-list regeneration |
+
+#### Done when
+Multiple live agents with proportional Kelly-allocated capital run unattended for 4+ weeks. The system survives Docker container restarts with zero data loss. The monthly strategy review has produced at least one real "Seed" recommendation that was spawned into a new agent. All 12 acceptance tests pass. The /metrics endpoint is consumed by an external monitoring dashboard showing live agent health, exchange API reliability, and ledger growth rate.
 
 ---
 
