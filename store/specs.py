@@ -126,7 +126,8 @@ def deploy_spec(
         status = "rejected"
         rejection_reason = "spec rejected by deploy pipeline — see validation_errors"
 
-    # 2. Write YAML file
+    # 2. Write YAML file (skip if byte-identical to avoid unnecessary
+    #    file-touching on startup reconciliation).
     SPECS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = SPECS_DIR / f"{agent_id}_v{spec.spec_version}.yaml"
     spec_dict = _spec_to_dict(spec)
@@ -136,7 +137,8 @@ def deploy_spec(
         sort_keys=False,
         allow_unicode=True,
     )
-    filepath.write_text(yaml_text, encoding="utf-8")
+    if not (filepath.exists() and filepath.read_bytes() == yaml_text.encode("utf-8")):
+        filepath.write_text(yaml_text, encoding="utf-8")
 
     # 3–5. DB transaction
     conn.execute(
