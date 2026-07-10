@@ -735,3 +735,194 @@ async def test_close_action_awaits_postmortem_before_returning(conn, tmp_path, m
     # the implementation is still fire-and-forget.
     assert postmortem_completed is True
     assert result["action"] == "close"
+
+
+@pytest.mark.asyncio
+async def test_close_action_logs_decision_even_when_postmortem_raises(
+    conn, tmp_path, monkeypatch
+):
+    """Final-review Finding 1: run_postmortem raising must not prevent the
+    close decision from being logged, and must not turn the return value
+    into {"action": "error", ...}. See docs/STRATEGIC_ASSESSMENT_07_09_2026.md
+    final whole-branch review."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    from store.db import insert_trade, insert_position
+    from datetime import datetime, timezone
+
+    trade_id = "test_trade_002"
+    pos_id = "pos_test_trade_002"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    trade = {
+        "id": trade_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "account_balance_at_entry": 50000.0,
+        "entry_timestamp": now,
+        "status": "open",
+        "mode": "paper",
+        "thesis_version": 1,
+    }
+    insert_trade(conn, trade)
+
+    position = {
+        "id": pos_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "opened_at": now,
+        "mode": "paper",
+        "trade_id": trade_id,
+    }
+    insert_position(conn, position)
+
+    async def raising_run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt):
+        raise RuntimeError("boom: simulated postmortem failure")
+
+    monkeypatch.setattr(
+        "agents.decision_loop.run_postmortem", raising_run_postmortem
+    )
+
+    def close_llm(sys, prompt, **kwargs):
+        return {
+            "action": "close",
+            "position_id": pos_id,
+            "reason": "test_close_raises",
+        }, "Test Close Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=close_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "close"
+    row = conn.execute(
+        "SELECT decision_action FROM decisions WHERE agent_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    assert row is not None
+    assert row["decision_action"] == "close"
+
+
+@pytest.mark.asyncio
+async def test_run_postmortem_handles_none_hypothesis(conn):
+    """Final-review Finding 2a: trade rows with hypothesis=None (present but
+    NULL, e.g. legacy/non-LLM-entered trades) must not raise a TypeError
+    when run_postmortem builds its prompt."""
+    from agents.decision_loop import run_postmortem
+    from store.db import insert_trade
+    from datetime import datetime, timezone
+
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+
+    trade_id = "test_trade_003"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    trade = {
+        "id": trade_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "account_balance_at_entry": 50000.0,
+        "entry_timestamp": now,
+        "status": "closed",
+        "mode": "paper",
+        "thesis_version": 1,
+        "pnl_pct": 0.05,
+        "exit_reason": "take_profit",
+    }
+    insert_trade(conn, trade)
+    # Confirm the fixture actually has hypothesis=None (present but null),
+    # not merely absent, to reproduce the None-vs-missing-key bug exactly.
+    row = conn.execute(
+        "SELECT hypothesis FROM trades WHERE id = ?", (trade_id,)
+    ).fetchone()
+    assert row["hypothesis"] is None
+
+    def stub_llm(sys, prompt, **kwargs):
+        return {"action": "wait", "reason": "won because of trend"}, "Stub Model"
+
+    await run_postmortem(conn, AGENT_ID, trade_id, stub_llm, "system prompt")
+
+    updated = conn.execute(
+        "SELECT agent_postmortem FROM trades WHERE id = ?", (trade_id,)
+    ).fetchone()
+    assert updated["agent_postmortem"] == "won because of trend"
+
+
+@pytest.mark.asyncio
+async def test_run_postmortem_forwards_agent_id_to_llm_fn(conn):
+    """Final-review Finding 2b: run_postmortem must forward agent_id to
+    llm_fn as a keyword argument, matching run_counterfactual's existing
+    pattern, so pinned per-agent models are honored for postmortems too."""
+    from agents.decision_loop import run_postmortem
+    from store.db import insert_trade
+    from datetime import datetime, timezone
+
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+
+    trade_id = "test_trade_004"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    trade = {
+        "id": trade_id,
+        "agent_id": AGENT_ID,
+        "asset": "SOL-PERP",
+        "direction": "long",
+        "entry_price": 145.20,
+        "stop_loss_price": 143.0,
+        "take_profit_price": 150.0,
+        "leverage": 3,
+        "position_size_pct": 0.10,
+        "notional_usd": 5000.0,
+        "account_balance_at_entry": 50000.0,
+        "entry_timestamp": now,
+        "status": "closed",
+        "mode": "paper",
+        "thesis_version": 1,
+        "pnl_pct": 0.05,
+        "exit_reason": "take_profit",
+        "hypothesis": "some prior thesis text",
+    }
+    insert_trade(conn, trade)
+
+    captured_kwargs = {}
+
+    def capturing_llm(sys, prompt, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"action": "wait", "reason": "captured"}, "Stub Model"
+
+    await run_postmortem(conn, AGENT_ID, trade_id, capturing_llm, "system prompt")
+
+    assert captured_kwargs.get("agent_id") == AGENT_ID
