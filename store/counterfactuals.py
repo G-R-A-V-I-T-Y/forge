@@ -306,8 +306,10 @@ def _read_candle_ledger(
         return None
 
     # Filter to the asset and >= start_ts.
+    # ts may be string or int depending on partition read — normalise to int.
+    ts_col = pd.to_numeric(candles_df["ts"], errors="coerce")
     start_ms = int(start_ts.timestamp() * 1000)
-    mask = (candles_df["asset"] == asset) & (candles_df["ts"] >= start_ms)
+    mask = (candles_df["asset"] == asset) & (ts_col >= start_ms)
     subset = candles_df.loc[mask, ["ts", "o", "h", "l", "c", "v"]]
 
     if subset.empty:
