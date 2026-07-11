@@ -23,6 +23,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(tables_sql)
     conn.commit()
     _migrate_trades_columns(conn)
+    _migrate_positions_columns(conn)
     _migrate_agents_columns(conn)
     if indexes_sql:
         conn.executescript(indexes_sql)
@@ -50,6 +51,12 @@ _TRADES_MIGRATION_COLUMNS = {
     "duration_minutes": "REAL",
     "voided": "INTEGER NOT NULL DEFAULT 0",
     "void_reason": "TEXT",
+    "true_notional": "REAL",
+}
+
+# Columns added after the initial schema for the positions table.
+_POSITIONS_MIGRATION_COLUMNS = {
+    "true_notional": "REAL",
 }
 
 # Columns added by the model-fallback-chain feature. Same rationale as
@@ -70,6 +77,15 @@ def _migrate_trades_columns(conn: sqlite3.Connection) -> None:
     for col, sql_type in _TRADES_MIGRATION_COLUMNS.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}")
+    conn.commit()
+
+
+def _migrate_positions_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add columns to an existing positions table."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(positions)")}
+    for col, sql_type in _POSITIONS_MIGRATION_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {sql_type}")
     conn.commit()
 
 

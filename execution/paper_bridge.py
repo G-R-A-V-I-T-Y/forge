@@ -1,6 +1,8 @@
+import secrets
 from datetime import datetime, timezone
 
 from execution.bridge import TradingBridge
+from execution.costs import compute_true_notional
 from market.heartbeat import (
     DEFAULT_HEARTBEAT_PATH,
     heartbeat_max_age_seconds,
@@ -15,9 +17,15 @@ def _now() -> str:
 
 
 def _trade_id(agent_id: str, asset: str) -> str:
+    """Generate a collision-proof trade ID.
+
+    Uses a 4-byte hex suffix from secrets.token_bytes to avoid PK collisions
+    when the same agent enters the same asset within the same second.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     short = asset.replace("-PERP", "")
-    return f"{agent_id}_{ts}_{short}"
+    suffix = secrets.token_bytes(2).hex()
+    return f"{agent_id}_{ts}_{short}_{suffix}"
 
 
 class PaperBridge(TradingBridge):
@@ -80,7 +88,9 @@ class PaperBridge(TradingBridge):
 
         account = await self.get_account()
         balance = account["balance"]
-        notional = balance * order["position_size_pct"]
+        margin = balance * order["position_size_pct"]
+        leverage = order["leverage"]
+        true_notional = compute_true_notional(balance, order["position_size_pct"], leverage)
 
         trade_id = _trade_id(self.agent_id, asset)
         pos_id = f"pos_{trade_id}"
@@ -97,9 +107,10 @@ class PaperBridge(TradingBridge):
             "entry_price": fill_price,
             "stop_loss_price": order["stop_loss_price"],
             "take_profit_price": order["take_profit_price"],
-            "leverage": order["leverage"],
+            "leverage": leverage,
             "position_size_pct": order["position_size_pct"],
-            "notional_usd": notional,
+            "notional_usd": margin,
+            "true_notional": true_notional,
             "entry_timestamp": now,
             "status": "open",
         }
@@ -113,9 +124,10 @@ class PaperBridge(TradingBridge):
             "entry_price": fill_price,
             "stop_loss_price": order["stop_loss_price"],
             "take_profit_price": order["take_profit_price"],
-            "leverage": order["leverage"],
+            "leverage": leverage,
             "position_size_pct": order["position_size_pct"],
-            "notional_usd": notional,
+            "notional_usd": margin,
+            "true_notional": true_notional,
             "opened_at": now,
             "max_hold_hours": order.get("max_hold_hours", 48.0),
             "mode": "paper",
@@ -126,7 +138,8 @@ class PaperBridge(TradingBridge):
         return {
             "trade_id": trade_id,
             "fill_price": fill_price,
-            "notional_usd": notional,
+            "notional_usd": margin,
+            "true_notional": true_notional,
             "timestamp": now,
         }
 

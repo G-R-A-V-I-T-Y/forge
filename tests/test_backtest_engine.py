@@ -308,6 +308,65 @@ def _write_events(ledger_dir: Path, month: str, rows: list[dict]) -> None:
             f.write(json.dumps(r) + "\n")
 
 
+def test_funding_pnl_accrues_in_backtest(tmp_path):
+    """Funding PnL is accrued on open positions during backtest.
+
+    A long-only spec with flat price (no SL/TP hit) and a known funding
+    rate should show funding PnL proportional to: position_size * rate * hours.
+    """
+    ledger_dir = tmp_path / "ledger"
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    n = 72  # 3 days
+
+    # Flat price at 1.0 — no SL/TP hit from price moves
+    candles = _synthetic_candles("FET-PERP", start, n, base_price=1.0, drift=0.0)
+    _write_candles(ledger_dir, "candles_5m", "2025-01", candles)
+
+    # Constant funding rate of 0.0005 per hour
+    funding_rate = 0.0005
+    funding_rows = [
+        {"ts": (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "asset": "FET-PERP", "rate": funding_rate}
+        for i in range(n)
+    ]
+    _write_candles(ledger_dir, "funding", "2025-01", funding_rows)
+
+    # Long-only spec with 1x leverage, no SL/TP (flat price), max_hold=48h
+    spec = Spec(
+        agent_id="fund_test", spec_version=1, thesis_version=1,
+        universe_include=["FET-PERP"], regime_exclude=[],
+        direction="long", confidence_threshold=0.5, scale_threshold=0.3,
+        evidence=[EvidenceTerm(
+            name="always", feature="funding_zscore",
+            thresholds=[Threshold(op=">", value=-100.0, weight=0.6), Threshold(op="else", weight=0.0)],
+            missing="veto",
+        )],
+        secondary_evidence=[],
+        stop_loss_pct=0.50, take_profit_pct=1.0, max_hold_hours=48,
+        leverage=1, position_size_pct=0.10,
+    )
+
+    result = run_backtest(
+        spec, ledger_dir, start, start + timedelta(hours=n - 1), taker_fee=0.0,
+    )
+
+    assert len(result.trades) >= 1, "expected at least one trade"
+    trade = result.trades[0]
+
+    # For a long trade, funding PnL should be negative (long pays positive funding)
+    assert "funding_pnl" in trade, "expected funding_pnl in trade result"
+    assert trade["funding_pnl"] < 0, "long should pay funding"
+
+    # Check that the funding magnitude is reasonable:
+    # Position size in coins = balance * size_pct * leverage / entry_price
+    # = 10000 * 0.10 * 1 / 1.0 = 1000 coins
+    # Funding over ~48h at 0.0005/h should be approx -1000 * 0.0005 * 48 = -24.0
+    # But actual duration depends on exact entry/exit times
+    held_hours = (trade["closed_at"] - trade["opened_at"]).total_seconds() / 3600
+    expected_funding_approx = -1000.0 * funding_rate * held_hours
+    assert trade["funding_pnl"] == pytest.approx(expected_funding_approx, rel=0.2)
+
+
 def test_run_backtest_threads_asset_events_into_compute_replayable_fields(tmp_path, monkeypatch):
     # Regression test for wiring the M7b event calendar into the M8
     # sage_turtle event features (days_to_event / unlock_size_pct,

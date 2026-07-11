@@ -109,8 +109,14 @@ async def test_close_updates_account_balance(bridge, conn, tmp_path):
     pos_id = bridge.get_positions()[0]["id"]
     result = await bridge.close(pos_id, "take_profit")
 
-    expected_pnl_pct = (149.01 - 145.20) / 145.20 * 3
-    assert result["pnl_pct"] == pytest.approx(expected_pnl_pct, rel=0.01)
+    # With true_notional (3x leverage), net pnl_pct = net_pnl_usd / margin
+    # Gross PnL on $15k true notional at 0.0787 = $1180.79
+    # Fees = $15k * 0.00035 * 2 = $10.50
+    # Net = $1170.29 / $5k margin = 0.234
+    expected_net_pnl_pct = (
+        15000.0 * (149.01 - 145.20) / 145.20 * 3 - 15000.0 * 0.00035 * 2
+    ) / (15000.0 / 3)
+    assert result["pnl_pct"] == pytest.approx(expected_net_pnl_pct, rel=0.01)
 
     account = await bridge.get_account()
     assert account["balance"] > 50000.0

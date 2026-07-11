@@ -7,6 +7,15 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from execution.costs import (
+    all_costs_from_trade,
+    compute_fees,
+    compute_funding_pnl,
+    compute_gross_pnl,
+    compute_position_size_in_coins,
+    compute_true_notional,
+)
+
 logger = logging.getLogger(__name__)
 
 _TRADE_LEDGER_EXCLUDE_COLUMNS = {
@@ -38,9 +47,14 @@ def has_open_position_for_asset(conn, agent_id: str, asset: str) -> bool:
 def find_first_cross(candles_5m, entry_ts_unix, direction, sl, tp):
     """Scan 5m candles from entry timestamp forward to find first SL/TP cross.
 
+    Examines candle wicks (high/low) for every candle, not just the current
+    price point. Within a single candle, if both SL and TP are hit (e.g. a
+    wick through SL then a wick through TP), SL takes priority — matching
+    real exchange behavior.
+
     candles_5m is a list of [ts_ms, open, high, low, close, volume].
     entry_ts_unix is the entry timestamp in seconds.
-    Returns (price, reason) or None.
+    Returns (price, reason) or None if neither is hit.
 
     This is a pure function with no I/O.
     """
@@ -49,15 +63,26 @@ def find_first_cross(candles_5m, entry_ts_unix, direction, sl, tp):
             continue
         lo = c[3]
         hi = c[2]
+
         if direction == "long":
-            if sl is not None and lo <= sl:
+            sl_hit = sl is not None and lo <= sl
+            tp_hit = tp is not None and hi >= tp
+            # SL takes priority within the same candle
+            if sl_hit and tp_hit:
                 return (sl, "stop_loss")
-            if tp is not None and hi >= tp:
+            if sl_hit:
+                return (sl, "stop_loss")
+            if tp_hit:
                 return (tp, "take_profit")
         else:
-            if sl is not None and hi >= sl:
+            sl_hit = sl is not None and hi >= sl
+            tp_hit = tp is not None and lo <= tp
+            # SL takes priority within the same candle
+            if sl_hit and tp_hit:
                 return (sl, "stop_loss")
-            if tp is not None and lo <= tp:
+            if sl_hit:
+                return (sl, "stop_loss")
+            if tp_hit:
                 return (tp, "take_profit")
     return None
 
@@ -65,53 +90,37 @@ def find_first_cross(candles_5m, entry_ts_unix, direction, sl, tp):
 def _calculate_funding(position, close_ts_unix, funding_history):
     """Compute net funding PnL between entry and close.
 
+    Uses the shared costs module with true_notional position sizing
+    (margin x leverage). Falls back to notional_usd for backward
+    compatibility with rows that lack true_notional.
+
     funding_history is a list of dicts with {"time": ms_timestamp, "fundingRate": float}.
-    position dict has notional_usd, entry_price, direction, opened_at.
+    position dict has true_notional (or notional_usd), entry_price, direction, opened_at.
     Returns the total funding PnL (positive = PnL gain, negative = PnL cost).
     """
     if not funding_history:
         return 0.0
 
-    notional = position.get("notional_usd", 0.0)
+    true_notional = position.get("true_notional") or position.get("notional_usd", 0.0)
     entry_price = position.get("entry_price", 0.0)
     direction = position.get("direction", "long")
     opened_at = position.get("opened_at")
 
-    if notional <= 0 or entry_price <= 0 or not opened_at:
+    if true_notional <= 0 or entry_price <= 0 or not opened_at:
         return 0.0
 
-    position_size = notional / entry_price
+    pos_size_coins = compute_position_size_in_coins(true_notional, entry_price)
     entry_ts = _parse_entry_ts(opened_at)
     if entry_ts is None:
         return 0.0
 
-    total_payment = 0.0
-    samples = 0
-    for ev in funding_history:
-        ev_ts_ms = ev.get("time", 0)
-        rate = ev.get("fundingRate", 0.0)
-        if rate is None:
-            continue
-        if entry_ts * 1000 <= ev_ts_ms <= close_ts_unix * 1000:
-            total_payment += position_size * rate
-            samples += 1
-
-    duration_hours = (close_ts_unix - entry_ts) / 3600
-
-    if duration_hours > 72 and samples < duration_hours * 0.5:
-        all_rates = [
-            ev.get("fundingRate", 0.0)
-            for ev in funding_history
-            if ev.get("fundingRate") is not None
-        ]
-        if all_rates:
-            avg_rate = sum(all_rates) / len(all_rates)
-            total_payment = position_size * avg_rate * duration_hours
-
-    if direction == "long":
-        return -total_payment
-    else:
-        return total_payment
+    return compute_funding_pnl(
+        position_size_coins=pos_size_coins,
+        direction=direction,
+        funding_history=funding_history,
+        entry_ts_unix=entry_ts,
+        close_ts_unix=close_ts_unix,
+    )
 
 
 def _parse_entry_ts(opened_at_str):
@@ -141,21 +150,23 @@ def execute_close(
     direction = position_dict["direction"]
     entry = position_dict["entry_price"]
     leverage = position_dict.get("leverage", 1)
-    notional = position_dict["notional_usd"]
+    # Use true_notional when available (R5), fall back to notional_usd for
+    # backward compatibility with rows created before the column was added.
+    true_notional = position_dict.get("true_notional") or position_dict["notional_usd"]
 
-    if direction == "long":
-        pnl_pct = (exit_price - entry) / entry * leverage
-    else:
-        pnl_pct = (entry - exit_price) / entry * leverage
+    costs = all_costs_from_trade(
+        entry_price=entry,
+        exit_price=exit_price,
+        direction=direction,
+        leverage=leverage,
+        true_notional=true_notional,
+        taker_fee=taker_fee,
+    )
 
-    gross_pnl_usd = notional * pnl_pct
-    entry_fee = notional * taker_fee
-    exit_fee = notional * taker_fee
-
+    # Recalculate funding with proper entry/close timestamps
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     close_ts = time.time()
 
-    # Calculate duration in minutes
     entry_ts = _parse_entry_ts(position_dict.get("opened_at"))
     duration_minutes = 0
     if entry_ts is not None:
@@ -163,8 +174,12 @@ def execute_close(
 
     funding_pnl = _calculate_funding(position_dict, close_ts, funding_history)
 
+    gross_pnl_usd = costs["gross_pnl_usd"]
+    entry_fee = costs["entry_fee"]
+    exit_fee = costs["exit_fee"]
     net_pnl_usd = gross_pnl_usd - entry_fee - exit_fee + funding_pnl
-    net_pnl_pct = net_pnl_usd / notional
+    margin = true_notional / leverage if leverage else true_notional
+    net_pnl_pct = net_pnl_usd / (margin or 1)
 
     account = conn.execute(
         "SELECT balance, peak_balance FROM accounts WHERE agent_id = ? AND mode = ? ORDER BY id DESC LIMIT 1",
@@ -340,12 +355,21 @@ def update_position_pnl(conn, assets_data: dict) -> None:
 
 
 async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -> int:
-    """Check all open positions against SL/TP using candle reconstruction.
+    """Check all open positions against SL/TP using candle wick scanning.
 
-    For positions whose current price is outside SL/TP bounds, scans 5m
-    candle data from the heartbeat to find the first cross point. If the
-    heartbeat's 25h candle window doesn't cover the gap, fetches additional
-    candles from the provider.
+    For EVERY open position, scans 5m candle wicks (high/low) from the entry
+    time forward to detect SL/TP crosses — not just when the current price
+    sits outside bounds. This catches intra-candle wick-throughs where the
+    price crosses SL/TP and recovers within the same 5m candle.
+
+    Uses first-cross semantics with SL-before-TP tie-break within a single
+    candle (matching exchange behavior).
+
+    If the heartbeat's 25h candle window doesn't cover the gap since entry,
+    fetches additional candles from the provider.
+
+    Also enforces max_hold_hours: any position held longer than its spec's
+    max_hold is closed at the current heartbeat price.
 
     Returns the number of positions closed.
     """
@@ -373,49 +397,37 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
         entry_ts = _parse_entry_ts(pos.get("opened_at"))
         now_ts = time.time()
 
-        sltp_within = False
-        if direction == "long":
-            if sl is not None and tp is not None and sl < current_price < tp:
-                sltp_within = True
-            elif sl is None and tp is not None and current_price < tp:
-                sltp_within = True
-            elif tp is None and sl is not None and current_price > sl:
-                sltp_within = True
-        else:
-            if sl is not None and tp is not None and tp < current_price < sl:
-                sltp_within = True
-            elif sl is None and tp is not None and current_price > tp:
-                sltp_within = True
-            elif tp is None and sl is not None and current_price < sl:
-                sltp_within = True
-
-        if sltp_within:
-            max_hold_hours = pos.get("max_hold_hours")
-            if max_hold_hours is not None and entry_ts is not None:
-                elapsed_hours = (now_ts - entry_ts) / 3600
-                if elapsed_hours >= max_hold_hours:
-                    logger.info("max_hold reached for %s at %.2f (held %.1fh)", asset, current_price, elapsed_hours)
-                    funding_history = asset_data.get("funding_history", []) or []
-                    result = execute_close(
-                        conn=conn,
-                        position_id=pos["id"],
-                        exit_price=current_price,
-                        reason="max_hold",
-                        config={"taker_fee": taker_fee},
-                        position_dict=pos,
-                        funding_history=funding_history,
+        # ---- 1. max_hold check (always runs for every position) ----
+        max_hold_hours = pos.get("max_hold_hours")
+        if max_hold_hours is not None and entry_ts is not None:
+            elapsed_hours = (now_ts - entry_ts) / 3600
+            if elapsed_hours >= max_hold_hours:
+                logger.info(
+                    "max_hold reached for %s at %.2f (held %.1fh)",
+                    asset, current_price, elapsed_hours,
+                )
+                funding_history = asset_data.get("funding_history", []) or []
+                result = execute_close(
+                    conn=conn,
+                    position_id=pos["id"],
+                    exit_price=current_price,
+                    reason="max_hold",
+                    config={"taker_fee": taker_fee},
+                    position_dict=pos,
+                    funding_history=funding_history,
+                )
+                if result:
+                    logger.info(
+                        "Max hold closed %s at %.2f (net pnl=%.2f%%, fees=%.4f)",
+                        result["trade_id"],
+                        current_price,
+                        (result.get("pnl_pct") or 0) * 100,
+                        result.get("fees_paid", 0),
                     )
-                    if result:
-                        logger.info(
-                            "Max hold closed %s at %.2f (net pnl=%.2f%%, fees=%.4f)",
-                            result["trade_id"],
-                            current_price,
-                            (result.get("pnl_pct") or 0) * 100,
-                            result.get("fees_paid", 0),
-                        )
-                        closed_count += 1
-            continue
+                    closed_count += 1
+                continue
 
+        # ---- 2. Wick-based SL/TP scan (every position, every heartbeat) ----
         candles = list(asset_data.get("candles_5m", []) or [])
         cross = find_first_cross(candles, entry_ts, direction, sl, tp)
 
@@ -439,11 +451,8 @@ async def reconcile_positions(conn, assets_data: dict, provider, config: dict) -
         if cross:
             exit_price, reason = cross
         else:
-            if direction == "long":
-                reason = "stop_loss" if current_price <= sl else "take_profit"
-            else:
-                reason = "stop_loss" if current_price >= sl else "take_profit"
-            exit_price = current_price
+            # No wick cross found — skip this heartbeat, position stays open.
+            continue
 
         funding_history = asset_data.get("funding_history", []) or []
 

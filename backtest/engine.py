@@ -15,10 +15,11 @@ a ~12x-longer, differently-labeled window than live ever produces (e.g.
 not a preserved behavior. candles_1h remains in the ledger for other
 consumers; the backtest engine no longer reads it.
 
-Fee model matches the paper bridge's taker_fee. Slippage is a fixed,
-conservative assumption (not execute_close's live slippage_estimate,
-which needs order-book depth the ledger never captures) -- see
-docs/superpowers/specs/2026-07-07-strategy-spec-dsl-backtester-design.md
+Fee model uses execution/costs.py's shared cost computation (true-notional
+fees and funding PnL accrual), guaranteeing live-paper vs backtest parity.
+Slippage is a fixed, conservative assumption (not execute_close's live
+slippage_estimate, which needs order-book depth the ledger never captures)
+-- see docs/superpowers/specs/2026-07-07-strategy-spec-dsl-backtester-design.md
 section 3 for why this gap is real and stays documented, not hidden.
 """
 from __future__ import annotations
@@ -33,6 +34,14 @@ import pandas as pd
 
 from backtest.dsl import Spec
 from backtest.interpreter import evaluate
+from execution.costs import (
+    all_costs_from_trade,
+    compute_fees,
+    compute_funding_pnl,
+    compute_gross_pnl,
+    compute_position_size_in_coins,
+    compute_true_notional,
+)
 from market.heartbeat import FUNDING_LOOKBACK_HOURS, LOOKBACK_CANDLES, compute_replayable_fields
 
 # Fixed backtest slippage assumption (pct of price), applied against the
@@ -238,20 +247,40 @@ def run_backtest(
                 timed_out = held_hours >= spec.max_hold_hours
                 if hit_sl or hit_tp or timed_out:
                     exit_price = price * (1 - BACKTEST_SLIPPAGE_PCT if direction == "long" else 1 + BACKTEST_SLIPPAGE_PCT)
-                    realized_pct_move = (
-                        (exit_price - entry) / entry if direction == "long" else (entry - exit_price) / entry
+                    size_pct = open_position.get("size_pct", spec.position_size_pct)
+                    margin = balance * size_pct
+                    true_notional = compute_true_notional(balance, size_pct, spec.leverage)
+                    costs = all_costs_from_trade(
+                        entry_price=entry,
+                        exit_price=exit_price,
+                        direction=direction,
+                        leverage=spec.leverage,
+                        true_notional=true_notional,
+                        taker_fee=taker_fee,
                     )
-                    gross_pct = realized_pct_move * spec.leverage
-                    net_pct = gross_pct - 2 * taker_fee * spec.leverage
-                    pnl_usd = balance * open_position.get("size_pct", spec.position_size_pct) * net_pct
-                    balance += pnl_usd
+                    # Compute funding PnL over the holding period
+                    opened_dt = open_position["opened_at"]
+                    close_dt = bar_ts
+                    pos_size_coins = compute_position_size_in_coins(true_notional, entry)
+                    funding_pnl = compute_funding_pnl(
+                        position_size_coins=pos_size_coins,
+                        direction=direction,
+                        funding_history=funding_history,
+                        entry_ts_unix=opened_dt.timestamp(),
+                        close_ts_unix=close_dt.timestamp(),
+                    )
+                    net_pnl_usd = costs["gross_pnl_usd"] - costs["total_fees"] + funding_pnl
+                    net_pnl_pct = costs["gross_pnl_pct"]  # pct relative to true notional before costs
+                    balance += net_pnl_usd
                     peak = max(peak, balance)
-                    returns_per_bar.append(net_pct)
+                    returns_per_bar.append(net_pnl_usd / true_notional if true_notional else 0.0)
                     result.trades.append({
                         "asset": asset, "direction": direction,
                         "entry_price": entry, "exit_price": exit_price,
-                        "opened_at": open_position["opened_at"], "closed_at": bar_ts,
-                        "pnl_pct": net_pct, "pnl_usd": pnl_usd,
+                        "opened_at": opened_dt, "closed_at": close_dt,
+                        "pnl_pct": net_pnl_pct, "pnl_usd": net_pnl_usd,
+                        "fees_paid": costs["total_fees"],
+                        "funding_pnl": funding_pnl,
                         "reason": "stop_loss" if hit_sl else ("take_profit" if hit_tp else "max_hold"),
                     })
                     result.equity_curve.append((bar_ts.to_pydatetime(), balance))
