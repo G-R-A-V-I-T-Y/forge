@@ -174,6 +174,49 @@ class TestEvaluator:
         assert result["decision"] == "terminate"
         assert result["trigger"] == "not_found"
 
+    def test_lifecycle_decision_null_absence_guard_at_100_trades(self, conn):
+        """R12 Latch 1: agent with 100+ trades and null_metrics=None stays
+        active (not terminated by not_beating_null_100)."""
+        from meta.evaluator import get_lifecycle_decision
+        from store.performance import compute_metrics
+
+        aid = "latch_test_agent"
+        now = "2026-07-09T00:00:00Z"
+        conn.execute(
+            "INSERT INTO agents (id, name, status, spawn_date, config_json) VALUES (?, ?, 'active', ?, '{}')",
+            (aid, aid, now),
+        )
+        conn.execute(
+            "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) VALUES (?, 'paper', 10000, 10000, ?)",
+            (aid, now),
+        )
+        # 105 trades, 40% win rate, PF ~0.9 — avoids win_rate_below_35
+        for i in range(105):
+            is_win = i < 42
+            pnl_pct = 0.015 if is_win else -0.01
+            pnl_usd = 30.0 if is_win else -15.0
+            result = "win" if is_win else "loss"
+            conn.execute(
+                """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+                   leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp)
+                   VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+                   'closed', ?, ?, ?, ?, ?)""",
+                (f"{aid}_{i}", aid, pnl_pct, pnl_usd, result, now, now),
+            )
+        conn.commit()
+
+        metrics = compute_metrics(conn, aid)
+        result = get_lifecycle_decision(conn, aid, metrics, None)
+
+        # With null=None the not_beating_null_100 branch is guarded by the
+        # null_valid check, so this agent should remain active even with
+        # 100+ trades and non-significant metrics vs null.
+        assert result["decision"] == "active", (
+            f"Expected 'active' with null_metrics=None and 100+ trades, "
+            f"got '{result['decision']}': {result.get('reason', '')}"
+        )
+        assert result["trigger"] == "none"
+
     def test_harvest_best_trades(self, conn):
         from meta.evaluator import harvest_best_trades
 

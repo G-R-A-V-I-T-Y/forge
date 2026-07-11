@@ -197,13 +197,23 @@ def get_lifecycle_decision(
             except (json.JSONDecodeError, TypeError, KeyError):
                 pass
 
+    # Determine whether the null distribution is valid for lifecycle decisions.
+    # R12 safety latch (pre-run gate): never suspend/terminate for "not beating
+    # null" when there is no benchmark data or the benchmark hasn't reached its
+    # own significance floor (30 trades).  This prevents the meta-controller
+    # from culling agents before a proper null distribution exists.
+    null_valid = (
+        null_metrics is not None
+        and null_metrics.get("closed_trades", 0) >= 30
+    )
+
     # Probation: borderline agent (p between 0.05-0.15 or PF 0.8-1.0)
     sig = significance_test(metrics, null_metrics)
     if total_trades >= 50:
         p_est = sig.get("p_value_estimate", ">0.10")
         beats = sig.get("beats_null", False)
         if not beats and p_est in ("<0.10", ">0.10"):
-            if profit_factor < 1.0:
+            if profit_factor < 1.0 and null_valid:
                 return {
                     "decision": "suspend",
                     "reason": (
@@ -212,7 +222,7 @@ def get_lifecycle_decision(
                     ),
                     "trigger": "not_beating_null_50",
                 }
-        if total_trades >= 100 and not beats:
+        if total_trades >= 100 and not beats and null_valid:
             return {
                 "decision": "terminate",
                 "reason": (

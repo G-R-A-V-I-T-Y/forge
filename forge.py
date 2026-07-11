@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import sys
+from datetime import timezone
 from pathlib import Path
 
 import uvicorn
@@ -287,6 +288,22 @@ async def main():
         llama_server.start(local_settings)
     else:
         logger.info("spawn_on_startup=false — local llama-server not started")
+
+    # ------------------------------------------------------------------
+    # R12 Pre-run safety latches — logged here so the run's operating notes
+    # can record which mode was used for each latch.  Both are code-guard
+    # routes (partial early landings of R7.1 / R8) and will be replaced by
+    # the full R7/R8 implementations during or after the run.
+    # ------------------------------------------------------------------
+    logger.info(
+        "R12 Latch 1 (meta-controller): code-guard active — "
+        "get_lifecycle_decision never terminates for 'not beating null' "
+        "when null distribution is None or below 30 closed trades"
+    )
+    logger.info(
+        "R12 Latch 2 (reflection): code-guard active — "
+        "run_reflection rejects any revised spec with zero evidence terms"
+    )
 
     open_positions = get_all_open_positions(conn)
     logger.info("Restored %d open positions across the desk", len(open_positions))

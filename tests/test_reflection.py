@@ -654,6 +654,58 @@ class TestEndToEndReflection:
         assert result.rejection_reason is not None
         assert "parse" in result.rejection_reason.lower()
 
+    def test_zero_evidence_guard_rejects_empty_spec(self, conn):
+        """R12 Latch 2: reflection rejects a spec with zero evidence terms
+        even when all other gates would pass."""
+        _setup_agent(conn)
+        _deploy_initial_spec(conn)
+        _insert_trades(conn, 35)
+
+        # Build a spec YAML with no evidence terms (empty evidence list).
+        # This is the hollow spec the LLM can silently produce.
+        empty_evidence_yaml = yaml.dump(
+            {
+                "agent_id": AGENT_ID,
+                "spec_version": 2,
+                "thesis_version": 1,
+                "universe": {"include": ["SOL-PERP"]},
+                "regime_filter": {"exclude": []},
+                "entry": {
+                    "direction": "long",
+                    "confidence_threshold": 0.7,
+                    "scale_threshold": 0.5,
+                    "evidence": [],  # zero evidence terms
+                    "secondary_evidence": [],
+                },
+                "exit": {
+                    "stop_loss_pct": 0.03,
+                    "take_profit_pct": 0.06,
+                    "max_hold_hours": 24,
+                },
+                "position": {
+                    "leverage": 2,
+                    "position_size_pct": 0.10,
+                },
+            },
+            default_flow_style=False,
+        )
+
+        llm = _make_llm(
+            empty_evidence_yaml,
+            "No critical flaws found.",  # adversarial pass — won't be reached
+        )
+        config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        result = run_reflection(conn, AGENT_ID, config, llm)
+
+        assert result.triggered is True  # LLM was called, spec was parsed
+        assert result.deployed is False
+        assert result.rejection_reason is not None
+        assert "zero evidence" in result.rejection_reason.lower() or "R12" in result.rejection_reason
+        assert result.spec_version == 2
+        # The zero-evidence guard fires before adversarial pass, so no
+        # adversarial flaws should be populated.
+        assert result.adversarial_flaws == []
+
     def test_no_previous_spec_still_works(self, conn):
         """Reflection without a prior active spec — only tests gates that
         don't require a current spec (min_trades, throttle, adversarial)."""

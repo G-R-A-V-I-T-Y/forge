@@ -185,6 +185,28 @@ def run_reflection(
         )
     gates_passed.append("parse_spec")
 
+    # -- Gate: Zero-evidence guard (R12 safety latch) --------------------------
+    # Pre-run safety latch: never deploy a revised spec that has zero evidence
+    # terms.  The LLM can silently produce an all-defaults hollow spec when
+    # the prompt context is thin, and without this guard it would overwrite
+    # the active spec with a trading strategy that has no signal conditions.
+    # This is a partial early landing of R8's deploy guard.
+    if not revised_spec.evidence:
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=llm_response,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=(
+                "revised spec has no evidence terms — "
+                "deploy rejected by R12 safety latch"
+            ),
+            blocked_by_gate=None,
+            adversarial_flaws=[],
+            gates_passed=gates_passed,
+        )
+    gates_passed.append("zero_evidence_guard")
+
     # -- Gate 6: Adversarial pass ---------------------------------------------
     critical_flaw, flaws = adversarial_pass(llm_response, revised_spec, llm_fn)
     if critical_flaw:
