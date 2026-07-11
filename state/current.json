@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-11T17:28:59Z",
+  "generated_at": "2026-07-11T17:34:02Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -18,7 +18,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "MiMo V2.5 Free",
+      "last_model_used": "Big Pickle",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -158,9 +158,27 @@
       "position_size_pct": 0.1,
       "notional_usd": 5000.0,
       "opened_at": "2026-07-11T17:23:56.311034Z",
-      "current_pnl_pct": 0.0013549499977361058,
+      "current_pnl_pct": 0.002538584690404825,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260711_172356_BTC_d9d7",
+      "true_notional": 5000.0,
+      "max_hold_hours": 48.0
+    },
+    {
+      "id": "pos_benchmark_btc_hold_20260711_173205_BTC_7c31",
+      "agent_id": "benchmark_btc_hold",
+      "asset": "BTC-PERP",
+      "direction": "long",
+      "entry_price": 64296.00001555294,
+      "stop_loss_price": 57866.4,
+      "take_profit_price": 321480.0,
+      "leverage": 1,
+      "position_size_pct": 0.1,
+      "notional_usd": 5000.0,
+      "opened_at": "2026-07-11T17:32:05.042928Z",
+      "current_pnl_pct": 0.0011820328547448432,
+      "mode": "paper",
+      "trade_id": "benchmark_btc_hold_20260711_173205_BTC_7c31",
       "true_notional": 5000.0,
       "max_hold_hours": 48.0
     },
@@ -176,7 +194,7 @@
       "position_size_pct": 0.078,
       "notional_usd": 3900.0,
       "opened_at": "2026-07-11T17:27:03.408649Z",
-      "current_pnl_pct": -0.007829820214392135,
+      "current_pnl_pct": -0.005981660745716941,
       "mode": "paper",
       "trade_id": "copper_vane_20260711_172703_ARB_9e6a",
       "true_notional": 11700.0,
@@ -194,7 +212,7 @@
       "position_size_pct": 0.066,
       "notional_usd": 3300.0,
       "opened_at": "2026-07-11T17:26:52.545847Z",
-      "current_pnl_pct": 0.006113238345056192,
+      "current_pnl_pct": 0.010087908000086373,
       "mode": "paper",
       "trade_id": "iron_moth_20260711_172652_LINK_ce57",
       "true_notional": 9900.0,
