@@ -5,7 +5,6 @@ run_decision never raises. All exceptions are caught, logged, and returned
 as {"action": "error", "detail": str(exc)}.
 """
 
-import asyncio
 import json
 import logging
 
@@ -328,15 +327,18 @@ async def run_decision(
             fill = await bridge.close(pos_id, reason)
             logger.info("[%s] Closed position %s: %s", agent_id, pos_id, fill)
             trade_id = fill.get("trade_id")
-            if trade_id:
-                asyncio.ensure_future(
-                    run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
-                )
             log_decision(
                 conn, agent_id, "close", reason,
                 {"position_id": pos_id, "fill": str(fill)},
                 model_used=model_label,
             )
+            if trade_id:
+                try:
+                    await run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt)
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Postmortem failed for trade %s: %s", agent_id, trade_id, exc
+                    )
             return {"action": "close", "detail": str(fill)}
 
         if action == "enter":
@@ -522,15 +524,15 @@ async def run_postmortem(
     if not row:
         return
     trade = dict(row)
-    prompt = (
-        f"Write one sentence analyzing why this trade {'won' if trade.get('pnl_pct', 0) > 0 else 'lost'}. "
-        f"Asset: {trade['asset']}, Direction: {trade['direction']}, "
-        f"PnL: {trade.get('pnl_pct', 0):+.2%}, "
-        f"Exit reason: {trade.get('exit_reason', '?')}. "
-        f"Entry thesis: {trade.get('hypothesis', 'N/A')[:200]}"
-    )
     try:
-        result = llm_fn(system_prompt, prompt)
+        prompt = (
+            f"Write one sentence analyzing why this trade {'won' if trade.get('pnl_pct', 0) > 0 else 'lost'}. "
+            f"Asset: {trade['asset']}, Direction: {trade['direction']}, "
+            f"PnL: {trade.get('pnl_pct', 0):+.2%}, "
+            f"Exit reason: {trade.get('exit_reason', '?')}. "
+            f"Entry thesis: {(trade.get('hypothesis') or 'N/A')[:200]}"
+        )
+        result = llm_fn(system_prompt, prompt, agent_id=agent_id)
         # llm_fn now returns (decision_dict, model_used) — see
         # llm/model_chain.py's decide(). The model label isn't tracked
         # per-postmortem (out of scope), only the decision dict matters here.
