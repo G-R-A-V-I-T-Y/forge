@@ -15,6 +15,12 @@ data/historical_data/
 .claude/settings.local.json
 logs/
 .pytest_cache/
+
+# R11: Agent session continuation state — ephemeral, not part of the repo.
+.omo/
+
+# R11: Stale development worktrees — pruned, never tracked.
+.claude/worktrees/
 *.egg-info/
 dist/
 build/

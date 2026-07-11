@@ -36,3 +36,21 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - Settings are persisted in the `settings` SQLite table (already in schema.sql). `store/settings.py` wraps it with typed get/set and merge-over-defaults.
 - `llm/model_chain.py` now dynamically loads the chain from settings via `get_chain()` at each `decide()` call so Settings → Save & Apply takes effect in the next agent cycle. Default final tier is `llama_server`, not `ollama`.
 - `test_forge_agent_timeout.py` and `test_forge_heartbeat_schedule.py` fail in this Python env because `apscheduler` is not installed in Anaconda3 but IS installed in the forge venv. Always ignore them when running from Anaconda3: `--ignore=tests/test_forge_agent_timeout.py --ignore=tests/test_forge_heartbeat_schedule.py`.
+
+## R10 — Smoke-test harness
+
+- `tests/test_smoke.py` — integration smoke test: boots the real composition (StubMarket, PaperBridge, a real agent via `forge.py`'s startup path), asserts at least one trade opens and closes end-to-end before trusting the desk unattended.
+- `scripts/smoke_test.py` — convenience runner: `python scripts/smoke_test.py` (or `python -m pytest tests/test_smoke.py -v`).
+- The smoke test is the pre-run gate's final verification step: run it before every unattended start.
+
+## R11 — Repo hygiene (completed 2026-07-10)
+
+- Root debris removed: `query_trades.py`, `query_trades2.py`, `quick_test.py`, `test_import.py`, `test_event_import.py`, `test_syntax.bat`, `test_unwrapping.py` deleted (nothing useful remained).
+- `.omo/` and `.claude/worktrees/` added to `.gitignore`; all 13 stale worktrees pruned.
+- Orphan junk theses removed from `agents/theses/`: `agent_mean_reversion_2_v1.md`, `agent_momentum_1_v1.md`, `amber_wolf_v1.md`, `config_test_v1.md`, `dupe_agent_v1.md`, `gray_finch_v1.md`, `test_trader_v1.md`.
+
+## Config convention (standing rule)
+
+- All desk-level config keys live under `desk.` in `config.yaml` (e.g. `desk.max_leverage`, `desk.starting_balance`).
+- Module-level defaults **must fail loudly** on missing keys — never silently invent numbers. Callers read via `config.get("desk", {})` or `config["desk"]`, never `config.get("desk_config")` (that key does not exist).
+- The single seed-path rule: there is exactly ONE way to seed agents (`scripts/fresh_start.py`) and ONE way to seed benchmarks (`scripts/seed_benchmarks.py`). No inline seeding in other modules.
