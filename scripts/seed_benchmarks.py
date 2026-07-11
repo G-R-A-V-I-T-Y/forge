@@ -10,6 +10,19 @@ These agents serve as baselines for evaluating the AI agents' performance.
 import json
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+_THESES_DIR = Path(__file__).parent.parent / "agents" / "theses"
+
+
+def _seal_thesis(agent_id: str, text: str) -> None:
+    """Write a thesis file for a benchmark agent so forge.py startup doesn't
+    log spurious 'Thesis not found' warnings."""
+    _THESES_DIR.mkdir(parents=True, exist_ok=True)
+    thesis_path = _THESES_DIR / f"{agent_id}_v1.md"
+    if not thesis_path.exists():
+        thesis_path.write_text(text, encoding="utf-8")
 
 
 def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
@@ -41,6 +54,12 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
             1,
         ),
     )
+    _seal_thesis(
+        "benchmark_random_walk",
+        "# Random Walk Benchmark\n\n"
+        "Makes random long/short decisions with random entry/exit times. "
+        "Serves as a baseline for evaluating AI agent performance.",
+    )
 
     # Seed btc_hold agent
     btc_hold_config = {
@@ -63,6 +82,12 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
             json.dumps(btc_hold_config),
             1,
         ),
+    )
+    _seal_thesis(
+        "benchmark_btc_hold",
+        "# BTC Hold Benchmark\n\n"
+        "Only trades BTC-PERP, holds positions indefinitely (HODL benchmark). "
+        "Serves as a baseline for evaluating AI agent performance.",
     )
 
     conn.commit()

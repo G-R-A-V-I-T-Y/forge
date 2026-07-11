@@ -57,6 +57,7 @@ _TRADES_MIGRATION_COLUMNS = {
 # Columns added after the initial schema for the positions table.
 _POSITIONS_MIGRATION_COLUMNS = {
     "true_notional": "REAL",
+    "max_hold_hours": "REAL NOT NULL DEFAULT 48.0",
 }
 
 # Columns added by the model-fallback-chain feature. Same rationale as
