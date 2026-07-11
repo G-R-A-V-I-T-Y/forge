@@ -1,12 +1,13 @@
 {
-  "generated_at": "2026-07-08T21:49:05Z",
+  "generated_at": "2026-07-11T17:23:54Z",
   "agents": [
     {
       "id": "iron_moth",
       "name": "iron_moth",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "North Mini Code Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -15,8 +16,9 @@
       "id": "silver_basin",
       "name": "silver_basin",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "Big Pickle",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -25,8 +27,9 @@
       "id": "copper_vane",
       "name": "copper_vane",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "North Mini Code Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -34,7 +37,8 @@
     {
       "id": "gray_finch",
       "name": "gray_finch",
-      "status": "rookie",
+      "status": "terminated",
+      "config_json": "{}",
       "current_thesis_version": 1,
       "last_model_used": null,
       "paper_balance": 50000.0,
@@ -44,7 +48,8 @@
     {
       "id": "amber_wolf",
       "name": "amber_wolf",
-      "status": "rookie",
+      "status": "terminated",
+      "config_json": "{}",
       "current_thesis_version": 1,
       "last_model_used": null,
       "paper_balance": 50000.0,
@@ -55,8 +60,9 @@
       "id": "steel_crane",
       "name": "steel_crane",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "DeepSeek V4 Flash Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -65,8 +71,9 @@
       "id": "onyx_heron",
       "name": "onyx_heron",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "MiMo V2.5 Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -75,8 +82,9 @@
       "id": "jade_hawk",
       "name": "jade_hawk",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "DeepSeek V4 Flash Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -85,8 +93,9 @@
       "id": "violet_lion",
       "name": "violet_lion",
       "status": "rookie",
+      "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": null,
+      "last_model_used": "DeepSeek V4 Flash Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -95,10 +104,44 @@
       "id": "crimson_fox",
       "name": "crimson_fox",
       "status": "rookie",
+      "config_json": "{}",
+      "current_thesis_version": 1,
+      "last_model_used": "DeepSeek V4 Flash Free",
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "sage_turtle",
+      "name": "sage_turtle",
+      "status": "rookie",
+      "config_json": "{\"compiled\": true, \"wake_interval\": 300}",
       "current_thesis_version": 1,
       "last_model_used": null,
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
+      "live_balance": null
+    },
+    {
+      "id": "benchmark_random_walk",
+      "name": "random_walk",
+      "status": "active",
+      "config_json": "{\"pinned_model\": null, \"benchmark_type\": \"random_walk\", \"description\": \"Random walk benchmark \\u2014 makes random trading decisions\", \"starting_balance\": 50000.0, \"universe\": [\"BTC-PERP\", \"ETH-PERP\", \"SOL-PERP\", \"SUI-PERP\", \"AVAX-PERP\", \"LINK-PERP\", \"AAVE-PERP\", \"BNB-PERP\", \"ARB-PERP\", \"OP-PERP\", \"TAO-PERP\", \"FET-PERP\", \"RENDER-PERP\", \"XRP-PERP\", \"XLM-PERP\", \"TIA-PERP\", \"HYPE-PERP\", \"LTC-PERP\", \"BCH-PERP\", \"ADA-PERP\"]}",
+      "current_thesis_version": 1,
+      "last_model_used": "benchmark_random_walk",
+      "paper_balance": null,
+      "paper_peak": null,
+      "live_balance": null
+    },
+    {
+      "id": "benchmark_btc_hold",
+      "name": "btc_hold",
+      "status": "active",
+      "config_json": "{\"pinned_model\": null, \"benchmark_type\": \"btc_hold\", \"description\": \"BTC hold benchmark \\u2014 only trades BTC, holds positions indefinitely\", \"preferred_asset\": \"BTC-PERP\", \"starting_balance\": 50000.0, \"universe\": [\"BTC-PERP\", \"ETH-PERP\", \"SOL-PERP\", \"SUI-PERP\", \"AVAX-PERP\", \"LINK-PERP\", \"AAVE-PERP\", \"BNB-PERP\", \"ARB-PERP\", \"OP-PERP\", \"TAO-PERP\", \"FET-PERP\", \"RENDER-PERP\", \"XRP-PERP\", \"XLM-PERP\", \"TIA-PERP\", \"HYPE-PERP\", \"LTC-PERP\", \"BCH-PERP\", \"ADA-PERP\"]}",
+      "current_thesis_version": 1,
+      "last_model_used": "benchmark_btc_hold",
+      "paper_balance": null,
+      "paper_peak": null,
       "live_balance": null
     }
   ],
