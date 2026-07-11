@@ -230,9 +230,12 @@ def test_execute_close_with_true_notional(conn, tmp_path, monkeypatch):
     )
     # Fees should be on $15k true notional: 15000 * 0.00035 * 2 = $10.50
     assert result["fees_paid"] == pytest.approx(10.50)
-    # Gross PnL = 15000 * (110-100)/100 * 3 = 15000 * 0.30 = 4500
-    # Net PnL = 4500 - 10.50 = 4489.50
-    assert result["pnl_usd"] == pytest.approx(4489.50, rel=1e-4)
+    # Gross PnL = notional × price move = 15000 * (110-100)/100 = 1500
+    # (leverage already lives inside true_notional — it must not multiply
+    # the dollar PnL again).  Net PnL = 1500 - 10.50 = 1489.50.
+    assert result["pnl_usd"] == pytest.approx(1489.50, rel=1e-4)
+    # Return on the $5k margin: 1489.50 / 5000 = 29.79%
+    assert result["pnl_pct"] == pytest.approx(1489.50 / 5000.0, rel=1e-4)
 
 
 def test_execute_close_with_true_notional_funding(conn, tmp_path, monkeypatch):
@@ -292,20 +295,17 @@ def test_execute_close_with_true_notional_funding(conn, tmp_path, monkeypatch):
         config={"taker_fee": 0.00035}, position_dict=position,
         funding_history=funding_history,
     )
-    # Position size in coins with TRUE notional: 25000 / 60000 = 0.4167 BTC
-    # Not old margin-based: 5000 / 60000 = 0.0833 BTC
-    # Funding = -0.4167 * (0.0001 + 0.0001) = -0.0000833...  * 60000? No wait...
-    # Actually funding PnL = position_size_coins * rate, not in dollars directly
-    # But _calculate_funding returns it in the asset's quote currency
-    # For BTC-PERP: position_size_coins * rate in BTC terms, then... 
-    # Actually funding PnL = position_size_coins * rate, which is in quote currency (USD)
-    # for linear perps.
-    # With true_notional: 25000/60000 = 0.4167 BTC, funding = -0.4167 * 0.0002 = -0.000083 BTC ≈ -$5
-    # With old margin: 5000/60000 = 0.0833 BTC, funding = -0.0833 * 0.0002 = -0.0000167 BTC ≈ -$1
-    # The difference is ~5x, matching the leverage factor
+    # Funding is a fraction of position VALUE: each event pays
+    # true_notional × rate = 25000 × 0.0001 = $2.50 — the per-coin price of
+    # BTC must not appear in the arithmetic.  The two history events here
+    # predate the entry, so with close_ts = now (>72h held) the sparse-
+    # sample fallback applies: true_notional × avg_rate × duration_hours,
+    # which is well above the two-event floor of $5.
     assert result["funding_paid"] > 0, "funding_paid should be positive cost for long"
-    # true_notional-based funding should be ~5x larger than margin-based would be
-    assert result["funding_paid"] > 0.00001
+    assert result["funding_paid"] >= 5.0, (
+        "funding on $25k notional at 1bp/h must be dollars, not the "
+        "price-less coin-count arithmetic that produced ~$0.00002"
+    )
 
 
 # ── existing tests below ──────────────────────────────────────────────

@@ -37,11 +37,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - `llm/model_chain.py` now dynamically loads the chain from settings via `get_chain()` at each `decide()` call so Settings → Save & Apply takes effect in the next agent cycle. Default final tier is `llama_server`, not `ollama`.
 - `test_forge_agent_timeout.py` and `test_forge_heartbeat_schedule.py` fail in this Python env because `apscheduler` is not installed in Anaconda3 but IS installed in the forge venv. Always ignore them when running from Anaconda3: `--ignore=tests/test_forge_agent_timeout.py --ignore=tests/test_forge_heartbeat_schedule.py`.
 
-## R10 — Smoke-test harness
+## R10 — Smoke-test harness (real as of 2026-07-11)
 
-- `tests/test_smoke.py` — integration smoke test: boots the real composition (StubMarket, PaperBridge, a real agent via `forge.py`'s startup path), asserts at least one trade opens and closes end-to-end before trusting the desk unattended.
+- `tests/test_smoke.py` — integration smoke test over the real composition: `fresh_start.seed_desk` + benchmark seeding on a file-backed temp DB, real `generate_heartbeat` over `StubMarket`, `run_decision` for a pure-LLM agent / a compiled agent / both benchmarks, risk gate → PaperBridge fill, wick-based SL reconcile closing the trade with shared-cost-model fees and funding, wait-candidate capture → deterministic counterfactual replay, state snapshot. Only pure-external I/O (Fear & Greed HTTP) and repo-dirtying paths (specs/theses/OI-history dirs) are redirected.
 - `scripts/smoke_test.py` — convenience runner: `python scripts/smoke_test.py` (or `python -m pytest tests/test_smoke.py -v`).
-- The smoke test is the pre-run gate's final verification step: run it before every unattended start.
+- The smoke test is the pre-run gate's final verification step: run it before every unattended start. Note: an earlier revision of this section documented the harness before it existed — the 2026-07-11 pre-run review (assessment §9, F5) caught that; treat "documented" as unverified until you have run the command yourself.
 
 ## R11 — Repo hygiene (completed 2026-07-10)
 

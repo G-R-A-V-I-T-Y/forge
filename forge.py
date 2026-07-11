@@ -43,8 +43,9 @@ from store.state_snapshot import write_current_state
 from web.app import app as web_app
 
 # M9: Selection & Daily Improvement Loop
+# (head_of_desk deliberately not imported — its job is latched off until R7;
+# see the disabled-job note below.)
 from meta.controller import evaluate_agent, run_evaluation_cycle
-from meta.head_of_desk import run_head_of_desk_cycle
 from meta.reflection_scheduler import (
     check_agent_eligible,
     get_reflection_trigger,
@@ -529,39 +530,20 @@ async def main():
     logger.info("Reflection scheduler job scheduled — runs every 30 min")
 
     # ------------------------------------------------------------------
-    # M9: Head of desk — agent population management.
-    # Runs every hour: spawns agents if below target_agent_count, culls
-    # lowest performers if above max_agents.
+    # M9: Head of desk — population management.  JOB DISABLED (R12-style
+    # latch, 2026-07-11 pre-run review finding F8): the current
+    # run_head_of_desk_cycle is the C7 archetype auto-spawner — it reads
+    # target_agent_count from the wrong config level and mints junk
+    # "agent_momentum_1"-style agents (bypassing the graveyard check and
+    # the seeds table) whenever suspensions drop the active count below 5.
+    # Do NOT re-register this job until R7 replaces the spawner with the
+    # graveyard-checked, seeds-fed spawn path and the briefing/chat Head
+    # of Desk the proposal specifies.
     # ------------------------------------------------------------------
-    async def _run_head_of_desk_job():
-        try:
-            conn = get_connection(str(DB_PATH))
-            try:
-                report = run_head_of_desk_cycle(conn, config)
-                if report.get("spawned") or report.get("culled"):
-                    logger.info(
-                        "Head of desk: spawned %d, culled %d (count: %d)",
-                        len(report["spawned"]),
-                        len(report["culled"]),
-                        report["agent_count"],
-                    )
-                elif report.get("distribution"):
-                    logger.debug(
-                        "Head of desk: agent distribution %s",
-                        report["distribution"],
-                    )
-            finally:
-                conn.close()
-        except Exception:
-            logger.warning("Head of desk cycle failed", exc_info=True)
-
-    scheduler.add_job(
-        _run_head_of_desk_job,
-        trigger=IntervalTrigger(hours=1, timezone=timezone.utc),
-        id="head_of_desk",
-        replace_existing=True,
+    logger.info(
+        "Head of desk job DISABLED (pre-run latch; see R7 in "
+        "docs/STRATEGIC_ASSESSMENT_07_09_2026.md)"
     )
-    logger.info("Head of desk job scheduled — runs every hour")
 
     # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all

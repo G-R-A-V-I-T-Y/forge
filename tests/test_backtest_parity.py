@@ -45,10 +45,12 @@ class TestPaperAndBacktestCostsIdentical:
         assert costs["exit_fee"] == pytest.approx(5.25)
         assert costs["total_fees"] == pytest.approx(10.50)
 
-        # Gross PnL on $15k: (149.01-145.20)/145.20 * 3 = 7.87%
-        expected_pnl_pct = (149.01 - 145.20) / 145.20 * 3
-        assert costs["gross_pnl_pct"] == pytest.approx(expected_pnl_pct, rel=1e-5)
-        assert costs["gross_pnl_usd"] == pytest.approx(15000.0 * expected_pnl_pct, rel=1e-5)
+        # Return on margin: (149.01-145.20)/145.20 * 3 = 7.87%
+        price_move = (149.01 - 145.20) / 145.20
+        assert costs["gross_pnl_pct"] == pytest.approx(price_move * 3, rel=1e-5)
+        # Dollar PnL: notional × price move — leverage is already inside
+        # the $15k notional and must not multiply the dollars again.
+        assert costs["gross_pnl_usd"] == pytest.approx(15000.0 * price_move, rel=1e-5)
 
     def test_short_trade_cost_regression(self):
         # Balance=$50k, size=20%, lev=2x → true_notional=$20k
@@ -76,14 +78,11 @@ class TestPaperAndBacktestCostsIdentical:
     def test_long_trade_with_funding_and_fees(self):
         # Long trade with known funding and fees:
         # - $10k margin, 5x lev → $50k true_notional
-        # - Entry $100, Exit $105
-        # - Funding: 0.0001/h over 24h
-        # Position coins = 50000/100 = 500 coins
-        # Funding cost = -500 * 0.0001 * 24 = -1.20
-        # Gross = 50000 * (5/100) * 5 = 50000 * 5% ... wait
-        # Gross PnL = 50000 * (105-100)/100 * 5 = 50000 * 0.25 = 12500
+        # - Entry $100, Exit $105 (5% move)
+        # Gross PnL = notional × move = 50000 × 0.05 = 2500
         # Fees = 50000 * 0.00035 * 2 = 35
-        # Net = 12500 - 35 - 1.20 = 12463.80
+        # Funding: 4 events at 1bp on $50k notional = 4 × $5 = $20 paid
+        # Net = 2500 - 35 - 20 = 2445
         costs = all_costs_from_trade(
             entry_price=100.0,
             exit_price=105.0,
@@ -103,8 +102,10 @@ class TestPaperAndBacktestCostsIdentical:
         assert costs["true_notional"] == 50000.0
         assert costs["entry_fee"] == pytest.approx(17.50)
         assert costs["total_fees"] == pytest.approx(35.0)
-        # Funding: long pays positive rates
-        assert costs["funding_pnl"] < 0
-        # Gross PnL: (105-100)/100 * 5 = 25%
+        # Funding: long pays positive rates, on notional
+        assert costs["funding_pnl"] == pytest.approx(-20.0)
+        # Return on margin: (105-100)/100 * 5 = 25%
         assert costs["gross_pnl_pct"] == pytest.approx(0.25)
-        assert costs["gross_pnl_usd"] == pytest.approx(12500.0)
+        # Dollar PnL: 50000 × 5% = 2500 (not × 5 again)
+        assert costs["gross_pnl_usd"] == pytest.approx(2500.0)
+        assert costs["net_pnl_usd"] == pytest.approx(2445.0)

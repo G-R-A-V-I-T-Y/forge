@@ -137,7 +137,12 @@ async def run_decision(
                 elif benchmark_type == "btc_hold":
                     asset = "BTC-PERP"
                     entry_price = (heartbeat.get("assets") or {}).get(asset, {}).get("price", 100.0)
-                    if entry_price and entry_price > 0:
+                    if has_open_position_for_asset(conn, agent_id, asset):
+                        # Buy-and-hold: the benchmark establishes its position
+                        # once and holds — it must not stack a new long every
+                        # wake cycle (R2 AC#4).
+                        response = {"action": "wait", "reason": "benchmark holding BTC"}
+                    elif entry_price and entry_price > 0:
                         response = {
                             "action": "enter",
                             "asset": asset,
@@ -148,6 +153,10 @@ async def run_decision(
                             "leverage": 1,
                             "position_size_pct": 0.10,
                             "confidence": 1.0,
+                            # Hold means hold: without this, the bridge's 48h
+                            # default max_hold churns the benchmark (close +
+                            # re-enter + fees) every two days.
+                            "max_hold_hours": 24.0 * 365,
                         }
                     else:
                         response = {"action": "wait", "reason": "no BTC price"}
@@ -164,6 +173,7 @@ async def run_decision(
 
                 active_spec = get_active_spec(conn, agent_id)
                 if active_spec is None:
+                    update_last_model_used(conn, agent_id, "compiled/none")
                     log_decision(
                         conn, agent_id, "wait", "compiled: no active spec deployed", None,
                         model_used="compiled/none",
@@ -189,6 +199,9 @@ async def run_decision(
 
                 if best_decision:
                     if has_open_position_for_asset(conn, agent_id, best_asset):
+                        update_last_model_used(
+                            conn, agent_id, f"compiled/v{active_spec.spec_version}"
+                        )
                         log_decision(
                             conn, agent_id, "wait",
                             f"compiled: already holds {best_asset}",
@@ -218,6 +231,11 @@ async def run_decision(
                         "leverage": active_spec.leverage,
                         "position_size_pct": active_spec.position_size_pct,
                         "confidence": best_decision["confidence"],
+                        # Spec thresholds ride along so the shared sizing
+                        # formula in the enter branch scales exactly as the
+                        # backtest engine does for this spec.
+                        "confidence_threshold": active_spec.confidence_threshold,
+                        "scale_threshold": active_spec.scale_threshold,
                         "evidence_strength": best_decision.get("evidence_strength", {}),
                         "max_hold_hours": getattr(active_spec, "max_hold_hours", 48),
                     }
@@ -249,6 +267,9 @@ async def run_decision(
                                     "max_hold_hours": getattr(active_spec, "max_hold_hours", 48),
                                 }
                             }
+                    update_last_model_used(
+                        conn, agent_id, f"compiled/v{active_spec.spec_version}"
+                    )
                     log_decision(
                         conn, agent_id, "wait",
                         f"compiled: no asset met threshold (best={best_confidence:.2f})",
@@ -312,8 +333,14 @@ async def run_decision(
         if action == "wait":
             reason = response.get("reason", "")
             logger.info("[%s] LLM decided to wait: %s", agent_id, reason)
+            # R3-capture: persist the candidate the agent came closest to
+            # taking, in the exact shape store/counterfactuals.py replays.
+            # Without this, wait decisions can never be counterfactually
+            # scored — the replay engine skips detail-less waits.
+            candidate = _extract_wait_candidate(response, heartbeat)
             log_decision(
-                conn, agent_id, "wait", reason, None,
+                conn, agent_id, "wait", reason,
+                {"candidate": candidate} if candidate else None,
                 confidence=response.get("confidence"),
                 evidence_strength=response.get("evidence_strength"),
                 model_used=model_label,
@@ -342,6 +369,28 @@ async def run_decision(
             return {"action": "close", "detail": str(fill)}
 
         if action == "enter":
+            # Confidence sizing happens BEFORE the risk gate so the gate
+            # validates the order that actually executes (R4 AC#4).  The
+            # formula is the shared execution/sizing.py one — identical to
+            # backtest/engine.py's; compiled responses carry their spec's
+            # thresholds, LLM responses use the thesis defaults (0.70/0.50).
+            from execution.sizing import (
+                DEFAULT_CONFIDENCE_THRESHOLD,
+                DEFAULT_SCALE_THRESHOLD,
+                scale_position_size,
+            )
+
+            response["position_size_pct"] = scale_position_size(
+                response["position_size_pct"],
+                response.get("confidence"),
+                confidence_threshold=response.get(
+                    "confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD
+                ),
+                scale_threshold=response.get(
+                    "scale_threshold", DEFAULT_SCALE_THRESHOLD
+                ),
+            )
+
             open_positions = get_positions(conn, agent_id)
             asset_data = (heartbeat.get("assets") or {}).get(response.get("asset", ""))
             heartbeat_price = (asset_data or {}).get("price") if asset_data else None
@@ -365,10 +414,6 @@ async def run_decision(
                     model_used=model_label,
                 )
                 return {"action": "risk_blocked", "detail": e.reason}
-
-            response["position_size_pct"] = (
-                response["position_size_pct"] * response["confidence"]
-            )
 
             bridge = bridge_factory(agent_id, conn, provider)
             fill = await bridge.enter(response)
@@ -548,6 +593,53 @@ async def run_postmortem(
             write_outcome(conn, trade_id, {"agent_postmortem": postmortem.strip()})
     except Exception as exc:
         logger.warning("[%s] Postmortem failed for %s: %s", agent_id, trade_id, exc)
+
+
+def _extract_wait_candidate(response: dict, heartbeat: dict) -> dict | None:
+    """Validate and normalise the candidate block of a wait decision.
+
+    Returns a dict in the exact shape store/counterfactuals.py replays
+    ({asset, direction, entry_price, stop_loss_price, take_profit_price},
+    plus optional confidence/max_hold_hours), or None when the response
+    carries nothing replayable — a half-filled candidate is never guessed
+    into shape.
+    """
+    candidate = response.get("candidate")
+    if not isinstance(candidate, dict):
+        return None
+
+    asset = candidate.get("asset")
+    direction = candidate.get("direction")
+    if not asset or direction not in ("long", "short"):
+        return None
+
+    entry_price = candidate.get("entry_price")
+    if not isinstance(entry_price, (int, float)) or entry_price <= 0:
+        # The heartbeat price at decision time is the honest fill-in — it is
+        # the price the agent was looking at when it declined the trade.
+        entry_price = ((heartbeat.get("assets") or {}).get(asset) or {}).get("price")
+        if not isinstance(entry_price, (int, float)) or entry_price <= 0:
+            return None
+
+    sl = candidate.get("stop_loss_price")
+    tp = candidate.get("take_profit_price")
+    if not isinstance(sl, (int, float)) or not isinstance(tp, (int, float)):
+        return None
+
+    out = {
+        "asset": asset,
+        "direction": direction,
+        "entry_price": float(entry_price),
+        "stop_loss_price": float(sl),
+        "take_profit_price": float(tp),
+    }
+    if isinstance(candidate.get("confidence"), (int, float)):
+        out["confidence"] = float(candidate["confidence"])
+    elif isinstance(response.get("confidence"), (int, float)):
+        out["confidence"] = float(response["confidence"])
+    if isinstance(candidate.get("max_hold_hours"), (int, float)):
+        out["max_hold_hours"] = float(candidate["max_hold_hours"])
+    return out
 
 
 def _get_balance(conn, agent_id: str, starting_balance: float) -> float:

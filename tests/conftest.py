@@ -26,10 +26,19 @@ def _isolate_ledger_dir(tmp_path, monkeypatch):
     """
     import store.ledger as ledger_module
     import store.state_snapshot as state_snapshot_module
+    import meta.spawner as spawner_module
 
     monkeypatch.setattr(ledger_module, "LEDGER_DIR", str(tmp_path / "ledger"))
     monkeypatch.setattr(
         state_snapshot_module, "DEFAULT_STATE_PATH", str(tmp_path / "state" / "current.json")
+    )
+    # spawn_agent() writes a thesis .md for every spawned agent.  Tests that
+    # spawn (spawner, head_of_desk, seeding tests) must not leave
+    # test_trader_v1.md / agent_momentum_1_v1.md debris in the real
+    # agents/theses/ — that's how the working tree kept accumulating junk
+    # thesis files (2026-07-11 pre-run review finding F11).
+    monkeypatch.setattr(
+        spawner_module, "_THESES_DIR", tmp_path / "theses"
     )
 
 

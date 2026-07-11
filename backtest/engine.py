@@ -36,12 +36,10 @@ from backtest.dsl import Spec
 from backtest.interpreter import evaluate
 from execution.costs import (
     all_costs_from_trade,
-    compute_fees,
     compute_funding_pnl,
-    compute_gross_pnl,
-    compute_position_size_in_coins,
     compute_true_notional,
 )
+from execution.sizing import scale_position_size
 from market.heartbeat import FUNDING_LOOKBACK_HOURS, LOOKBACK_CANDLES, compute_replayable_fields
 
 # Fixed backtest slippage assumption (pct of price), applied against the
@@ -261,9 +259,8 @@ def run_backtest(
                     # Compute funding PnL over the holding period
                     opened_dt = open_position["opened_at"]
                     close_dt = bar_ts
-                    pos_size_coins = compute_position_size_in_coins(true_notional, entry)
                     funding_pnl = compute_funding_pnl(
-                        position_size_coins=pos_size_coins,
+                        true_notional=true_notional,
                         direction=direction,
                         funding_history=funding_history,
                         entry_ts_unix=opened_dt.timestamp(),
@@ -290,13 +287,12 @@ def run_backtest(
             decision = evaluate(spec, feature_row)
             if decision["action"] == "enter":
                 confidence = decision["confidence"]
-                if confidence >= spec.confidence_threshold:
-                    size_pct = spec.position_size_pct
-                elif confidence >= spec.scale_threshold:
-                    scale = (confidence - spec.scale_threshold) / (spec.confidence_threshold - spec.scale_threshold)
-                    size_pct = spec.position_size_pct * (0.5 + 0.5 * scale)
-                else:
-                    size_pct = spec.position_size_pct
+                size_pct = scale_position_size(
+                    spec.position_size_pct,
+                    confidence,
+                    confidence_threshold=spec.confidence_threshold,
+                    scale_threshold=spec.scale_threshold,
+                )
 
                 open_positions[asset] = {
                     "asset": asset, "direction": decision["direction"],

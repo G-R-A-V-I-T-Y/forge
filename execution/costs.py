@@ -3,9 +3,14 @@
 Single source of truth for cost model used by both live paper trading and
 backtesting. Ensures parity between live-paper and backtest cost calculations.
 
-True notional = margin (balance x position_size_pct) x leverage
-Fees = true_notional x taker_fee per side
-Funding accrues on true_notional position size (position_size = true_notional / entry_price)
+Exchange arithmetic:
+  True notional = margin (balance x position_size_pct) x leverage
+  Fees = true_notional x taker_fee per side
+  Gross PnL (USD) = true_notional x price_move_pct — leverage determines how
+    much notional the margin controls; it must not multiply the dollar PnL a
+    second time.  Return-on-margin (pnl_pct) = price_move_pct x leverage.
+  Funding = true_notional x rate per funding event — a funding rate is a
+    fraction of position value, never a per-coin amount.
 
 Every function in this module is a pure function with no I/O.
 """
@@ -66,18 +71,24 @@ def compute_gross_pnl(
 ) -> dict[str, float]:
     """Compute gross PnL before fees and funding.
 
+    pnl_usd = true_notional x price_move — true_notional already contains
+    leverage (margin x leverage), so leverage must NOT multiply the dollar
+    amount again.  pnl_pct is the levered return on margin
+    (price_move x leverage), the number an exchange shows as position ROE.
+
     Returns:
-        dict with pnl_pct (return on notional), pnl_usd (dollar amount)
+        dict with pnl_pct (return on margin), pnl_usd (dollar amount)
     """
     if entry_price <= 0:
         return {"pnl_pct": 0.0, "pnl_usd": 0.0}
 
     if direction == "long":
-        pnl_pct = (exit_price - entry_price) / entry_price * leverage
+        price_move = (exit_price - entry_price) / entry_price
     else:
-        pnl_pct = (entry_price - exit_price) / entry_price * leverage
+        price_move = (entry_price - exit_price) / entry_price
 
-    pnl_usd = true_notional * pnl_pct
+    pnl_usd = true_notional * price_move
+    pnl_pct = price_move * leverage
 
     return {"pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
 
@@ -103,7 +114,7 @@ def compute_net_pnl(
 
 
 def compute_funding_pnl(
-    position_size_coins: float,
+    true_notional: float,
     direction: str,
     funding_history: list[dict[str, Any]],
     entry_ts_unix: float,
@@ -112,14 +123,16 @@ def compute_funding_pnl(
     """Compute net funding PnL between entry and close using funding history.
 
     funding_history is a list of dicts with {"time": ms_timestamp, "fundingRate": float}.
-    Each funding rate is paid/received on the position size in coins.
+    Each funding rate is a fraction of position value, so each event pays
+    true_notional x rate — computing it on a coin count without the price
+    term understates BTC funding by ~the price of BTC.
 
-    Long pays positive funding: long_funding_pnl = -position_size_coins * rate
-    Short receives positive funding: short_funding_pnl = +position_size_coins * rate
+    Long pays positive funding: long_funding_pnl = -true_notional * rate
+    Short receives positive funding: short_funding_pnl = +true_notional * rate
 
     Returns the total funding PnL (positive = PnL gain, negative = PnL cost).
     """
-    if not funding_history or position_size_coins <= 0:
+    if not funding_history or true_notional <= 0:
         return 0.0
 
     total_payment = 0.0
@@ -130,7 +143,7 @@ def compute_funding_pnl(
             continue
         ev_ts_ms = ev.get("time", 0)
         if entry_ts_unix * 1000 <= ev_ts_ms <= close_ts_unix * 1000:
-            total_payment += position_size_coins * rate
+            total_payment += true_notional * rate
             samples += 1
 
     duration_hours = (close_ts_unix - entry_ts_unix) / 3600 if close_ts_unix > entry_ts_unix else 0
@@ -145,7 +158,7 @@ def compute_funding_pnl(
         ]
         if all_rates:
             avg_rate = sum(all_rates) / len(all_rates)
-            total_payment = position_size_coins * avg_rate * duration_hours
+            total_payment = true_notional * avg_rate * duration_hours
 
     if direction == "long":
         return -total_payment
@@ -154,7 +167,7 @@ def compute_funding_pnl(
 
 
 def compute_funding_pnl_simple(
-    position_size_coins: float,
+    true_notional: float,
     direction: str,
     avg_funding_rate: float,
     duration_hours: float,
@@ -164,7 +177,7 @@ def compute_funding_pnl_simple(
     Useful when the backtest doesn't have access to the full tick-level
     funding history and uses an interpolated or per-bar average rate instead.
     """
-    total_payment = position_size_coins * avg_funding_rate * duration_hours
+    total_payment = true_notional * avg_funding_rate * duration_hours
     if direction == "long":
         return -total_payment
     else:
@@ -209,9 +222,8 @@ def all_costs_from_trade(
 
     funding_pnl = 0.0
     if funding_history is not None and entry_ts_unix is not None and close_ts_unix is not None:
-        pos_size = compute_position_size_in_coins(true_notional, entry_price)
         funding_pnl = compute_funding_pnl(
-            pos_size, direction, funding_history, entry_ts_unix, close_ts_unix,
+            true_notional, direction, funding_history, entry_ts_unix, close_ts_unix,
         )
 
     net = compute_net_pnl(gross["pnl_usd"], fees, funding_pnl)

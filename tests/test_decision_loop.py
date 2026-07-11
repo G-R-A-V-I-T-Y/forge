@@ -882,6 +882,298 @@ async def test_run_postmortem_handles_none_hypothesis(conn):
     assert updated["agent_postmortem"] == "won because of trend"
 
 
+# ---------------------------------------------------------------------------
+# Benchmark agents: btc_hold enters once and holds (R2 AC#4)
+# ---------------------------------------------------------------------------
+
+
+def _btc_heartbeat_packet() -> dict:
+    packet = _fresh_heartbeat_packet()
+    packet["assets"]["BTC-PERP"] = {
+        "price": 64000.0,
+        "return_5m": 0.0,
+        "return_24h": 0.01,
+        "funding": 0.0001,
+        "rsi": 50.0,
+        "depth_imbalance": 0.0,
+        "oi_zscore": 0.0,
+    }
+    return packet
+
+
+@pytest.mark.asyncio
+async def test_btc_hold_enters_once_and_holds(conn, tmp_path):
+    """benchmark_btc_hold must establish its position once and then hold —
+    not stack a new BTC long every wake cycle until the concurrent-position
+    cap starts rejecting it, and not churn through the 48h default max_hold."""
+    insert_agent(
+        conn,
+        "benchmark_btc_hold",
+        "benchmark_btc_hold",
+        "2026-07-11T00:00:00Z",
+        json.dumps({"benchmark_type": "btc_hold"}),
+    )
+    insert_account_snapshot(conn, "benchmark_btc_hold", "paper", 50000.0, 50000.0)
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _btc_heartbeat_packet())
+    config = _config(heartbeat_path)
+    config["universe"] = ["SOL-PERP", "BTC-PERP"]
+
+    def sentinel_llm(sp, dp, **kw):
+        raise AssertionError("benchmark agent must not call the LLM")
+
+    provider = MarketProvider(config)
+    async with provider:
+        first = await run_decision(
+            agent_id="benchmark_btc_hold",
+            thesis_text="benchmark",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=sentinel_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+        second = await run_decision(
+            agent_id="benchmark_btc_hold",
+            thesis_text="benchmark",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=sentinel_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert first["action"] == "enter"
+    assert second["action"] == "wait", (
+        "second cycle must hold the existing BTC position, not re-enter"
+    )
+
+    from store.db import get_trades
+
+    trades = get_trades(conn, "benchmark_btc_hold")
+    assert len(trades) == 1
+
+    # Hold means hold: the position must not carry the 48h default
+    # max_hold that would churn (close + re-enter + fees) every two days.
+    row = conn.execute(
+        "SELECT max_hold_hours FROM positions WHERE agent_id = ?",
+        ("benchmark_btc_hold",),
+    ).fetchone()
+    assert row is not None
+    assert row["max_hold_hours"] >= 24 * 365
+
+
+# ---------------------------------------------------------------------------
+# R3-capture: wait decisions persist the candidate trade so counterfactual
+# replay has something to replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_llm_wait_with_candidate_persists_details(conn, tmp_path):
+    """A wait decision carrying a candidate block must persist it into
+    decisions.decision_details_json in the shape store/counterfactuals.py
+    replays ({"candidate": {asset, direction, entry_price, stop_loss_price,
+    take_profit_price}})."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def wait_llm(sys, prompt, **kwargs):
+        return {
+            "action": "wait",
+            "reason": "confidence below threshold",
+            "confidence": 0.42,
+            "evidence_strength": {"funding_z": 0.3},
+            "candidate": {
+                "asset": "SOL-PERP",
+                "direction": "long",
+                "entry_price": 145.20,
+                "stop_loss_price": 142.00,
+                "take_profit_price": 151.00,
+            },
+        }, "Test Wait Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=wait_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "wait"
+    row = conn.execute(
+        "SELECT decision_details_json FROM decisions WHERE agent_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    details = json.loads(row["decision_details_json"])
+    cand = details["candidate"]
+    assert cand["asset"] == "SOL-PERP"
+    assert cand["direction"] == "long"
+    assert cand["entry_price"] == pytest.approx(145.20)
+    assert cand["stop_loss_price"] == pytest.approx(142.00)
+    assert cand["take_profit_price"] == pytest.approx(151.00)
+
+
+@pytest.mark.asyncio
+async def test_llm_wait_candidate_missing_entry_price_filled_from_heartbeat(
+    conn, tmp_path
+):
+    """If the model names an asset with SL/TP but omits entry_price, the
+    heartbeat price at decision time is the honest fill-in — it's the price
+    the agent was looking at."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def wait_llm(sys, prompt, **kwargs):
+        return {
+            "action": "wait",
+            "reason": "almost",
+            "confidence": 0.5,
+            "candidate": {
+                "asset": "SOL-PERP",
+                "direction": "short",
+                "stop_loss_price": 148.0,
+                "take_profit_price": 139.0,
+            },
+        }, "Test Wait Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=wait_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    row = conn.execute(
+        "SELECT decision_details_json FROM decisions WHERE agent_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    details = json.loads(row["decision_details_json"])
+    assert details["candidate"]["entry_price"] == pytest.approx(145.20)
+
+
+@pytest.mark.asyncio
+async def test_llm_wait_malformed_candidate_is_dropped(conn, tmp_path):
+    """A candidate without a replayable shape (missing SL/TP, junk types)
+    must be dropped — details stay NULL, never a half-filled guess."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def wait_llm(sys, prompt, **kwargs):
+        return {
+            "action": "wait",
+            "reason": "nothing close",
+            "confidence": 0.1,
+            "candidate": {"asset": "SOL-PERP", "direction": "sideways"},
+        }, "Test Wait Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=wait_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    row = conn.execute(
+        "SELECT decision_details_json FROM decisions WHERE agent_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    assert row["decision_details_json"] is None
+
+
+# ---------------------------------------------------------------------------
+# R4 AC#4: one confidence-sizing formula, applied before the risk gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enter_size_scaled_by_shared_formula_before_gate(conn, tmp_path):
+    """Live sizing must use the same formula as backtest/engine.py (via
+    execution/sizing.py) and the risk gate must validate the FINAL scaled
+    order.  An order whose raw size exceeds max_position_size_pct but whose
+    scaled size is legal must trade — under the old order (validate first,
+    scale after) it was rejected on a size that never executed."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    def llm(sys, prompt, **kwargs):
+        return {
+            "action": "enter",
+            "asset": "SOL-PERP",
+            "direction": "long",
+            "entry_price": 145.20,
+            "stop_loss_price": 143.00,
+            "take_profit_price": 152.00,
+            "leverage": 3,
+            "position_size_pct": 0.22,   # raw: above the 0.20 cap
+            "confidence": 0.60,          # scaled: 0.22 × 0.75 = 0.165 → legal
+            "hypothesis": "test",
+            "key_conditions_met": [],
+            "key_conditions_missing": [],
+            "expected_value": "test",
+        }, "Test Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "enter", f"expected enter, got {result}"
+
+    from execution.sizing import scale_position_size
+
+    expected_size = scale_position_size(0.22, 0.60)
+    assert expected_size == pytest.approx(0.165)
+
+    from store.db import get_trades
+
+    trades = get_trades(conn, AGENT_ID)
+    assert len(trades) == 1
+    assert trades[0]["position_size_pct"] == pytest.approx(expected_size)
+
+
 @pytest.mark.asyncio
 async def test_run_postmortem_forwards_agent_id_to_llm_fn(conn):
     """Final-review Finding 2b: run_postmortem must forward agent_id to

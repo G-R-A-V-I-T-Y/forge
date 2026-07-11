@@ -27,3 +27,6 @@ build/
 .venv/
 venv/
 nul
+
+# Pre-run review 2026-07-11 (F11): opencode session debris, never tracked.
+.opencode/

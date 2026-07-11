@@ -147,40 +147,48 @@ def run_reflection_cycle(
 
     Returns a dict with the ReflectionResult fields.
     """
-    from agents.reflection import run_reflection as _run_reflection
+    import agents.reflection as _reflection_mod
 
-    result = _run_reflection(conn, agent_id, config, llm_fn)
+    # Insert the log row at trigger time — this is the ONLY production
+    # writer of the reflections table.  check_agent_eligible reads
+    # triggered_at from it, so without this row an eligible agent re-fires
+    # a full reflection (two LLM calls) every scheduler pass forever.
+    cur = conn.execute(
+        "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
+        (agent_id, _now()),
+    )
+    reflection_row_id = cur.lastrowid
+    conn.commit()
 
-    # Log the outcome to the reflections table if it was triggered
+    result = _reflection_mod.run_reflection(conn, agent_id, config, llm_fn)
+
+    rejection = None
+    if not result.deployed:
+        if result.blocked_by_gate:
+            rejection = f"blocked by gate: {result.blocked_by_gate}"
+        elif result.rejection_reason:
+            rejection = result.rejection_reason
+
+    ev_summary = ""
+    if result.gates_passed:
+        ev_summary = f"Gates passed: {', '.join(result.gates_passed)}"
+    if rejection:
+        ev_summary += f" | Rejection: {rejection}"
+
     if result.triggered:
-        rejection = None
-        gate = None
-        if not result.deployed:
-            if result.blocked_by_gate:
-                rejection = f"blocked by gate: {result.blocked_by_gate}"
-                gate = result.blocked_by_gate
-            elif result.rejection_reason:
-                rejection = result.rejection_reason
+        outcome = "deployed" if result.deployed else "rejected"
+    else:
+        # Pre-checks declined to reflect.  The row still stands so the
+        # scheduler paces this agent instead of retrying every 30 minutes.
+        outcome = "not_triggered"
 
-        ev_summary = ""
-        if result.gates_passed:
-            ev_summary = f"Gates passed: {', '.join(result.gates_passed)}"
-        if rejection:
-            ev_summary += f" | Rejection: {rejection}"
-
-        conn.execute(
-            """UPDATE reflections SET outcome = ?, rejection_reason = ?
-               WHERE agent_id = ? AND id = (
-                   SELECT MAX(id) FROM reflections WHERE agent_id = ?
-               )""",
-            (
-                "deployed" if result.deployed else "rejected",
-                rejection,
-                agent_id,
-                agent_id,
-            ),
-        )
-        conn.commit()
+    conn.execute(
+        """UPDATE reflections
+           SET outcome = ?, rejection_reason = ?, evidence_summary = ?
+           WHERE id = ?""",
+        (outcome, rejection, ev_summary or None, reflection_row_id),
+    )
+    conn.commit()
 
     return {
         "triggered": result.triggered,

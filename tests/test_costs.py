@@ -1,4 +1,17 @@
-"""Tests for execution/costs.py — shared fee/funding computation module."""
+"""Tests for execution/costs.py — shared fee/funding computation module.
+
+The arithmetic asserted here is exchange arithmetic, not implementation
+arithmetic:
+
+  * A perp position of N coins has PnL_usd = N × (exit − entry)
+    = true_notional × price_move_pct.  Leverage determines how much
+    notional a given margin controls; it must NOT appear a second time
+    in the dollar PnL.  (pnl_pct — the return on margin — is
+    price_move × leverage.)
+  * Funding is paid on position value: payment per funding event
+    = true_notional × rate.  A rate is a fraction of notional, never a
+    per-coin dollar amount.
+"""
 import pytest
 from execution.costs import (
     all_costs_from_trade,
@@ -49,23 +62,26 @@ class TestComputeFees:
 
 class TestComputeGrossPnl:
     def test_long_profit(self):
-        # $15k long at 145.20, exit at 149.01, 3x leverage
+        # $15k notional long at 145.20, exit at 149.01, 3x leverage.
+        # 103.3 coins × $3.81/coin = $393.60 — leverage does not multiply
+        # the dollar PnL a second time.
         gross = compute_gross_pnl(
             entry_price=145.20, exit_price=149.01,
             direction="long", leverage=3, true_notional=15000.0,
         )
-        expected_pnl_pct = (149.01 - 145.20) / 145.20 * 3
-        assert gross["pnl_pct"] == pytest.approx(expected_pnl_pct)
-        assert gross["pnl_usd"] == pytest.approx(15000.0 * expected_pnl_pct)
+        price_move = (149.01 - 145.20) / 145.20
+        assert gross["pnl_usd"] == pytest.approx(15000.0 * price_move)
+        # Return on margin IS levered.
+        assert gross["pnl_pct"] == pytest.approx(price_move * 3)
 
     def test_short_profit(self):
         gross = compute_gross_pnl(
             entry_price=150.0, exit_price=140.0,
             direction="short", leverage=2, true_notional=10000.0,
         )
-        expected_pnl_pct = (150.0 - 140.0) / 150.0 * 2
-        assert gross["pnl_pct"] == pytest.approx(expected_pnl_pct)
-        assert gross["pnl_usd"] == pytest.approx(10000.0 * expected_pnl_pct)
+        price_move = (150.0 - 140.0) / 150.0
+        assert gross["pnl_usd"] == pytest.approx(10000.0 * price_move)
+        assert gross["pnl_pct"] == pytest.approx(price_move * 2)
 
     def test_long_loss(self):
         gross = compute_gross_pnl(
@@ -75,55 +91,66 @@ class TestComputeGrossPnl:
         assert gross["pnl_pct"] == pytest.approx(-0.05)
         assert gross["pnl_usd"] == pytest.approx(-250.0)
 
+    def test_pnl_usd_not_double_leveraged(self):
+        # Regression for the leverage² defect: $3,300 margin at 3x =
+        # $9,900 notional; a +5% price move must book $495, not $1,485.
+        gross = compute_gross_pnl(
+            entry_price=100.0, exit_price=105.0,
+            direction="long", leverage=3, true_notional=9900.0,
+        )
+        assert gross["pnl_usd"] == pytest.approx(495.0)
+        # Return on the $3,300 margin is +15%.
+        assert gross["pnl_usd"] / (9900.0 / 3) == pytest.approx(0.15)
+
 
 class TestComputeFundingPnl:
     def test_long_pays_positive_funding(self):
-        # Long pays funding: if funding rate is positive, long loses money
+        # Funding is a fraction of position value: $10k notional at
+        # 0.1%/event over two events → pays $20 total.
         funding_history = [
             {"time": 1000, "fundingRate": 0.001},
             {"time": 2000, "fundingRate": 0.001},
         ]
         result = compute_funding_pnl(
-            position_size_coins=100.0,  # 100 coins
+            true_notional=10000.0,
             direction="long",
             funding_history=funding_history,
             entry_ts_unix=0.5,
             close_ts_unix=2.5,
         )
-        # Long pays: -100 * (0.001 + 0.001) = -0.20
-        assert result == pytest.approx(-0.20)
+        assert result == pytest.approx(-20.0)
 
     def test_short_receives_positive_funding(self):
-        # Short receives: if funding rate is positive, short makes money
         funding_history = [
             {"time": 1000, "fundingRate": 0.001},
             {"time": 2000, "fundingRate": 0.001},
         ]
         result = compute_funding_pnl(
-            position_size_coins=100.0,
+            true_notional=10000.0,
             direction="short",
             funding_history=funding_history,
             entry_ts_unix=0.5,
             close_ts_unix=2.5,
         )
-        # Short receives: +100 * (0.001 + 0.001) = +0.20
-        assert result == pytest.approx(0.20)
+        assert result == pytest.approx(20.0)
 
     def test_funding_sign_and_magnitude(self):
-        # Known rate, known position size → exact arithmetic
-        # 50 BTC at 0.0005 funding rate, long → pays 50 * 0.0005 = 0.025
+        # $5k BTC long, one 0.05% funding event → pays exactly $2.50.
+        # The asset's per-coin price must not appear in the arithmetic:
+        # 5000 × 0.0005 = 2.50 whether that notional is 0.078 BTC or
+        # 51,546 ARB.
         result = compute_funding_pnl(
-            position_size_coins=50.0,
+            true_notional=5000.0,
             direction="long",
             funding_history=[{"time": 5000, "fundingRate": 0.0005}],
             entry_ts_unix=1.0,
             close_ts_unix=10.0,
         )
-        assert result == pytest.approx(-0.025)
+        assert result == pytest.approx(-2.50)
 
     def test_empty_history_returns_zero(self):
         result = compute_funding_pnl(
-            position_size_coins=100.0,
+            true_notional=10000.0,
             direction="long",
             funding_history=[],
             entry_ts_unix=0.0,
@@ -137,34 +164,49 @@ class TestComputeFundingPnl:
             {"time": 2000, "fundingRate": 0.001},
         ]
         result = compute_funding_pnl(
-            position_size_coins=100.0,
+            true_notional=10000.0,
             direction="long",
             funding_history=funding_history,
             entry_ts_unix=0.5,
             close_ts_unix=2.5,
         )
-        assert result == pytest.approx(-0.10)
+        assert result == pytest.approx(-10.0)
+
+    def test_events_outside_window_ignored(self):
+        funding_history = [
+            {"time": 100, "fundingRate": 0.001},    # before entry
+            {"time": 2000, "fundingRate": 0.001},   # inside
+            {"time": 9000, "fundingRate": 0.001},   # after close
+        ]
+        result = compute_funding_pnl(
+            true_notional=10000.0,
+            direction="long",
+            funding_history=funding_history,
+            entry_ts_unix=1.0,
+            close_ts_unix=3.0,
+        )
+        assert result == pytest.approx(-10.0)
 
 
 class TestComputeFundingPnlSimple:
     def test_long_pays_at_average_rate(self):
         result = compute_funding_pnl_simple(
-            position_size_coins=100.0,
+            true_notional=10000.0,
             direction="long",
             avg_funding_rate=0.001,
             duration_hours=8.0,
         )
-        # -100 * 0.001 * 8 = -0.80
-        assert result == pytest.approx(-0.80)
+        # -10000 × 0.001 × 8 = -80
+        assert result == pytest.approx(-80.0)
 
     def test_short_receives_at_average_rate(self):
         result = compute_funding_pnl_simple(
-            position_size_coins=100.0,
+            true_notional=10000.0,
             direction="short",
             avg_funding_rate=0.0005,
             duration_hours=24.0,
         )
-        assert result == pytest.approx(1.20)
+        assert result == pytest.approx(120.0)
 
 
 class TestComputePositionSizeInCoins:
@@ -180,7 +222,6 @@ class TestComputePositionSizeInCoins:
 
 class TestAllCostsFromTrade:
     def test_complete_long_trade_costs(self):
-        # $5k margin, 10% at 3x = $1.5k margin? No:
         # balance=50000, size_pct=0.10, leverage=3
         # true_notional = 50000 * 0.10 * 3 = 15000
         # entry at 145.20, exit at 149.01
@@ -196,11 +237,11 @@ class TestAllCostsFromTrade:
         assert costs["entry_fee"] == pytest.approx(5.25)
         assert costs["exit_fee"] == pytest.approx(5.25)
         assert costs["total_fees"] == pytest.approx(10.50)
-        # Gross PnL before fees
-        expected_pnl_pct = (149.01 - 145.20) / 145.20 * 3
-        assert costs["gross_pnl_pct"] == pytest.approx(expected_pnl_pct)
-        expected_gross_usd = 15000.0 * expected_pnl_pct
+        # Gross PnL before fees: notional × price move (no extra leverage).
+        price_move = (149.01 - 145.20) / 145.20
+        expected_gross_usd = 15000.0 * price_move
         assert costs["gross_pnl_usd"] == pytest.approx(expected_gross_usd)
+        assert costs["gross_pnl_pct"] == pytest.approx(price_move * 3)
         # Net = gross - total_fees + funding (funding not provided = 0)
         assert costs["net_pnl_usd"] == pytest.approx(expected_gross_usd - 10.50)
         assert costs["funding_pnl"] == 0.0
@@ -217,10 +258,12 @@ class TestAllCostsFromTrade:
             entry_ts_unix=1.0,
             close_ts_unix=10.0,
         )
-        # Position size = 10000/100 = 100 coins
-        # Funding = -100 * 0.001 = -0.10
-        assert costs["funding_pnl"] == pytest.approx(-0.10)
+        # Funding on notional: -(10000 × 0.001) = -10.0
+        assert costs["funding_pnl"] == pytest.approx(-10.0)
         assert costs["total_fees"] == pytest.approx(7.0)  # 10000 * 0.00035 * 2
+        # Gross: 10000 × 10% move = 1000
+        assert costs["gross_pnl_usd"] == pytest.approx(1000.0)
+        assert costs["net_pnl_usd"] == pytest.approx(1000.0 - 7.0 - 10.0)
 
     def test_five_x_leverage_fees_on_true_notional(self):
         # 5x leverage, $5k balance, 10% size → $2.5k margin → $12.5k true notional
@@ -236,3 +279,5 @@ class TestAllCostsFromTrade:
         # Fees = 12500 * 0.00035 * 2 = 8.75
         assert costs["entry_fee"] == pytest.approx(4.375)
         assert costs["total_fees"] == pytest.approx(8.75)
+        # Gross: 12500 × 1% = 125 (not × 5 again)
+        assert costs["gross_pnl_usd"] == pytest.approx(125.0)

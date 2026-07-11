@@ -458,3 +458,78 @@ class TestHeadOfDesk:
         assert "spawned" in report
         assert "culled" in report
         assert report["agent_count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Reflection scheduler: a triggered cycle must write its own log row
+# ---------------------------------------------------------------------------
+
+class TestReflectionCycleLogging:
+    def _canned_result(self, triggered=True):
+        from agents.reflection import ReflectionResult
+        return ReflectionResult(
+            triggered=triggered,
+            new_spec_yaml="{}" if triggered else None,
+            spec_version=2 if triggered else None,
+            deployed=False,
+            rejection_reason="revised spec has no evidence terms" if triggered else None,
+            blocked_by_gate=None if triggered else "not enough trades",
+            adversarial_flaws=[],
+            gates_passed=["parse_spec"] if triggered else [],
+        )
+
+    def test_reflection_cycle_inserts_row_and_stops_retrigger(self, conn, monkeypatch):
+        """run_reflection_cycle must INSERT the reflections row itself —
+        nothing else in production writes that table, and without the row
+        check_agent_eligible fires the same agent every scheduler pass
+        forever (two LLM calls per agent per 30 minutes, all run long)."""
+        from meta import reflection_scheduler as rs
+
+        monkeypatch.setattr(
+            "agents.reflection.run_reflection",
+            lambda *a, **k: self._canned_result(triggered=True),
+        )
+
+        trigger = {"mode": "trade_count", "trade_interval": 20}
+        eligible_before, _ = rs.check_agent_eligible(conn, "alpha_trader", trigger)
+        assert eligible_before is True  # 60 closed trades, no reflection yet
+
+        rs.run_reflection_cycle(conn, "alpha_trader", {}, lambda p: "{}")
+
+        row = conn.execute(
+            "SELECT triggered_at, outcome, rejection_reason FROM reflections "
+            "WHERE agent_id = 'alpha_trader'"
+        ).fetchone()
+        assert row is not None, "run_reflection_cycle must insert its own reflections row"
+        assert row["triggered_at"]
+        assert row["outcome"] == "rejected"
+        assert "no evidence terms" in row["rejection_reason"]
+
+        # The row is what makes eligibility real: trades since the
+        # reflection are now < interval, so the scheduler stops re-firing.
+        eligible_after, reason = rs.check_agent_eligible(conn, "alpha_trader", trigger)
+        assert eligible_after is False, reason
+
+    def test_untriggered_reflection_still_paces_scheduler(self, conn, monkeypatch):
+        """A cycle whose pre-checks decline to reflect (triggered=False)
+        must still leave a row — otherwise the scheduler retries the same
+        blocked agent every 30 minutes for the whole run."""
+        from meta import reflection_scheduler as rs
+
+        monkeypatch.setattr(
+            "agents.reflection.run_reflection",
+            lambda *a, **k: self._canned_result(triggered=False),
+        )
+
+        rs.run_reflection_cycle(conn, "alpha_trader", {}, lambda p: "{}")
+
+        row = conn.execute(
+            "SELECT outcome, rejection_reason FROM reflections "
+            "WHERE agent_id = 'alpha_trader'"
+        ).fetchone()
+        assert row is not None
+        assert row["outcome"] == "not_triggered"
+
+        trigger = {"mode": "trade_count", "trade_interval": 20}
+        eligible, _ = rs.check_agent_eligible(conn, "alpha_trader", trigger)
+        assert eligible is False

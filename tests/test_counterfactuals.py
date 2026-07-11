@@ -658,3 +658,66 @@ class TestNoLLMCalls:
         results = [json.loads(r["counterfactual_result"]) for r in rows]
         assert all(r["reason"] == "take_profit" for r in results)
         assert all(r["profitable"] is True for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Production ledger format: candles_5m partitions carry ISO-string ts
+# ---------------------------------------------------------------------------
+
+class TestLedgerIsoTimestamps:
+    def test_replay_fills_wait_from_iso_ts_ledger_partition(self, conn, tmp_path):
+        """The real ledger (export_heartbeat_to_ledger) writes candle ts as
+        an ISO string ("2026-07-11T17:43:58Z").  pd.to_numeric turns those
+        into NaN, so without ISO handling the ledger path silently returns
+        no candles and every wait older than the 25h heartbeat window can
+        never be counterfactually filled."""
+        import store.counterfactuals as cf
+
+        wait_dt = datetime.now(timezone.utc) - timedelta(hours=3)
+        wait_ts_iso = wait_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        details = {
+            "candidate": {
+                "asset": "SOL-PERP",
+                "direction": "long",
+                "entry_price": 100.0,
+                "stop_loss_price": 97.0,
+                "take_profit_price": 103.0,
+            }
+        }
+        _insert_wait(conn, "iso_agent", wait_ts_iso, details=details)
+        # _insert_wait seeds counterfactual_was_better=0 with NULL result;
+        # ensure result is NULL so the row is selected.
+        conn.execute("UPDATE decisions SET counterfactual_result = NULL")
+        conn.commit()
+
+        # Write a real-format partition: ISO ts strings, one candle per
+        # 5 minutes from the wait forward, wicking through TP on candle 3.
+        ledger_dir = tmp_path / "ledger"
+        part = ledger_dir / "candles_5m" / f"{wait_dt:%Y-%m}.jsonl"
+        part.parent.mkdir(parents=True)
+        lines = []
+        for i in range(6):
+            c_dt = wait_dt + timedelta(minutes=5 * (i + 1))
+            price = 100.0 if i < 3 else 104.0
+            lines.append(json.dumps({
+                "ts": c_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "asset": "SOL-PERP",
+                "o": price, "h": price + 0.5, "l": price - 0.5, "c": price,
+                "v": 1.0,
+            }))
+        part.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        summary = run_counterfactual_replay(conn, {}, ledger_dir)
+        assert summary["errors"] == 0
+        assert summary["filled"] == 1, (
+            "ISO-ts ledger candles must be replayable — this is the only "
+            "format production writes"
+        )
+
+        row = conn.execute(
+            "SELECT counterfactual_result, counterfactual_was_better FROM decisions"
+        ).fetchone()
+        result = json.loads(row["counterfactual_result"])
+        assert result["reason"] == "take_profit"
+        assert row["counterfactual_was_better"] == 1

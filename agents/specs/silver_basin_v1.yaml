@@ -1,45 +1,58 @@
 agent_id: silver_basin
 spec_version: 1
 thesis_version: 1
-
 universe:
-  include: [SOL-PERP, ETH-PERP, ARB-PERP, OP-PERP, SUI-PERP]
-
+  include:
+  - SOL-PERP
+  - ETH-PERP
+  - ARB-PERP
+  - OP-PERP
+  - SUI-PERP
 regime_filter:
   exclude: []
-
 entry:
   direction: short
-  confidence_threshold: 0.70
-  scale_threshold: 0.50
+  confidence_threshold: 0.7
+  scale_threshold: 0.5
   evidence:
-    - name: funding_extremity
-      feature: funding_zscore
-      thresholds:
-        - {op: ">", value: 2.0, weight: 0.7}
-        - {op: ">", value: 1.5, weight: 0.5}
-        - {op: ">", value: 1.0, weight: 0.2}
-        - {op: "else", weight: 0.0}
-      missing: veto
-    - name: funding_acceleration
-      feature: funding_acceleration
-      thresholds:
-        - {op: ">", value: 0.0, weight: 0.5}
-        - {op: "else", weight: -0.4}
-      missing: skip
+  - name: funding_extremity
+    feature: funding_zscore
+    thresholds:
+    - op: '>'
+      weight: 0.7
+      value: 2.0
+    - op: '>'
+      weight: 0.5
+      value: 1.5
+    - op: '>'
+      weight: 0.2
+      value: 1.0
+    - op: else
+      weight: 0.0
+    missing: veto
+  - name: funding_acceleration
+    feature: funding_acceleration
+    thresholds:
+    - op: '>'
+      weight: 0.5
+      value: 0.0
+    - op: else
+      weight: -0.4
+    missing: skip
   secondary_evidence:
-    - name: oi_funding_alignment
-      feature: oi_drawdown_pct
-      thresholds:
-        - {op: "<", value: -0.01, weight: 0.3}
-        - {op: "else", weight: 0.1}
-      missing: uncertainty:-0.1
-
+  - name: oi_funding_alignment
+    feature: oi_drawdown_pct
+    thresholds:
+    - op: <
+      weight: 0.3
+      value: -0.01
+    - op: else
+      weight: 0.1
+    missing: uncertainty:-0.1
 exit:
   stop_loss_pct: 0.02
   take_profit_pct: 0.04
   max_hold_hours: 8
-
 position:
   leverage: 4
-  position_size_pct: 0.10
+  position_size_pct: 0.1

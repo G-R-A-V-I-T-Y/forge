@@ -305,16 +305,27 @@ def _read_candle_ledger(
     if candles_df is None or candles_df.empty:
         return None
 
-    # Filter to the asset and >= start_ts.
-    # ts may be string or int depending on partition read — normalise to int.
+    # Normalise ts to epoch-milliseconds.  The production ledger
+    # (market/heartbeat.py's export_heartbeat_to_ledger) writes ts as an
+    # ISO string ("2026-07-11T17:43:58Z"); older/synthetic partitions may
+    # carry numeric epoch-ms.  pd.to_numeric alone maps ISO strings to NaN,
+    # which silently empties the ledger path and every wait falls through
+    # to the 25h heartbeat fallback.
     ts_col = pd.to_numeric(candles_df["ts"], errors="coerce")
+    if ts_col.isna().any():
+        ts_dt = pd.to_datetime(candles_df["ts"], errors="coerce", utc=True)
+        ts_ms = (ts_dt - pd.Timestamp(0, tz="utc")) // pd.Timedelta(milliseconds=1)
+        ts_col = ts_col.fillna(ts_ms)
+
     start_ms = int(start_ts.timestamp() * 1000)
     mask = (candles_df["asset"] == asset) & (ts_col >= start_ms)
-    subset = candles_df.loc[mask, ["ts", "o", "h", "l", "c", "v"]]
+    subset = candles_df.loc[mask, ["ts", "o", "h", "l", "c", "v"]].copy()
 
     if subset.empty:
         return None
 
+    # Return numeric ts — find_first_cross compares c[0] arithmetically.
+    subset["ts"] = ts_col[mask]
     return [row.tolist() for row in subset.values]
 
 

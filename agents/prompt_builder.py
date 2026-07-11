@@ -192,10 +192,12 @@ IMPORTANT: You reason in probabilities, not checklists. Every signal has strengt
 
 You may:
   - Enter a new trade: {{"action": "enter", "asset": "...", "direction": "long|short", "entry_price": 0.0, "stop_loss_price": 0.0, "take_profit_price": 0.0, "leverage": 1, "position_size_pct": 0.10, "hypothesis": "...", "key_conditions_met": [], "key_conditions_missing": [], "confidence": 0.72, "evidence_strength": {{"funding": 0.6, "oi": 0.3, "momentum": -0.2, "volatility": 0.4}}, "uncertainty_factors": ["orderbook depth thinning reduces conviction"], "expected_value": "..."}}
-  - Wait: {{"action": "wait", "reason": "...", "confidence": 0.35, "evidence_strength": {{"funding": 0.1, "oi": -0.2}}, "uncertainty_factors": []}}
+  - Wait: {{"action": "wait", "reason": "...", "confidence": 0.35, "evidence_strength": {{"funding": 0.1, "oi": -0.2}}, "uncertainty_factors": [], "candidate": {{"asset": "...", "direction": "long|short", "entry_price": 0.0, "stop_loss_price": 0.0, "take_profit_price": 0.0}}}}
   - Close a position: {{"action": "close", "position_id": "...", "reason": "..."}}
 
 Wait decisions are logged and scored for calibration exactly like entries -- report your real conviction and evidence, not just a reason string. A well-calibrated 0.35 that correctly stayed out is as valuable to your track record as a well-calibrated 0.72 that entered.
+
+On every wait, also fill the candidate block with the single trade you came closest to taking this cycle (the asset you analysed most seriously, with the entry, stop and target you would have used per your thesis). It is replayed later against recorded prices to score whether waiting was right — it does not place an order. Omit candidate only when you evaluated no asset seriously enough to name one.
 
 Output JSON only."""
 

@@ -9,11 +9,7 @@ from datetime import datetime, timezone
 
 from execution.costs import (
     all_costs_from_trade,
-    compute_fees,
     compute_funding_pnl,
-    compute_gross_pnl,
-    compute_position_size_in_coins,
-    compute_true_notional,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,13 +105,12 @@ def _calculate_funding(position, close_ts_unix, funding_history):
     if true_notional <= 0 or entry_price <= 0 or not opened_at:
         return 0.0
 
-    pos_size_coins = compute_position_size_in_coins(true_notional, entry_price)
     entry_ts = _parse_entry_ts(opened_at)
     if entry_ts is None:
         return 0.0
 
     return compute_funding_pnl(
-        position_size_coins=pos_size_coins,
+        true_notional=true_notional,
         direction=direction,
         funding_history=funding_history,
         entry_ts_unix=entry_ts,
@@ -190,7 +185,7 @@ def execute_close(
         old_balance = account["balance"]
         old_peak = account["peak_balance"]
     else:
-        old_balance = notional / (position_dict.get("position_size_pct", 0.1) or 0.1)
+        old_balance = margin / (position_dict.get("position_size_pct", 0.1) or 0.1)
         old_peak = old_balance
 
     new_balance = old_balance + net_pnl_usd
