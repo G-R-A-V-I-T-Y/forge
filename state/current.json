@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-12T18:21:13Z",
+  "generated_at": "2026-07-12T18:26:13Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -129,8 +129,8 @@
       "config_json": "{\"pinned_model\": null, \"benchmark_type\": \"random_walk\", \"description\": \"Random walk benchmark \\u2014 makes random trading decisions\", \"starting_balance\": 50000.0, \"universe\": [\"BTC-PERP\", \"ETH-PERP\", \"SOL-PERP\", \"SUI-PERP\", \"AVAX-PERP\", \"LINK-PERP\", \"AAVE-PERP\", \"BNB-PERP\", \"ARB-PERP\", \"OP-PERP\", \"TAO-PERP\", \"FET-PERP\", \"RENDER-PERP\", \"XRP-PERP\", \"XLM-PERP\", \"TIA-PERP\", \"HYPE-PERP\", \"LTC-PERP\", \"BCH-PERP\", \"ADA-PERP\"]}",
       "current_thesis_version": 1,
       "last_model_used": "benchmark_random_walk",
-      "paper_balance": null,
-      "paper_peak": null,
+      "paper_balance": 50000.95985451582,
+      "paper_peak": 50000.95985451582,
       "live_balance": null
     },
     {
@@ -159,28 +159,10 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": -0.0005931015389190758,
+      "current_pnl_pct": -0.00068674911186333,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
-    },
-    {
-      "id": "pos_benchmark_random_walk_20260712_180611_LINK_f70e",
-      "agent_id": "benchmark_random_walk",
-      "asset": "LINK-PERP",
-      "direction": "short",
-      "entry_price": 8.030220582492536,
-      "stop_loss_price": 8.191008,
-      "take_profit_price": 7.709184,
-      "leverage": 3,
-      "position_size_pct": 0.05,
-      "notional_usd": 2500.0,
-      "true_notional": 7500.0,
-      "opened_at": "2026-07-12T18:06:11.525596Z",
-      "current_pnl_pct": 0.002436016206112278,
-      "max_hold_hours": 48.0,
-      "mode": "paper",
-      "trade_id": "benchmark_random_walk_20260712_180611_LINK_f70e"
     },
     {
       "id": "pos_benchmark_random_walk_20260712_181225_XLM_e435",
@@ -195,7 +177,7 @@
       "notional_usd": 2500.0,
       "true_notional": 7500.0,
       "opened_at": "2026-07-12T18:12:25.539845Z",
-      "current_pnl_pct": 0.000982370227414059,
+      "current_pnl_pct": -0.0004456867351006359,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260712_181225_XLM_e435"
@@ -213,7 +195,7 @@
       "notional_usd": 2500.0,
       "true_notional": 7500.0,
       "opened_at": "2026-07-12T18:19:11.624597Z",
-      "current_pnl_pct": 0.0038156281618511355,
+      "current_pnl_pct": 0.0007028563361787264,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260712_181911_TAO_ef7a"
@@ -231,7 +213,7 @@
       "notional_usd": 4500.000000000001,
       "true_notional": 13500.000000000004,
       "opened_at": "2026-07-12T18:06:11.528766Z",
-      "current_pnl_pct": -0.0017473860983565858,
+      "current_pnl_pct": 0.0026461374052095957,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_180611_AVAX_f16c"
@@ -249,7 +231,7 @@
       "notional_usd": 6000.0,
       "true_notional": 18000.0,
       "opened_at": "2026-07-12T18:12:25.571554Z",
-      "current_pnl_pct": -0.0009911711931102087,
+      "current_pnl_pct": 0.0008258092605623998,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_181225_ETH_ac35"
@@ -267,7 +249,7 @@
       "notional_usd": 6000.0,
       "true_notional": 18000.0,
       "opened_at": "2026-07-12T18:19:11.636095Z",
-      "current_pnl_pct": -0.0038248000653972516,
+      "current_pnl_pct": -0.0007120377685252777,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_181911_TAO_126b"
@@ -285,7 +267,7 @@
       "notional_usd": 3750.0000000000005,
       "true_notional": 15000.000000000002,
       "opened_at": "2026-07-12T18:06:11.558818Z",
-      "current_pnl_pct": 0.002157247731588957,
+      "current_pnl_pct": -0.0037010365284541077,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260712_180611_AVAX_1f75"
