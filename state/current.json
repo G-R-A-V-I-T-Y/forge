@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-12T18:16:13Z",
+  "generated_at": "2026-07-12T18:21:13Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -95,7 +95,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "Big Pickle",
+      "last_model_used": "DeepSeek V4 Flash Free",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": -0.0005306698236229063,
+      "current_pnl_pct": -0.0005931015389190758,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 2500.0,
       "true_notional": 7500.0,
       "opened_at": "2026-07-12T18:06:11.525596Z",
-      "current_pnl_pct": 0.0016514798493232072,
+      "current_pnl_pct": 0.002436016206112278,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260712_180611_LINK_f70e"
@@ -195,10 +195,28 @@
       "notional_usd": 2500.0,
       "true_notional": 7500.0,
       "opened_at": "2026-07-12T18:12:25.539845Z",
-      "current_pnl_pct": -0.004571184626810879,
+      "current_pnl_pct": 0.000982370227414059,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260712_181225_XLM_e435"
+    },
+    {
+      "id": "pos_benchmark_random_walk_20260712_181911_TAO_ef7a",
+      "agent_id": "benchmark_random_walk",
+      "asset": "TAO-PERP",
+      "direction": "short",
+      "entry_price": 212.02967546695328,
+      "stop_loss_price": 216.2706,
+      "take_profit_price": 203.5488,
+      "leverage": 3,
+      "position_size_pct": 0.05,
+      "notional_usd": 2500.0,
+      "true_notional": 7500.0,
+      "opened_at": "2026-07-12T18:19:11.624597Z",
+      "current_pnl_pct": 0.0038156281618511355,
+      "max_hold_hours": 48.0,
+      "mode": "paper",
+      "trade_id": "benchmark_random_walk_20260712_181911_TAO_ef7a"
     },
     {
       "id": "pos_iron_moth_20260712_180611_AVAX_f16c",
@@ -213,7 +231,7 @@
       "notional_usd": 4500.000000000001,
       "true_notional": 13500.000000000004,
       "opened_at": "2026-07-12T18:06:11.528766Z",
-      "current_pnl_pct": 0.00016893798298615005,
+      "current_pnl_pct": -0.0017473860983565858,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_180611_AVAX_f16c"
@@ -231,10 +249,28 @@
       "notional_usd": 6000.0,
       "true_notional": 18000.0,
       "opened_at": "2026-07-12T18:12:25.571554Z",
-      "current_pnl_pct": 0.0011561693430483628,
+      "current_pnl_pct": -0.0009911711931102087,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_181225_ETH_ac35"
+    },
+    {
+      "id": "pos_iron_moth_20260712_181911_TAO_126b",
+      "agent_id": "iron_moth",
+      "asset": "TAO-PERP",
+      "direction": "long",
+      "entry_price": 212.03032453304672,
+      "stop_loss_price": 206.72925,
+      "take_profit_price": 222.63150000000002,
+      "leverage": 3,
+      "position_size_pct": 0.12,
+      "notional_usd": 6000.0,
+      "true_notional": 18000.0,
+      "opened_at": "2026-07-12T18:19:11.636095Z",
+      "current_pnl_pct": -0.0038248000653972516,
+      "max_hold_hours": 12.0,
+      "mode": "paper",
+      "trade_id": "iron_moth_20260712_181911_TAO_126b"
     },
     {
       "id": "pos_silver_basin_20260712_180611_AVAX_1f75",
@@ -249,7 +285,7 @@
       "notional_usd": 3750.0000000000005,
       "true_notional": 15000.000000000002,
       "opened_at": "2026-07-12T18:06:11.558818Z",
-      "current_pnl_pct": -0.00039796136055753896,
+      "current_pnl_pct": 0.002157247731588957,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260712_180611_AVAX_1f75"
