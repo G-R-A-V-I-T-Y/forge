@@ -417,11 +417,20 @@ _DEFAULT_LLAMA_PORT = 8080
 def _tier_from_pinned_value(pinned_model: str) -> Tier:
     """Map a pinned-model string to a dispatchable Tier.
 
-    The literal "llama_server" pins the agent to the desk's own local
-    llama-server (the control-arm configuration); anything else is an
-    opencode-routed model id. The local tier's display name matches the
-    fallback chain's so ledger model labels are consistent either way.
+    Two literals pin to local backends: "ollama" (the Ollama service —
+    the control-arm configuration; GPU-managed, thinking off via the
+    client's think:false) and "llama_server" (the forge-managed
+    llama-server, which on this machine runs CPU-only because the
+    standalone binary can't load its CUDA backend — see assessment §9.4).
+    Anything else is an opencode-routed model id.
     """
+    if pinned_model == "ollama":
+        return Tier(
+            kind="ollama",
+            model_id=None,
+            variant=None,
+            display_name="Local Ollama (qwen3.6:35b_optimized, thinking off)",
+        )
     if pinned_model == "llama_server":
         return Tier(
             kind="llama_server",

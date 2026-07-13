@@ -252,3 +252,26 @@ def test_pinned_opencode_model_still_routes_to_opencode(tmp_path, monkeypatch):
     )
     assert decision["reason"] == "oc"
     assert seen["model_id"] == "opencode/big-pickle"
+
+
+def test_pinned_ollama_routes_to_ollama_tier(tmp_path, monkeypatch):
+    """pinned_model = "ollama" must dispatch to the local Ollama tier —
+    the control arm's backend after the standalone llama-server proved
+    CPU-bound on this machine (assessment §9.4)."""
+    db = _agents_db(tmp_path, "onyx_heron", "ollama")
+    monkeypatch.setattr(model_chain, "_SETTINGS_DB_PATH", db)
+
+    def fake_ollama(system_prompt, decision_prompt, config):
+        return {"action": "wait", "reason": "ollama answered"}
+
+    def must_not_run_opencode(*a, **k):
+        raise AssertionError("pinned ollama must not route to opencode")
+
+    monkeypatch.setattr(model_chain, "_run_ollama_tier", fake_ollama)
+    monkeypatch.setattr(model_chain, "_run_opencode_tier", must_not_run_opencode)
+
+    decision, model_used = model_chain.decide(
+        SYSTEM, PROMPT, config={}, agent_id="onyx_heron"
+    )
+    assert decision == {"action": "wait", "reason": "ollama answered"}
+    assert model_used == "Local Ollama (qwen3.6:35b_optimized, thinking off)"

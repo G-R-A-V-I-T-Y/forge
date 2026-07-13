@@ -42,6 +42,11 @@ async def decide(system_prompt: str, decision_prompt: str, config: dict | None =
         "model": model,
         "messages": messages,
         "stream": False,
+        # qwen3.6 is a thinking model; without think:false every decision
+        # burns 120-290s of reasoning tokens vs ~13s with it (measured live
+        # 2026-07-13, 18.5k-token prompt) with no quality loss (CLAUDE.md
+        # empirics). Overridable via config["llm_think"] for experiments.
+        "think": bool((config or {}).get("llm_think", False)),
         "options": {"temperature": 0.7},
     }
     try:

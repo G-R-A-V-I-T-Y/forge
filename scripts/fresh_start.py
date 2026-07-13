@@ -49,12 +49,14 @@ def _load_desk_config() -> dict:
 #   `pinned_model` key -- the only per-agent model-pinning mechanism that
 #   actually exists in this codebase (see llm/model_chain.py's
 #   `_get_agent_pinned_model()`, which reads exactly this key). The pin is
-#   the literal "llama_server": the desk's own local llama-server (Qwen,
-#   thinking off) via llm/llama_server.py + settings -- free, always
-#   available, and what the strategic assessment recommended. The previous
-#   pin (openrouter/anthropic/claude-sonnet-5) was dead on arrival in the
-#   2026-07 run: the OpenRouter key had no credits, so the control arm
-#   errored on 100% of cycles (assessment §9 addendum, 2026-07-12). There
+#   the literal "ollama": the local Ollama service running
+#   qwen3.6:35b_optimized with thinking off (llm/ollama_client.py sends
+#   think:false) -- free, GPU-managed, ~13s/decision measured. The
+#   standalone llama-server route proved CPU-only on this machine (its
+#   CUDA backends live in subdirs the binary never loads), and the
+#   original pin (openrouter/anthropic/claude-sonnet-5) was dead on
+#   arrival in the 2026-07 run: the OpenRouter key had no credits, so the
+#   control arm errored on 100% of cycles (assessment §9.4). There
 #   is no per-agent "temperature" knob anywhere in the LLM client stack
 #   (llm/client.py, llm/model_chain.py, llm/ollama_client.py,
 #   llm/llama_server_client.py all call their backends with no
@@ -72,7 +74,7 @@ def _load_desk_config() -> dict:
 # 6-7 compiled / 2-3 control-arm split -- only 3 seed agents have
 # hand-compiled specs available today, so 3 (+sage_turtle=4) compiled is
 # what the current spec roster supports.
-_CONTROL_ARM_MODEL = "llama_server"
+_CONTROL_ARM_MODEL = "ollama"
 
 CONFIG_OVERRIDES: dict[str, dict] = {
     "iron_moth": {"compiled": True},

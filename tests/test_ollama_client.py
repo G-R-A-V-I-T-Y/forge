@@ -98,3 +98,35 @@ async def test_decide_falls_back_to_default_model_when_key_absent():
     sent_payload = route.calls.last.request.content
     import json as _json
     assert _json.loads(sent_payload)["model"] == MODEL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decide_disables_thinking_by_default():
+    """qwen3.6 is a thinking model; without "think": false every decision
+    burns 120-290s of reasoning tokens (measured live: 13s with it, and it
+    is the reason the control arm can run on this tier at all)."""
+    route = respx.post(OLLAMA_URL).mock(
+        return_value=httpx.Response(
+            200, json={"message": {"content": '{"action": "wait", "reason": "ok"}'}}
+        )
+    )
+    result = await decide("sys", "prompt", config={})
+    assert result == {"action": "wait", "reason": "ok"}
+    import json as _json
+    payload = _json.loads(route.calls.last.request.content)
+    assert payload["think"] is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decide_think_configurable():
+    route = respx.post(OLLAMA_URL).mock(
+        return_value=httpx.Response(
+            200, json={"message": {"content": '{"action": "wait", "reason": "ok"}'}}
+        )
+    )
+    await decide("sys", "prompt", config={"llm_think": True})
+    import json as _json
+    payload = _json.loads(route.calls.last.request.content)
+    assert payload["think"] is True
