@@ -4,6 +4,11 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 
+## Windows sharp edges
+
+- ShellExecuting a bare `.sh` file on this machine ALWAYS opens the "How do you want to open this file?" picker — even though `.sh` has a valid HKLM association to git-bash.exe (verified empirically 2026-07-12; Windows 11 requires a UserChoice it doesn't have). Never register a `.sh` as a command by itself (hooks, spawns, `cmd /c foo.sh`); always invoke it as `"C:/Program Files/Git/bin/bash.exe" "path/to/script.sh"`. This bit the live paper run: the oh-my-openagent opencode plugin replays Claude Code hooks inside every `opencode run` session that model_chain spawns, and the user-level Claude Stop hook was a bare `.sh` — one blocking picker dialog per LLM decision call. Fixed in `~/.claude/settings.json` (backup: `settings.json.bak-2026-07-12`).
+- `bash` on PATH resolves to `C:\Windows\System32\bash.exe` (the WSL stub), not Git bash — same trap as the `python` stub below.
+
 ## Python environment
 
 - On the development machine, `python` in PATH resolves to the Windows stub (`C:\Windows\System32\python`) which silently no-ops. Always use the full path: `C:\ProgramData\Anaconda3\python.exe`.
