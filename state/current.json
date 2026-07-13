@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-13T16:41:14Z",
+  "generated_at": "2026-07-13T16:46:55Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -29,7 +29,7 @@
       "status": "rookie",
       "config_json": "{\"pinned_model\": \"ollama\"}",
       "current_thesis_version": 1,
-      "last_model_used": "Local Ollama (qwen3.6:35b_optimized, thinking off)",
+      "last_model_used": "no model available",
       "paper_balance": 50641.974162403676,
       "paper_peak": 50641.974162403676,
       "live_balance": null
