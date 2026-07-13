@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-13T01:56:19Z",
+  "generated_at": "2026-07-13T02:01:13Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -85,8 +85,8 @@
       "config_json": "{\"compiled\": true}",
       "current_thesis_version": 1,
       "last_model_used": "compiled/v1",
-      "paper_balance": 50116.33718834958,
-      "paper_peak": 50116.33718834958,
+      "paper_balance": 50406.510346447896,
+      "paper_peak": 50406.510346447896,
       "live_balance": null
     },
     {
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": -0.009239894107438548,
+      "current_pnl_pct": -0.010207585694529175,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,10 +177,28 @@
       "notional_usd": 2496.9322284277446,
       "true_notional": 7490.796685283234,
       "opened_at": "2026-07-13T01:28:46.951399Z",
-      "current_pnl_pct": 0.014855566577778131,
+      "current_pnl_pct": 0.018993390544898025,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260713_012846_RENDER_b5af"
+    },
+    {
+      "id": "pos_benchmark_random_walk_20260713_015641_LTC_a29a",
+      "agent_id": "benchmark_random_walk",
+      "asset": "LTC-PERP",
+      "direction": "short",
+      "entry_price": 43.918886980039574,
+      "stop_loss_price": 44.79738,
+      "take_profit_price": 42.16224,
+      "leverage": 3,
+      "position_size_pct": 0.05,
+      "notional_usd": 2496.9322284277446,
+      "true_notional": 7490.796685283234,
+      "opened_at": "2026-07-13T01:56:41.664637Z",
+      "current_pnl_pct": 0.002792897282995078,
+      "max_hold_hours": 48.0,
+      "mode": "paper",
+      "trade_id": "benchmark_random_walk_20260713_015641_LTC_a29a"
     },
     {
       "id": "pos_iron_moth_20260712_180611_AVAX_f16c",
@@ -213,7 +231,7 @@
       "notional_usd": 6000.0,
       "true_notional": 18000.0,
       "opened_at": "2026-07-12T18:12:25.571554Z",
-      "current_pnl_pct": -0.0155270148224892,
+      "current_pnl_pct": -0.014866294657517274,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_181225_ETH_ac35"
@@ -231,28 +249,10 @@
       "notional_usd": 6000.0,
       "true_notional": 18000.0,
       "opened_at": "2026-07-12T18:19:11.636095Z",
-      "current_pnl_pct": -0.058015161870032125,
+      "current_pnl_pct": -0.06013749979971765,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260712_181911_TAO_126b"
-    },
-    {
-      "id": "pos_jade_hawk_20260713_001150_ETH_84fb",
-      "agent_id": "jade_hawk",
-      "asset": "ETH-PERP",
-      "direction": "short",
-      "entry_price": 1841.899945718551,
-      "stop_loss_price": 1869.5285,
-      "take_profit_price": 1805.0620000000001,
-      "leverage": 3,
-      "position_size_pct": 0.1,
-      "notional_usd": 5011.633718834958,
-      "true_notional": 15034.901156504875,
-      "opened_at": "2026-07-13T00:11:50.480243Z",
-      "current_pnl_pct": 0.057169140701925615,
-      "max_hold_hours": 4.0,
-      "mode": "paper",
-      "trade_id": "jade_hawk_20260713_001150_ETH_84fb"
     },
     {
       "id": "pos_silver_basin_20260713_010722_XRP_c5e9",
@@ -267,7 +267,7 @@
       "notional_usd": 3726.6877282015575,
       "true_notional": 14906.75091280623,
       "opened_at": "2026-07-13T01:07:22.741893Z",
-      "current_pnl_pct": 0.03708414017140569,
+      "current_pnl_pct": 0.036717271456368834,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260713_010722_XRP_c5e9"
