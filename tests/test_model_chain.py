@@ -182,3 +182,73 @@ def test_decide_uses_dynamic_chain():
     mock_ls.assert_called_once()
     assert model_used == "Test Local"
     assert decision == {"action": "wait", "reason": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Pinned-model routing: "llama_server" pins to the LOCAL tier, not opencode
+# ---------------------------------------------------------------------------
+
+def _agents_db(tmp_path, agent_id: str, pinned_model: str):
+    import json as _json
+    import sqlite3
+
+    db = str(tmp_path / "pinned.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE agents (id TEXT PRIMARY KEY, config_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO agents (id, config_json) VALUES (?, ?)",
+        (agent_id, _json.dumps({"pinned_model": pinned_model})),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_pinned_llama_server_routes_to_local_tier(tmp_path, monkeypatch):
+    """pinned_model = "llama_server" must dispatch to the local llama-server
+    tier — the control arm is pinned to the desk's own model server, and
+    routing that string to opencode (the old hardcoded kind) would error
+    with an unknown-model failure every cycle."""
+    db = _agents_db(tmp_path, "copper_vane", "llama_server")
+    monkeypatch.setattr(model_chain, "_SETTINGS_DB_PATH", db)
+
+    def fake_local(system_prompt, decision_prompt, config):
+        return {"action": "wait", "reason": "local answered"}
+
+    def must_not_run_opencode(*a, **k):
+        raise AssertionError("pinned llama_server must not route to opencode")
+
+    monkeypatch.setattr(model_chain, "_run_llama_server_tier", fake_local)
+    monkeypatch.setattr(model_chain, "_run_opencode_tier", must_not_run_opencode)
+
+    decision, model_used = model_chain.decide(
+        SYSTEM, PROMPT, config={}, agent_id="copper_vane"
+    )
+    assert decision == {"action": "wait", "reason": "local answered"}
+    # Display name matches the chain's local tier so ledger model labels
+    # are consistent across pinned and fallback paths.
+    assert model_used == "Local llama-server (Qwen3.6)"
+
+
+def test_pinned_opencode_model_still_routes_to_opencode(tmp_path, monkeypatch):
+    db = _agents_db(tmp_path, "steel_crane", "opencode/big-pickle")
+    monkeypatch.setattr(model_chain, "_SETTINGS_DB_PATH", db)
+
+    seen = {}
+
+    def fake_opencode(model_id, variant, message):
+        seen["model_id"] = model_id
+        return {"action": "wait", "reason": "oc"}
+
+    monkeypatch.setattr(model_chain, "_run_opencode_tier", fake_opencode)
+
+    decision, model_used = model_chain.decide(
+        SYSTEM, PROMPT, config={}, agent_id="steel_crane"
+    )
+    assert decision["reason"] == "oc"
+    assert seen["model_id"] == "opencode/big-pickle"

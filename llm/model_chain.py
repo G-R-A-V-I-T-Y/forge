@@ -414,6 +414,29 @@ def _run_llama_server_tier(
 _DEFAULT_LLAMA_PORT = 8080
 
 
+def _tier_from_pinned_value(pinned_model: str) -> Tier:
+    """Map a pinned-model string to a dispatchable Tier.
+
+    The literal "llama_server" pins the agent to the desk's own local
+    llama-server (the control-arm configuration); anything else is an
+    opencode-routed model id. The local tier's display name matches the
+    fallback chain's so ledger model labels are consistent either way.
+    """
+    if pinned_model == "llama_server":
+        return Tier(
+            kind="llama_server",
+            model_id=None,
+            variant=None,
+            display_name="Local llama-server (Qwen3.6)",
+        )
+    return Tier(
+        kind="opencode",
+        model_id=pinned_model,
+        variant=None,
+        display_name=pinned_model,
+    )
+
+
 def _get_agent_pinned_model(conn, agent_id: str) -> Tier | None:
     """Get the pinned model for an agent, if one is configured."""
     try:
@@ -426,12 +449,7 @@ def _get_agent_pinned_model(conn, agent_id: str) -> Tier | None:
             config = json.loads(row["config_json"])
             pinned_model = config.get("pinned_model")
             if pinned_model:
-                return Tier(
-                    kind="opencode",
-                    model_id=pinned_model,
-                    variant=None,
-                    display_name=pinned_model,
-                )
+                return _tier_from_pinned_value(pinned_model)
     except Exception:
         pass
     return None
@@ -445,9 +463,7 @@ def _get_agent_pinned_model_from_settings(conn, agent_id: str) -> Tier | None:
         ).fetchone()
         if row:
             model_id = json.loads(row["value"])
-            return Tier(
-                kind="opencode", model_id=model_id, variant=None, display_name=model_id
-            )
+            return _tier_from_pinned_value(model_id)
     except Exception:
         pass
     return None
