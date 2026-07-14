@@ -666,7 +666,7 @@ Every leaderboard metric is displayed *relative to the null distribution*. An ag
 
 Single web application at `localhost:8000`. Started automatically with `python forge.py`. Built with FastAPI (backend) + Jinja2 templates + vanilla JS + WebSocket (real-time P&L). No Node.js. No build pipeline. No external services.
 
-The page inventory below is the functional spec. **M10 — Command Deck** rebuilds it as one modern, token-based design system with full executive actions (exit any trade, demote a trader, trigger reviews/reflections, live settings) — same lightweight stack, new coherence.
+The page inventory below is the functional spec. **M12 — Command Deck** rebuilds it as one modern, token-based design system with full executive actions (exit any trade, demote a trader, trigger reviews/reflections, live settings) — same lightweight stack, new coherence.
 
 ### Pages
 
@@ -873,13 +873,19 @@ Four owner priorities govern everything that remains:
 3. **Rigorous, calibrated trading.** Every agent is long/short capable with explicit sizing and leverage from its spec; calibration (stated confidence vs realized win rate) is a first-class per-agent metric and a hard promotion requirement; the null band is the floor under every claim of edge.
 4. **One modern interface with line of sight and executive control.** The current UI is functional but fragmented. M10 rebuilds it as a **Command Deck**: portfolio → trader → trade drill-down, plus executive actions (exit any trade, demote/suspend a trader, trigger a review or reflection, edit live settings) — each confirmed, logged, and auditable.
 
-Sequencing: **M9** (selection + cadence) → **M10** (Command Deck, partially parallel with M9) → **M11** (live, small) → **M12** (compounding operations). M10's design system and page shells can start while M9 is in flight; its executive actions wire up as M9 exposes them.
+Sequencing: **M9** (selection + cadence) → **M10** (Command Deck, partially parallel with M9) → **M11** (live, small) → **M12** (compounding operations). M10's design system and page shells can start while M9 is in flight; its executive actions wire up as M9 exposes them. *[Editorial note, 2026-07-13: milestone numbers in this dated review predate the plan revision below — Command Deck is now M12, Live is M13, Compounding is M14; the new M10/M11 are the Honest Reflection Engine and Population Learning. See the plan-revision note at the top of the Development Plan.]*
 
 ---
 
 ## Development Plan
 
 Each milestone is independently demonstrable. You can start Forge after any milestone and observe meaningful behavior.
+
+> **Plan revision — 2026-07-13.** A code audit of the reflection path found that the machinery M8 shipped cannot currently improve an agent: (a) the scheduled reflection wraps `llm/model_chain.py::decide()`, which validates every response as a *trade decision* (`action ∈ enter/wait/close`) — a model that correctly answers the reflection prompt with spec YAML is discarded, so every scheduled reflection ends "rejected" by construction; (b) the web "Reflect" action returns 503 because `forge.py` never sets `app.state.llm_fn`; (c) the overview's "Trigger All Evaluations" button posts to an endpoint that does not exist; (d) two anti-overfit gates (`check_holdout_split`, `check_cross_agent_validation`) are stubs that always pass; (e) the reflection prompt contains only aggregate stats — no per-trade fingerprints, no forward-labeled missed-trade evidence — and never revises the thesis.
+>
+> This revision (i) folds the transport repairs into M9, (ii) inserts two new milestones — **M10 Honest Reflection Engine** and **M11 Population Learning & Ecosystem Honesty** — that rebuild reflection around one principle: **the LLM proposes, the ledger disposes** (no LLM opinion ever decides a deploy; only replayed out-of-sample performance does), and (iii) renumbers the remaining milestones: Command Deck M10 → **M12**, Live M11 → **M13**, Compounding Operations M12 → **M14**. Read old numbers in material dated before 2026-07-13 (e.g. the 2026-07-09 Owner's Review) through that map.
+>
+> Design intent, tied to the owner's goals: each trader gets smarter (1) **the more it trades** — per-decision forward-labeling and hypothesis-driven reflection (M10); (2) **the more data the desk gathers** — every gate keys off the growing ledger, so validation sharpens automatically (M10); (3) **the more other agents trade** — validated/falsified knowledge is shared desk-wide and spawning recombines proven material (M11). And the system must never lock onto false positives: walk-forward replay is the only deploy authority, challenger trials confirm out-of-sample before promotion, and significance is deflated by desk-level trial accounting. What cannot be guaranteed is that an exploitable edge *exists* in the feature/DSL space; what is engineered is that if one exists the search finds and keeps it, and if none exists the desk says so instead of fooling itself.
 
 ### M1 — Walking Skeleton (DONE)
 
@@ -1105,14 +1111,18 @@ End-to-end reflection cycle completes on a live compiled agent: the agent has �
 #### Goal
 Wire the improvement loop to clocks and counters: a meta-controller that evaluates every agent on a trade-count cadence against the null distribution (small-sample-aware), suspends/terminates/harvests per the lifecycle rules; a reflection scheduler that actually triggers M8's pipeline per the settings-table trigger (every N trades / every N days / manual); a mid-loop risk officer that can only reduce risk; and a Head of Desk LLM producing a daily briefing and answering natural-language questions over the full trade bank.
 
+**Status (2026-07-13):** partially shipped. The evaluation cycle (`meta/controller.py::run_evaluation_cycle`, every 30 min) and the reflection scheduler (`meta/reflection_scheduler.py`, every 30 min) are wired in `forge.py`, and the per-agent web actions exist. Broken or pending: the reflection LLM transport (defect (a) in the plan-revision note — every scheduled reflection currently auto-rejects), `app.state.llm_fn` (defect (b) — the web Reflect button 503s), the trigger-all endpoints (defect (c)), risk-officer verification, Head of Desk (latched off in `forge.py` pending the R-track), and counterfactual-coverage surfacing. Criteria 2–3 below are the repairs.
+
 #### Acceptance Criteria
-1. **Reflection runs on cadence.** A scheduler job reads the reflection trigger from the settings table and, for each eligible agent, invokes `agents/reflection.py`'s pipeline. Accepted revisions hot-deploy via `store/specs.py`; rejected revisions are logged with the specific gate that blocked them. The reflection log is queryable per agent. This closes M8's outstanding "done when": an end-to-end reflection cycle completes on a live compiled agent without human intervention.
-2. **Evaluation on trade cadence.** `meta/controller.py` + `meta/evaluator.py` run every N trades per agent (configurable, default 30): significance test against the null distribution from `benchmark_random_walk`'s trade history. An agent that does not beat the null at p < 0.05 after 50 trades enters probation; after 100 trades without improvement it is terminated. Cadence is measured in trades, not calendar days.
-3. **Lifecycle rules enforced as code:** PF < 0.8 for two consecutive evaluations → suspend; max drawdown > 20% → immediate suspension; win rate < 35% after 50 trades → terminate; zero trades in 5 days → thesis review flag. Probation (SUSPENDED) before termination for borderline agents (p between 0.05–0.15, or PF 0.8–1.0); restore-or-terminate after 10 more trades or 7 days.
-4. **Harvest & graveyard.** On termination, the agent's 5 best fingerprints (highest PnL%, cleanest thesis execution) are written to a `seeds` table for the next spawn generation. The full agent record persists permanently. `check_against_graveyard()` (already real from M8) is called on every spawn; rejections are logged to `evaluations`.
-5. **Risk officer, reduce-only.** `meta/risk_officer.py` on a 30–60 min cadence: (a) regime memo from current market state, (b) aggregate gross exposure across all agents vs a desk-wide limit (default 2× total equity) with prorated entry-disable on the highest-exposure agents, (c) event-calendar blackout windows (no new entries 2h before FOMC/CPI), (d) kill flags on individual agent configs. **A validator asserts its output can never increase size, loosen a stop, or add entries.**
-6. **Head of Desk.** `meta/head_of_desk.py`: a daily briefing job (desk P&L, regime alerts, agent-level divergence signals, pending human review actions) stored in `evaluations` and rendered on the overview page; a `/chat` WebSocket interface with query tools over trades/decisions/graveyard, streaming responses, history persisted in `chat_history`.
-7. **Counterfactual coverage visible.** The nightly wait-counterfactual filler (M6) is verified running; its coverage (% of waits with filled counterfactuals) is surfaced on the decisions page so calibration and pattern-persistence gates are known to have real data.
+1. **Reflection runs on cadence.** A scheduler job reads the reflection trigger from the settings table and, for each eligible agent, invokes `agents/reflection.py`'s pipeline **through the dedicated reflection transport (criterion 2), never through `llm/model_chain.py::decide()`**. Accepted revisions hot-deploy via `store/specs.py`; rejected revisions are logged with the specific gate that blocked them. The reflection log is queryable per agent. This closes M8's outstanding "done when": an end-to-end reflection cycle completes on a live compiled agent without human intervention.
+2. **The reflection transport is real.** New `llm/reflection_client.py` exposing `complete(system_prompt: str, user_prompt: str, timeout_s: int = 900) -> str`: a raw-text completion call with **no decision-schema validation and no JSON coercion** — reflection output is spec YAML and thesis markdown, not a trade decision, and must reach the parser verbatim. Backend selected by a `reflection_model` settings key (same tier vocabulary as the model chain; default `llama_server` with reasoning ON — reflection is rare, so latency is acceptable; a Claude/opencode tier when configured). Every call logs model id and prompt hash. `forge.py`'s `_run_reflection_scheduler_job` passes this as `llm_fn` (deleting the current `mc_decide` closure), and `forge.py` sets `web_app.state.llm_fn` at startup so `POST /api/exec/trigger-reflection/{agent_id}` stops returning 503. Also fix the latent `deploy_spec(..., config.get("desk_config"))` call in `agents/reflection.py` to the `config["desk"]` convention (the `desk_config` key does not exist — see CLAUDE.md).
+3. **Trigger-all endpoints exist.** `POST /api/exec/trigger-all-evaluations` runs `meta/controller.py::evaluate_agent` for every active/rookie agent with a new `force: bool = False` parameter that bypasses the interval-due check, writing one audit row per agent. `POST /api/exec/trigger-all-reflections` enqueues a reflection for every agent passing `check_agent_eligible` (via the criterion-2 transport) and returns per-agent `queued` / `skipped(reason)`. The overview's "Trigger All Evaluations" button wires to the former; a "Trigger All Reflections" button is added for the latter.
+4. **Evaluation on trade cadence.** `meta/controller.py` + `meta/evaluator.py` run every N trades per agent (configurable, default 30): significance test against the null distribution from `benchmark_random_walk`'s trade history. An agent that does not beat the null at p < 0.05 after 50 trades enters probation; after 100 trades without improvement it is terminated. Cadence is measured in trades, not calendar days.
+5. **Lifecycle rules enforced as code:** PF < 0.8 for two consecutive evaluations → suspend; max drawdown > 20% → immediate suspension; win rate < 35% after 50 trades → terminate; zero trades in 5 days → thesis review flag. Probation (SUSPENDED) before termination for borderline agents (p between 0.05–0.15, or PF 0.8–1.0); restore-or-terminate after 10 more trades or 7 days.
+6. **Harvest & graveyard.** On termination, the agent's 5 best fingerprints (highest PnL%, cleanest thesis execution) are written to a `seeds` table for the next spawn generation. The full agent record persists permanently. `check_against_graveyard()` (already real from M8) is called on every spawn; rejections are logged to `evaluations`.
+7. **Risk officer, reduce-only.** `meta/risk_officer.py` on a 30–60 min cadence: (a) regime memo from current market state, (b) aggregate gross exposure across all agents vs a desk-wide limit (default 2× total equity) with prorated entry-disable on the highest-exposure agents, (c) event-calendar blackout windows (no new entries 2h before FOMC/CPI), (d) kill flags on individual agent configs. **A validator asserts its output can never increase size, loosen a stop, or add entries.**
+8. **Head of Desk.** `meta/head_of_desk.py`: a daily briefing job (desk P&L, regime alerts, agent-level divergence signals, pending human review actions) stored in `evaluations` and rendered on the overview page; a `/chat` WebSocket interface with query tools over trades/decisions/graveyard, streaming responses, history persisted in `chat_history`.
+9. **Counterfactual coverage visible.** The nightly wait-counterfactual filler (M6) is verified running; its coverage (% of waits with filled counterfactuals) is surfaced on the decisions page so calibration and pattern-persistence gates are known to have real data. (M10 generalizes this filler into full decision forward-labeling; the coverage surface built here is reused.)
 
 #### Dependencies
 - **M8 (shipped):** reflection pipeline, spec deploy/hot-reload, compiled agents, calibration data.
@@ -1146,13 +1156,119 @@ Wire the improvement loop to clocks and counters: a meta-controller that evaluat
 | `tests/test_risk_officer.py` — `test_risk_officer_cannot_add_risk()` | Any output field that increases size, reduces SL distance, or adds entries fails validation |
 | `tests/test_spawner.py` — `test_harvest_seeds_on_termination()` | On termination, the 5 best fingerprints are written to the `seeds` table |
 | `tests/test_spawner.py` — `test_spawn_from_harvest()` | A new agent can be spawned from a harvested seed fingerprint |
+| `tests/test_reflection_client.py` — `test_complete_returns_raw_text()` | The reflection transport returns the model's raw text; spec-YAML output is neither coerced into nor rejected as a trade decision |
+| `tests/test_reflection_client.py` — `test_scheduler_uses_reflection_transport()` | `_run_reflection_scheduler_job` passes the reflection client, not `model_chain.decide`, as `llm_fn` |
+| `tests/test_web_actions.py` — `test_trigger_all_evaluations()` | POST evaluates every active/rookie agent (force-bypassing the interval check) and writes one audit row per agent |
+| `tests/test_web_actions.py` — `test_trigger_all_reflections_respects_eligibility()` | Ineligible agents are skipped with a reason; eligible agents get a reflection run via the transport |
+| `tests/test_web_actions.py` — `test_reflect_endpoint_has_llm_fn()` | With forge's startup wiring, `/api/exec/trigger-reflection/{agent}` does not return 503 |
 
 #### Done when
-The desk runs 2+ weeks unattended: reflections fire per the configured trigger and at least one spec revision has been accepted-and-deployed or rejected-with-named-gate on a real agent; evaluations run on trade cadence; an underperformer has been suspended or terminated with seeds harvested; the Head of Desk produces a coherent morning brief daily; the risk officer enforces exposure limits and blackouts; `/chat` answers questions about desk performance. All acceptance tests pass with synthetic data.
+The desk runs 2+ weeks unattended: reflections fire per the configured trigger and at least one spec revision has been decided **on the merits** — its LLM output parsed as a spec and accepted-and-deployed or rejected-with-named-gate on a real agent, not lost in transport; evaluations run on trade cadence; an underperformer has been suspended or terminated with seeds harvested; the Head of Desk produces a coherent morning brief daily; the risk officer enforces exposure limits and blackouts; `/chat` answers questions about desk performance. All acceptance tests pass with synthetic data.
 
 ---
 
-### M10 — Command Deck (fresh, modern UI)
+### M10 — Honest Reflection Engine (Diagnose → Propose → Validate)
+
+> The reflection loop becomes a scientist, not an oracle: the LLM reads per-decision evidence and states falsifiable hypotheses; the ledger replay — and only the ledger replay — decides what deploys. **The LLM proposes; the ledger disposes.**
+
+#### Goal
+Rebuild `agents/reflection.py` from a single-shot "here are your aggregate stats, emit YAML" call into a three-stage pipeline over rich evidence: (A) **Diagnose** — a thinking-grade LLM reads an evidence dossier (per-trade fingerprints, calibration, forward-labeled decisions *including the trades not taken*, feature-conditioned statistics mined from the ledger) and produces explicit falsifiable hypotheses; (B) **Propose** — a thesis revision and spec revision tied to those hypotheses; (C) **Validate** — mandatory walk-forward replay against the ledger, then a live "challenger" trial before the spec becomes the agent's active strategy. Every hypothesis is registered and later marked validated or falsified by out-of-sample results, so each agent accumulates an honest track record of what it has learned. This is the "smarter the more it trades" axis, and it also deepens automatically as the ledger grows — the "smarter the more data" axis.
+
+#### Acceptance Criteria
+1. **Every decision is forward-labeled against the ledger.** New `meta/labeling.py` with a nightly APScheduler job `run_labeling_job(conn, ledger_dir)`: for every `decisions` row (enter, wait, and close — all agents including benchmarks) whose timestamp sits at least the longest horizon behind the ledger head, compute from `ledger/candles_5m/`: forward return at 1h / 4h / 24h, max run-up and max drawdown per horizon, the outcome of the chosen action, the best-available action among {enter-long, enter-short (thesis-standard SL/TP), wait}, and **regret** = best-available outcome − chosen outcome. Results go to a new `decision_labels` table in the local cache (`decision_id, horizon, fwd_return_pct, max_runup_pct, max_drawdown_pct, chosen_outcome_pct, best_action, best_outcome_pct, regret_pct, labeled_at`) — deliberately **not** a ledger stream: labels are derived data, recomputable from raw candles (the raw-not-derived discipline), and the table is rebuilt by re-running the job. The job is idempotent, leaves labels null across ledger gaps (never interpolates), absorbs the M6 wait-only counterfactual filler (the existing `counterfactual_*` columns keep being written for compatibility), and its coverage (% of labelable decisions labeled) renders on `/decisions`.
+2. **Reflection consumes an evidence dossier, not aggregates.** New `agents/dossier.py`: `build_dossier(conn, agent_id, ledger_dir) -> Dossier` (frozen dataclass with a `to_prompt(max_chars)` renderer that truncates by priority, never mid-record). Contents: the agent's full current thesis text and active spec YAML; last ≤50 closed trades with entry-fingerprint summary (regime, funding z-score, OI change, `key_conditions_met/missing`, confidence) and postmortems; the calibration curve (`compute_calibration_curve` — computed today, fed to nothing); the top-10 highest-regret labeled decisions with their market context (the "trades it didn't make" evidence); win-rate/PF by regime; feature-conditioned statistics mined from the labeled dataset (`scripts/build_training_dataset.py` output, refreshed nightly) — for each feature in the spec vocabulary, bucketed forward-return and win-rate with sample counts; the agent's own hypothesis track record (criterion 6); and the desk-memory digest once M11 lands.
+3. **Three-stage reflection replaces the single-shot prompt.** `run_reflection` becomes: **Stage A** `diagnose(dossier, llm_fn) -> list[Hypothesis]` — 1–5 hypotheses, each JSON with `claim`, `evidence_refs` (dossier item ids), `predicted_effect` (metric + direction + magnitude), `falsification_condition`. **Stage B** `propose(dossier, hypotheses, llm_fn) -> Proposal` — revised thesis markdown + revised spec YAML, each spec change annotated with the hypothesis id it serves. **Stage C** mechanical validation: parse → zero-evidence guard (kept) → **complexity budget** — at most `desk.max_evidence_terms` (default 4) evidence terms, and a spec adding terms beyond the incumbent's count must beat the incumbent's walk-forward deflated Sharpe (complexity must pay for itself) → **mandatory walk-forward** — `run_walk_forward` on `config["ledger_dir"]` (resolving to `ledger/`; a missing or too-short ledger is a *hard, logged failure* — the current silent `except: skip` path is removed) requiring deflated Sharpe > 0 and no parameter-sensitivity fragility flag. The always-pass stubs `check_holdout_split` and `check_cross_agent_validation` are **deleted** — real out-of-sample validation is the walk-forward test window plus the challenger trial (criterion 5). `check_min_trades` and `check_update_throttle` remain as pre-gates. The adversarial pass is **demoted from gate to advisory**: findings are stored in `reflections.adversarial_critique` and appended to the revised thesis under "Known weaknesses", but LLM opinion never blocks a deploy — only replay evidence does.
+4. **Thesis and spec co-revise atomically.** An accepted proposal writes `agents/theses/{agent}_v{N+1}.md`, inserts the `theses` row, bumps `agents.current_thesis_version`, and deploys the spec (recording `thesis_version = N+1`) — all or nothing; a failure at any step rolls back the rest. The reflection row fills the columns unused since M8: `research_findings_json` (dossier digest), `proposed_changes` (hypotheses + thesis/spec diffs), `adversarial_critique`, `holdout_result` (walk-forward report summary).
+5. **Challenger trial: accepted specs must win live before they rule.** `store/specs.py` gains status `'challenger'` (the `status` column is free-text; no migration needed). An accepted revision deploys as challenger, not active. Each heartbeat the compiled body evaluates **both** specs: the incumbent's decision executes; the challenger's decision is only logged (a `decisions` row with `challenger_spec_version` inside `decision_details_json`, never reaching the risk gate or bridge). Once the challenger has `desk.challenger_min_decisions` (default 20) labeled decisions or `desk.challenger_max_days` (default 7) elapse, a scheduler job compares mean labeled regret over the window: challenger wins → promoted to `active` (incumbent → `inactive`); loses → `rejected`. Either way the outcome lands in `reflections` and resolves the cycle's hypotheses (criterion 6). Fully automatic — paper capital only; live promotion keeps its own human gate (M13).
+6. **Hypothesis registry.** New table `hypotheses` (`id, agent_id, reflection_id, claim, feature, direction, regime_context, predicted_effect, falsification_condition, status, effect_observed, created_at, resolved_at`; `status ∈ proposed | challenger | validated | falsified | inconclusive`). Stage A registers rows; the challenger trial resolves them (predicted effect realized → `validated`; falsification condition met or challenger rejected → `falsified`; window expired without signal → `inconclusive`, with `effect_observed` recorded in all cases). The dossier includes the agent's own registry history, so it cannot re-propose its own falsified ideas without addressing the falsification.
+7. **Reflection uses a frontier/thinking model by economics, not habit.** Reflection fires roughly once per 20 trades per agent — per-call cost is negligible while per-call value is the highest in the system, so this is where the strongest available model belongs. The `reflection_model` settings key (M9) defaults to the local `llama_server` tier with reasoning ON; when a Claude API tier is configured it becomes the Stage A/B model. Both stages record model id and prompt hash in the reflection row.
+
+#### Dependencies
+- **M9 must ship first** (transport, cadence, trigger-all): M10 rebuilds what M9 schedules.
+- `pyarrow` (already in `requirements.txt`) and a nightly scheduled `scripts/build_training_dataset.py` run for criterion 2's conditional statistics.
+- ≥14 days of ledger candles for a meaningful walk-forward train/validate/test split; the challenger trial needs criterion 1's labeling job running.
+- The R-track shared cost model (`feat/r5-cost-model`): replay, paper fills, and labeling must share one fee/funding/slippage model — evolution converges to whatever the fitness function rewards, so a too-cheap simulator is an ecosystem-level bug, not a detail.
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m10-labeling` | `meta/labeling.py`, `decision_labels` table, coverage on /decisions | Yes — start first; everything downstream reads labels |
+| `m10-dossier` | `agents/dossier.py` + conditional-stats miner over the training dataset | After labeling |
+| `m10-reflection-engine` | Three-stage `run_reflection`, complexity budget, mandatory walk-forward, stub-gate deletion, atomic thesis+spec deploy | After dossier |
+| `m10-challenger` | `'challenger'` status, dual-spec evaluation in the compiled body, resolution job | Parallel with dossier (touches `store/specs.py` + `agents/decision_loop.py`, not reflection) |
+| `m10-hypothesis-registry` | `hypotheses` table + registration/resolution + agent-page rendering | With reflection-engine and challenger |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_labeling.py` — `test_labels_computed_from_ledger()` | Synthetic candles + a known decision produce correct forward returns, run-up/drawdown, and regret at every horizon |
+| `tests/test_labeling.py` — `test_wait_regret_positive_when_entry_would_win()` | A wait before a clean up-move gets `best_action="enter_long"` and positive regret |
+| `tests/test_labeling.py` — `test_labeling_idempotent_and_gap_safe()` | Re-running labels nothing twice; a ledger gap leaves labels null, not wrong |
+| `tests/test_dossier.py` — `test_dossier_includes_top_regret_decisions()` | The 10 highest-regret decisions appear with their market context |
+| `tests/test_dossier.py` — `test_dossier_respects_char_budget()` | `to_prompt(max_chars)` truncates by priority, never mid-record |
+| `tests/test_reflection.py` — `test_diagnose_returns_falsifiable_hypotheses()` | Stage A output parses; each hypothesis has claim, evidence refs, predicted effect, and falsification condition |
+| `tests/test_reflection.py` — `test_walk_forward_gate_is_mandatory()` | A proposal with no ledger available fails loudly; nothing deploys |
+| `tests/test_reflection.py` — `test_complexity_budget_blocks_term_creep()` | A 5th evidence term (over the default budget of 4) that doesn't beat the incumbent's deflated Sharpe is rejected |
+| `tests/test_reflection.py` — `test_adversarial_pass_is_advisory()` | A CRITICAL adversarial finding is recorded and appended to the thesis but does not block a walk-forward-passing spec |
+| `tests/test_reflection.py` — `test_thesis_and_spec_deploy_atomically()` | A spec-deploy failure leaves the thesis version unchanged, and vice versa |
+| `tests/test_challenger.py` — `test_challenger_logs_without_trading()` | A challenger spec's decisions are logged with `challenger_spec_version` and never reach the bridge |
+| `tests/test_challenger.py` — `test_challenger_promotion_on_lower_regret()` | The challenger with lower mean labeled regret over the window becomes active; the incumbent goes inactive |
+| `tests/test_challenger.py` — `test_challenger_rejection_resolves_hypotheses()` | A losing challenger marks its hypotheses falsified with observed effects |
+| `tests/test_hypotheses.py` — `test_registry_roundtrip()` | proposed → challenger → validated/falsified transitions persist with timestamps and observed effects |
+
+#### Done when
+On a live compiled agent with ≥20 trades and ≥14 days of ledger: a scheduled reflection builds a dossier containing at least one forward-labeled missed trade, registers ≥1 falsifiable hypothesis, proposes a thesis+spec revision, and is decided by walk-forward on the merits; an accepted revision runs as challenger and auto-resolves within its window, updating the hypothesis registry; the stub gates no longer exist in the codebase; labeling coverage is ≥90% for decisions older than 24h; and the agent page shows the dossier digest, hypothesis outcomes, and thesis/spec diffs for the cycle.
+
+---
+
+### M11 — Population Learning & Ecosystem Honesty
+
+> One agent's lesson becomes every agent's prior, spawning becomes crossover + immigration under diversity pressure, and every claim of edge survives desk-level multiple-comparisons accounting. This is the milestone that makes the *ecosystem* — not any single strategy — the thing that converges.
+
+#### Goal
+Make learning population-level: a shared desk memory of validated/falsified hypotheses that every reflection consumes and the graveyard check enforces; spawning that recombines proven seeds (crossover), injects fresh uncorrelated theses (immigration), and steers toward under-covered niches (diversity); and desk-level statistical honesty — a global trial ledger deflating every Sharpe by the whole desk's search effort, and a bootstrap null replacing the normal-approximation significance test. With N agents × M reflections × K hypotheses, spurious "edges" are statistically guaranteed to appear; this milestone is what kills them.
+
+#### Acceptance Criteria
+1. **Desk memory.** New `meta/desk_memory.py`: `get_desk_digest(conn, max_items=20) -> str` summarizing the desk-wide hypothesis registry — the strongest validated hypotheses and all falsified ones, each with agent, regime context, effect size, and sample size. Every M10 dossier embeds this digest, so agent B reflects with agent A's paid-for lessons in context — the literal mechanism for "each trader gets smarter as others trade." Rendered as an overview panel and served at `GET /api/desk-memory`.
+2. **The graveyard extends into hypothesis space.** `meta/spawner.py::check_against_graveyard` additionally rejects any seed thesis or spec revision that re-encodes a *falsified* hypothesis — matched on (feature, direction, overlapping `regime_context`) — citing the falsifying registry row in the rejection reason. The existing thesis-token similarity check is retained for prose-level duplicates. Reflection Stage C calls the same check before walk-forward, so the desk never re-spends backtest budget on known-dead regions.
+3. **Global trial accounting.** New `backtest_trials` table (`id, spec_hash, agent_id, ran_at, data_window_start, data_window_end, deflated_sharpe, outcome`); every `run_walk_forward` invocation inserts one row. `backtest/walk_forward.py::_deflated_sharpe` takes `n_trials` = 1 + the count of desk-wide trials in the trailing 90 days whose data windows overlap the candidate's — ten agents reflecting weekly automatically raise the bar for everyone, which is the discipline that stops the desk from buying 500 lottery tickets and celebrating the winner. Desk trial count and desk-level deflated Sharpe render on the overview.
+4. **Bootstrap null.** `meta/evaluator.py::significance_test` replaces the `2/sqrt(N)` normal approximation with a resampling test: 1,000 bootstrap resamples (each of size = the agent's closed-trade count) of `benchmark_random_walk`'s per-trade returns build the null Sharpe distribution; the agent's empirical percentile is its p-value. The R12 insufficient-data latch (null < 30 trades → never cull on null comparison) is preserved. Lifecycle rules consume the bootstrap p-value unchanged.
+5. **Population operators.** `meta/spawner.py` gains: **crossover** — `spawn_from_seeds(conn, seed_ids, llm_fn)`: an LLM synthesizes one thesis from ≥2 parents' harvested seeds (their reasoning + thesis excerpts); the compiled spec must pass the M10 walk-forward gate before the agent's first trade; used seeds are marked (`seeds.used`, `seeds.spawned_agent_id`). **Immigration** — of every 3 spawns, at least 1 must be a fresh thesis not derived from any seed (diversity insurance against premature convergence). **Niche steering** — `desk_diversity(conn)` computes pairwise Jaccard overlap of active specs' evidence-term feature sets plus per-(signal-family × sector) coverage; the spawner targets the least-covered niche. The diversity metric renders on the overview.
+6. **Desk-level scoreboard.** Overview and the Head-of-Desk morning brief report: desk aggregate equity vs the null band, desk deflated Sharpe (criterion 3), hypothesis validation rate (validated ÷ resolved), and the diversity metric. These are the numbers the M13 promotion review reads — the honest long-run claim is "this desk beats its null after global deflation," never a single agent's story.
+
+#### Dependencies
+- **M10 must ship first:** the hypothesis registry, labeled decisions, and mandatory walk-forward are what desk memory, the extended graveyard, and trial accounting consume.
+- M9's harvest path (`seeds` writes on termination — shipped in `meta/evaluator.py::harvest_best_trades`) feeds crossover.
+- An LLM transport for synthesizing spawn theses: reuse M9's `llm/reflection_client.py`.
+
+#### Suggested Worktrees
+| Worktree | Scope | Can Parallelise? |
+|---|---|---|
+| `m11-desk-memory` | `meta/desk_memory.py`, dossier hook, overview panel, API | Yes |
+| `m11-trial-accounting` | `backtest_trials` table, deflation rewire, overview stats | Yes |
+| `m11-null-bootstrap` | Bootstrap `significance_test` + evaluator tests | Yes |
+| `m11-population-ops` | Crossover, immigration, niche steering, diversity metric | After desk-memory (graveyard extension) |
+
+#### Tests
+| Test | What It Verifies |
+|---|---|
+| `tests/test_desk_memory.py` — `test_digest_includes_falsified_with_context()` | The digest lists falsified hypotheses with agent, regime, and effect size |
+| `tests/test_desk_memory.py` — `test_dossier_embeds_desk_digest()` | An M10 dossier for agent B contains agent A's validated hypothesis |
+| `tests/test_spawner.py` — `test_falsified_hypothesis_blocks_spawn()` | A seed thesis re-encoding a falsified (feature, direction, regime) is rejected citing the registry row |
+| `tests/test_spawner.py` — `test_crossover_requires_two_parents_and_walk_forward()` | `spawn_from_seeds` with seeds from 2 parents produces an agent only after its spec passes walk-forward |
+| `tests/test_spawner.py` — `test_immigration_quota()` | Of 3 consecutive spawns, at least one is seed-free |
+| `tests/test_spawner.py` — `test_niche_steering_targets_gap()` | With momentum crowded and carry empty, the next spawn targets carry |
+| `tests/test_walk_forward.py` — `test_global_trials_deflate_sharpe()` | The same raw Sharpe yields a strictly lower deflated Sharpe after 100 additional overlapping-window desk trials |
+| `tests/test_evaluator.py` — `test_bootstrap_p_value_calibrated()` | An agent sampled from the null itself is rejected at ≈ the nominal rate over many synthetic runs |
+| `tests/test_evaluator.py` — `test_bootstrap_respects_insufficient_data_latch()` | A null with <30 trades produces no cull decisions from null comparison |
+| `tests/test_diversity.py` — `test_feature_overlap_metric()` | Known spec sets produce the expected Jaccard overlap values |
+
+#### Done when
+A falsified hypothesis recorded by one agent visibly blocks a matching spawn or revision for another, with the citation in the rejection log; a crossover child of two terminated parents' seeds is trading; the immigration quota holds over a synthetic spawn sequence; the overview shows desk deflated Sharpe (moving with the trial count), hypothesis validation rate, and the diversity metric; and lifecycle culls are driven by bootstrap p-values. All acceptance tests pass.
+
+---
+
+### M12 — Command Deck (fresh, modern UI)
 
 > One modern interface that ties the whole desk together: portfolio → trader → trade line of sight, and executive actions — exit a trade, demote a trader, trigger a review — from the same screen you saw the problem on.
 
@@ -1161,28 +1277,30 @@ Rebuild the web UI as a coherent, modern command center while keeping the lightw
 
 #### Acceptance Criteria
 1. **Design system.** `forge.css` rebuilt on design tokens (color, spacing, type scale), dark-first, one visual language across every page. Every page migrated; no legacy ad-hoc styles remain. Responsive down to a laptop split-screen.
-2. **Overview is a command center.** Portfolio equity, MTD return, and drawdown; leaderboard with the null band visible; all open positions with live P&L; the M9 morning-brief panel; a live activity feed of recent decisions (enter/wait/close/blocked); a system-health strip (exchange connectivity, LLM server, last heartbeat age, ledger sync status).
+2. **Overview is a command center.** Portfolio equity, MTD return, and drawdown; leaderboard with the null band visible; all open positions with live P&L; the M9 morning-brief panel; a live activity feed of recent decisions (enter/wait/close/blocked); a system-health strip (exchange connectivity, LLM server, last heartbeat age, ledger sync status). The M10/M11 surfaces render here too: labeling coverage, the desk-memory digest (top validated/falsified hypotheses), desk deflated Sharpe with the global trial count, and the diversity metric.
 3. **Executive actions** — each with a confirmation dialog showing full context, an optional reason note, an audit row written to `evaluations`, and immediate effect:
    - **Exit any open position** (routes through the agent's bridge close path — never bypasses the fingerprint/ledger export)
    - **Demote a trader** (ACTIVE → SUSPENDED), triggering an M9 review cycle; restore likewise
    - **Trigger reflection now** / **trigger evaluation now** for any agent
+   - **Trigger all evaluations** / **trigger all reflections** desk-wide (the M9 endpoints)
    - **Enable/disable new entries** per agent (human-set risk flag)
-   - **Emergency stop** — paper scope now; live scope extends it in M11
+   - **Emergency stop** — paper scope now; live scope extends it in M13
 4. **Agent page consolidation.** Status badge, equity curve, stats (all-time / last-20 / by-regime), open positions, trade history, thesis + spec tabs with version diffs, reflection log, calibration curve — one coherent page, not bolted-on sections.
 5. **Settings fully functional.** Every field on `/settings` reads and writes the settings table and demonstrably changes behavior: wake cadence, reflection trigger, evaluation thresholds, universe add/remove, risk caps.
 6. **Action safety.** Every action endpoint is POST-only, requires the confirmation token, and has a test proving the action occurred and the audit row was written. All existing web tests still pass.
 
 #### Dependencies
-- M9 exposes the demote/review/evaluate/reflect actions the UI invokes. The design system and page shells can start in parallel with M9; action wiring lands as M9 does.
+- M9 exposes the demote/review/evaluate/reflect actions the UI invokes. The design system and page shells can start in parallel with M9–M11; action wiring lands as M9 does.
+- M10–M11 produce the new read surfaces (hypothesis registry, desk memory, labeling coverage, diversity metric); those panels wire up as M10/M11 land.
 - Hard constraint: no new runtime dependencies (no npm, no build pipeline, no external services).
 
 #### Suggested Worktrees
 | Worktree | Scope | Can Parallelise? |
 |---|---|---|
-| `m10-design-system` | Tokens, base.html, forge.css rebuild, migration of all pages | Yes — start first; others build on it |
-| `m10-command-overview` | Overview page: portfolio, leaderboard, positions, activity feed, health strip | After design system lands |
-| `m10-exec-actions` | Action endpoints + confirmation dialogs + audit trail | Parallel with overview; wires to M9 |
-| `m10-agent-page` | Agent detail consolidation | Parallel |
+| `m12-design-system` | Tokens, base.html, forge.css rebuild, migration of all pages | Yes — start first; others build on it |
+| `m12-command-overview` | Overview page: portfolio, leaderboard, positions, activity feed, health strip, M10/M11 panels | After design system lands |
+| `m12-exec-actions` | Action endpoints + confirmation dialogs + audit trail | Parallel with overview; wires to M9 |
+| `m12-agent-page` | Agent detail consolidation (incl. dossier digest + hypothesis outcomes) | Parallel |
 
 #### Tests
 | Test | What It Verifies |
@@ -1200,7 +1318,7 @@ Every page shares the design system. From the overview you can spot a problem (l
 
 ---
 
-### M11 — Live, Small
+### M13 — Live, Small
 
 > The first real-money trades — small, controlled, and only after clearing the null-model gauntlet. This is the milestone where the entire system justifies its existence: does the edge that survived paper trading survive the transition to real execution?
 
@@ -1216,12 +1334,12 @@ Harden the live bridge, implement shadow mode (paper + live simultaneously for t
    - Position reconciliation every heartbeat: exchange is authoritative; any mismatch logs a reconciliation entry and corrects local state
    - `live_trades` table: immutable, append-only audit record of every real-money fill
 2. **Shadow mode:** `config_json.shadow = true` runs both bridges in parallel per decision; positions tracked independently (`bridge='paper'` / `bridge='live'`), each validated by the risk gate under its own rules; `execution/shadow_reporter.py` writes a comparison (entry/exit price diff, slippage vs estimate, fill timing, one-sentence assessment) to a `shadow_comparisons` table at every live close; a daily 7-day divergence report recommends promote/continue/demote; any single trade with slippage > 0.3% raises an alert, three in a row locks new live entries pending a human click.
-3. **Promotion gate:** statistical — ≥100 paper trades, beats null at 95% confidence, positive return after modeled costs, calibration gap < 10 percentage points in every bucket with ≥10 decisions; human — a "Promote" action in the Command Deck with the full performance summary, shadow stats, and a required review-note field, logged to `evaluations`. One agent only for the first promotion — the smoothest regime-adjusted equity curve (likely funding-carry), not the highest return. Capital fixed at $500–1,000 for ≥30 trading days before any increase.
+3. **Promotion gate:** statistical — ≥100 paper trades, beats null at 95% confidence (M11's bootstrap test), edge still positive under M11's desk-level trial deflation, positive return after modeled costs, calibration gap < 10 percentage points in every bucket with ≥10 decisions; human — a "Promote" action in the Command Deck with the full performance summary, shadow stats, the agent's hypothesis validation record (M10–M11), and a required review-note field, logged to `evaluations`. One agent only for the first promotion — the smoothest regime-adjusted equity curve (likely funding-carry), not the highest return. Capital fixed at $500–1,000 for ≥30 trading days before any increase.
 4. **Audit & safety:** JSONL live audit log at `data/live_audit/{YYYY-MM-DD}.jsonl` (gitignored, never deleted) for every live event; webhook alerts (`alert.webhooks` in config.yaml) on fills, reconciliation mismatches, bridge errors, divergence > 0.3%, live drawdown > 5%; the Command Deck's EMERGENCY STOP extends to live scope — closes all exchange positions via IOC, disables all live bridges, requires a deliberate human "Restart Live"; the daily divergence report renders on the overview.
 
 #### Dependencies
-- **M9 must ship first:** an agent that hasn't survived selection pressure has no business near real capital; the risk officer's exposure logic is extended for live rules.
-- **M10 must ship first (or in final integration):** the promotion dialog, emergency stop, and divergence surfacing are Command Deck features.
+- **M9–M11 must ship first:** an agent that hasn't survived selection pressure, honest reflection (M10), and desk-level deflation (M11) has no business near real capital; the risk officer's exposure logic is extended for live rules.
+- **M12 must ship first (or in final integration):** the promotion dialog, emergency stop, and divergence surfacing are Command Deck features.
 - **Calibration report (M8 — shipped)** is a promotion-gate input.
 - **$500–1,000 funded Hyperliquid wallet**, private key in `.env` (never config.yaml), verified with a $10 test order before any bridge runs.
 - **Hyperliquid conditional-order support** at the account tier in use — if unavailable, acceptance criterion 1's exchange-native triggers are replaced by a documented redundant watchdog (separate process/timer polling every 60s), and the promotion decision accounts for the weaker guarantee.
@@ -1229,11 +1347,11 @@ Harden the live bridge, implement shadow mode (paper + live simultaneously for t
 #### Suggested Worktrees
 | Worktree | Scope | Can Parallelise? |
 |---|---|---|
-| `m11-wallet-setup` | Wallet funding, `.env` config, $10 test order, API readiness verification | Must run first (prerequisite) |
-| `m11-live-bridge` | Order submission, decimals, partial fills, IOC-miss, reconciliation, native triggers | Yes (core engineering) |
-| `m11-shadow-mode` | Dual-bridge routing, `shadow_comparisons`, divergence reporter | After live bridge |
-| `m11-promotion-gate` | Statistical checks + Command Deck promotion dialog + logging | Yes (independent of bridge) |
-| `m11-audit-safety` | Audit log, webhooks, live emergency stop, daily report | Yes (independent of bridge) |
+| `m13-wallet-setup` | Wallet funding, `.env` config, $10 test order, API readiness verification | Must run first (prerequisite) |
+| `m13-live-bridge` | Order submission, decimals, partial fills, IOC-miss, reconciliation, native triggers | Yes (core engineering) |
+| `m13-shadow-mode` | Dual-bridge routing, `shadow_comparisons`, divergence reporter | After live bridge |
+| `m13-promotion-gate` | Statistical checks + Command Deck promotion dialog + logging | Yes (independent of bridge) |
+| `m13-audit-safety` | Audit log, webhooks, live emergency stop, daily report | Yes (independent of bridge) |
 
 #### Tests
 | Test | What It Verifies |
@@ -1262,7 +1380,7 @@ A single agent has been promoted through the full pipeline: ≥100 paper trades 
 
 ---
 
-### M12 — Compounding Operations (ongoing)
+### M14 — Compounding Operations (ongoing)
 
 > The desk graduates from a prototype to an operation: capital follows risk-adjusted performance, the system survives unattended weeks, and the research flywheel produces new strategy families faster than old ones decay.
 
@@ -1276,20 +1394,20 @@ Scale from one live agent to several with fractional-Kelly capital allocation; h
    - Daily timestamped backup of `ledger/`, `state/`, and `data/forge.db` via APScheduler
    - `/health` extended: per-agent heartbeat age, counterfactual-job age, LLM latency p50/p95, Hyperliquid API error rate, DB size, ledger growth rate (MB/day); log rotation with 30-day retention
    - Docker + docker-compose are documented options for remote/unattended hosting (`DOCKER.md`), **not** a gate — the single-process `python forge.py` design remains primary
-3. **Research flywheel:** monthly Head-of-Desk strategy review (cron `day=1 06:00 UTC`) over cumulative PnL/Sharpe by strategy family, agent PnL-correlation adjacency, graveyard patterns, and spec staleness; produces `data/monthly_reviews/{YYYY-MM}.md` with **Retire / Maintain / Seed** sections, also posted to `chat_history`; the Seed section becomes a spawn queue checked before default spawn logic whenever a slot opens; a per-family correlation metric tracked monthly — 3 consecutive rising months flags the family for forced de-correlation (size reduction + thesis divergence on next reflection).
+3. **Research flywheel:** monthly Head-of-Desk strategy review (cron `day=1 06:00 UTC`) over cumulative PnL/Sharpe by strategy family, agent PnL-correlation adjacency, graveyard patterns, the hypothesis registry (validation rate by strategy family — which families are *learning* vs. churning), and spec staleness; produces `data/monthly_reviews/{YYYY-MM}.md` with **Retire / Maintain / Seed** sections, also posted to `chat_history`; the Seed section becomes a spawn queue checked before default spawn logic whenever a slot opens; a per-family correlation metric tracked monthly — 3 consecutive rising months flags the family for forced de-correlation (size reduction + thesis divergence on next reflection).
 
 #### Dependencies
-- **M11 must ship first:** capital allocation needs at least one live agent with real history.
-- **M9 must ship first:** the spawn mechanism is what the flywheel's Seed queue feeds.
+- **M13 must ship first:** capital allocation needs at least one live agent with real history.
+- **M9 and M11 must ship first:** the spawn mechanism and population operators (crossover, immigration, niche steering) are what the flywheel's Seed queue feeds.
 - **≥3 months of trading data** for meaningful Kelly estimation (8-week trailing windows); before that, allocation falls back to equal-weight.
 - Docker optional; if unavailable, ops criteria are verified with equivalent manual steps and documented.
 
 #### Suggested Worktrees
 | Worktree | Scope | Can Parallelise? |
 |---|---|---|
-| `m12-capital-allocation` | Kelly engine, weekly rebalance job, proposal + approval flow | After M11's first live agent exists |
-| `m12-ops-hardening` | Restart-recovery test, backups, /health extension, log rotation, DOCKER.md | Yes (independent; can start during M11) |
-| `m12-research-flywheel` | Monthly review prompt + report, seed injection into spawn queue, correlation tracking | After M9 (needs spawn mechanism) |
+| `m14-capital-allocation` | Kelly engine, weekly rebalance job, proposal + approval flow | After M13's first live agent exists |
+| `m14-ops-hardening` | Restart-recovery test, backups, /health extension, log rotation, DOCKER.md | Yes (independent; can start during M13) |
+| `m14-research-flywheel` | Monthly review prompt + report, seed injection into spawn queue, correlation tracking | After M9/M11 (needs spawn mechanism + population ops) |
 
 #### Tests
 | Test | What It Verifies |
@@ -1321,7 +1439,7 @@ An earlier milestone ("Historical Heartbeat Data") built `append_historical()` (
 
 | Risk | Mitigation |
 |---|---|
-| Overfitting via the reflection loop | M7b's walk-forward + deflated-Sharpe machinery and the null-agent floor; anti-overfit gates are the most important code in the repo |
+| Overfitting via the reflection loop | M7b's walk-forward + deflated-Sharpe machinery and the null-agent floor; M10 makes walk-forward the mandatory deploy authority with challenger trials confirming out-of-sample; M11 deflates every Sharpe by desk-wide trial count; anti-overfit gates are the most important code in the repo |
 | All agents converge on same thesis | Competing positions provide signal when theses diverge; diversity spawns maintain breadth; Head of Desk flags thesis convergence |
 | Regime shift breaks all agents simultaneously | Regime tagging surfaces regime-specific strategies; meta-controller suspends agents failing in new regime |
 | Hyperliquid API downtime | Circuit breaker; agents skip cycle on unavailability; positions monitored by separate process |
@@ -1339,7 +1457,7 @@ An earlier milestone ("Historical Heartbeat Data") built `append_historical()` (
 - **Calibrate the targets.** The original 25–45%/agent with Sharpe > 1.5 is aspirational; a realistic v1 success is: *funding-carry book yielding 10–25% annualized on small capital with max DD < 10%, plus optionality from event/cascade agents* — and, more importantly, a machine that produces and validates new strategies faster than old ones decay. That second thing is the actual asset being built.
 - **Capacity is real but fine at this scale.** These edges hold at $10k–$1M; they will not hold at $100M. That is not a problem worth solving yet.
 - **Biggest technical risk:** overfitting via the reflection loop — the system optimizing its specs into historical noise. Mitigation is M7b's walk-forward + deflated-Sharpe machinery and the null-agent floor; treat the anti-overfit gates as the most important code in the repo.
-- **Biggest operational risk:** live stops living in a 5-minute local loop. Exchange-native triggers are non-negotiable before real money (M11, acceptance criterion 1).
+- **Biggest operational risk:** live stops living in a 5-minute local loop. Exchange-native triggers are non-negotiable before real money (M13, acceptance criterion 1).
 - **Biggest strategic risk:** M7b–M8 are built, so the risk has moved. It is now spending the next quarter admiring the machinery instead of running it: until M9's reflection cadence and selection pressure fire daily, the desk is a static ensemble wearing an evolutionary system's architecture. The moat compounds only under load.
 - **Regulatory:** unchanged from the original proposal — non-custodial DeFi, US person, consult counsel before scaling live capital.
 
@@ -1347,6 +1465,6 @@ An earlier milestone ("Historical Heartbeat Data") built `append_historical()` (
 
 ## Summary
 
-The foundation is built and honest: measurement integrity fixed (M6), a git-native history that fits in one repo (M7a), a backtest engine that turns evolution from months-per-generation to minutes-per-generation (M7b), and agents rebuilt as LLM-authored, mechanically-executed, backtest-validated strategy specs with a pure-LLM control arm so the arena itself answers the paradigm question (M8). The first backtests say what an honest system should: no proven edge yet. What remains is the part that makes it an ecosystem rather than an artifact — selection pressure and reflection running on a daily cadence (M9), a Command Deck that gives its owner line of sight and executive control (M10), and only then the null-model gauntlet to live capital, small (M11), compounding into an operation (M12). Concentrate the book on structural perp edges — funding, liquidations, events — where the market pays for a mechanism rather than a prediction.
+The foundation is built and honest: measurement integrity fixed (M6), a git-native history that fits in one repo (M7a), a backtest engine that turns evolution from months-per-generation to minutes-per-generation (M7b), and agents rebuilt as LLM-authored, mechanically-executed, backtest-validated strategy specs with a pure-LLM control arm so the arena itself answers the paradigm question (M8). The first backtests say what an honest system should: no proven edge yet. What remains is the part that makes it an ecosystem rather than an artifact — selection pressure and reflection running on a daily cadence with a working transport (M9), a reflection engine where the LLM proposes falsifiable hypotheses and the ledger disposes (M10), population-level learning under desk-level statistical honesty (M11), a Command Deck that gives its owner line of sight and executive control (M12), and only then the null-model gauntlet to live capital, small (M13), compounding into an operation (M14). Concentrate the book on structural perp edges — funding, liquidations, events — where the market pays for a mechanism rather than a prediction.
 
 *Forge is not a prediction machine. It is an evolutionary system that puts AI traders under genuine competitive pressure, gives them the tools to learn from the communal record of every trade ever made, and gets out of the way. The market decides who has edge. The desk decides who gets capital.*
