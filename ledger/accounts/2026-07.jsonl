@@ -91,3 +91,4 @@
 {"ts": "2026-07-14T12:31:43.947364Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50036.356683779704, "peak_balance": 50110.99442617685}
 {"ts": "2026-07-14T12:31:43.947364Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50106.58521446987, "peak_balance": 50110.99442617685}
 {"ts": "2026-07-14T12:58:57.341226Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49654.06521111995, "peak_balance": 50186.064602088234}
+{"ts": "2026-07-14T13:11:48.280874Z", "agent_id": "silver_basin", "mode": "paper", "balance": 49532.01217239031, "peak_balance": 50000.0}
