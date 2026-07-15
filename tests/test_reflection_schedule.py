@@ -12,8 +12,19 @@ from uuid import uuid4
 
 import yaml
 
+import agents.reflection as reflection_module
+from backtest.engine import BacktestResult
+from backtest.walk_forward import WalkForwardReport
 from store.db import insert_agent, insert_trade
-from store.specs import deploy_spec as _deploy_spec, get_active_spec
+from store.specs import deploy_spec as _deploy_spec, get_active_spec, get_challenger_spec
+
+
+def _passing_wf_report(deflated_sharpe: float = 1.0) -> WalkForwardReport:
+    test_result = BacktestResult(sharpe=deflated_sharpe)
+    return WalkForwardReport(
+        train=BacktestResult(), validate=BacktestResult(), test=test_result,
+        deflated_sharpe=deflated_sharpe, parameter_sensitivity={},
+    )
 
 AGENT_ID = "reflection_sched_agent"
 
@@ -170,8 +181,10 @@ def _make_llm(*responses):
 
 def _redirect_specs_dir(monkeypatch, tmp_path):
     import store.specs as specs_module
+    import agents.reflection as reflection_module
 
     monkeypatch.setattr(specs_module, "SPECS_DIR", tmp_path / "agents" / "specs")
+    monkeypatch.setattr(reflection_module, "_THESES_DIR", tmp_path / "agents" / "theses")
 
 
 # ---------------------------------------------------------------------------
@@ -275,16 +288,11 @@ def test_rejected_revision_logged_with_gate(conn, monkeypatch, tmp_path):
 
 
 def test_accepted_revision_hot_deploys(conn, monkeypatch, tmp_path):
-    """An accepted revision's spec is active on the agent's next decision
-    without restart -- store/specs.py's active-spec lookup returns the new
-    version immediately after run_reflection (via run_reflection_cycle)
-    accepts it.
-
-    NOTE: the in-tree pipeline deploys accepted revisions directly to
-    'active' status (no challenger staging yet) -- this asserts current
-    behavior. A later task moves acceptance to challenger status and will
-    update this test.
-    """
+    """An accepted revision deploys as a CHALLENGER (M10 crit 5 contract) --
+    live for shadow evaluation on the agent's next decision without
+    restart, via store/specs.py's get_challenger_spec, while the incumbent
+    stays active. (Challenger *resolution* -- regret comparison and
+    promotion -- is a later task.)"""
     from meta.reflection_scheduler import run_reflection_cycle
 
     _redirect_specs_dir(monkeypatch, tmp_path)
@@ -292,18 +300,32 @@ def test_accepted_revision_hot_deploys(conn, monkeypatch, tmp_path):
     _deploy_initial_spec(conn)
     _insert_trades(conn, AGENT_ID, 35)
 
+    monkeypatch.setattr(
+        reflection_module, "run_walk_forward",
+        lambda *a, **k: _passing_wf_report(),
+    )
+
     llm = _make_llm(
         _DIAGNOSE_RESPONSE,
         _valid_spec_yaml(version=2),
         "No critical flaws found.",
     )
-    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
     result = run_reflection_cycle(conn, AGENT_ID, config, llm)
 
     assert result["triggered"] is True
     assert result["deployed"] is True, result.get("rejection_reason") or result.get("blocked_by_gate")
     assert result["spec_version"] == 2
 
+    # Incumbent v1 is untouched and still active.
     active = get_active_spec(conn, AGENT_ID)
     assert active is not None
-    assert active.spec_version == 2
+    assert active.spec_version == 1
+
+    # v2 is live as challenger, available for shadow evaluation immediately.
+    challenger = get_challenger_spec(conn, AGENT_ID)
+    assert challenger is not None
+    assert challenger.spec_version == 2

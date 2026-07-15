@@ -1,15 +1,22 @@
 """agents/reflection.py -- evolutionary strategy reflection engine.
 
-Reads an agent's trade bank, decisions/counterfactuals, and backtest results,
-calls an LLM to produce a revised strategy spec (as YAML text output),
-validates through anti-overfit code gates, and deploys via
-store.specs.deploy_spec() if all gates pass.
+Reads an agent's trade bank, decisions/counterfactuals, and evidence
+dossier, calls an LLM to produce a revised strategy spec (as YAML text
+output), and validates it through mechanical evidence gates -- pattern
+persistence, a mandatory walk-forward backtest, and a complexity budget.
+The LLM's own opinion (the adversarial pass) is advisory only: it is
+recorded and surfaced in the thesis, but only the evidence gates can
+reject a proposal. "The LLM proposes; the ledger disposes." An accepted
+revision deploys its thesis and spec atomically via
+store.specs.deploy_as_challenger() -- CHALLENGER status, not active;
+challenger resolution is a later stage.
 
 M11 feature: see docs/FORGE_PROPOSAL.md for the full design.
 M10 feature: hypothesis registry for challenger trial falsification.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -22,10 +29,22 @@ import yaml
 
 from agents.dossier import build_dossier
 from backtest.dsl import EvidenceTerm, Spec, Threshold
+from backtest.walk_forward import run_walk_forward
 from store.db import get_agent, get_trades
-from store.specs import deploy_spec, get_active_spec, get_spec_history
+from store.specs import deploy_as_challenger, deploy_spec, get_active_spec, get_spec_history
 
 logger = logging.getLogger(__name__)
+
+#: Directory where versioned thesis markdown files live -- same convention as
+#: store/specs.py's SPECS_DIR (module-level constant tests monkeypatch to a
+#: tmp_path so reflection tests never write into the real agents/theses/).
+_THESES_DIR = Path(__file__).resolve().parent / "theses"
+
+#: Default cap on total evidence terms (entry + secondary) a proposed spec
+#: may carry before "complexity must pay for itself" kicks in -- overridden
+#: via desk.max_evidence_terms. See check applied in run_reflection's
+#: complexity-budget gate.
+DEFAULT_MAX_EVIDENCE_TERMS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +64,14 @@ class ReflectionResult:
     blocked_by_gate: str | None
     adversarial_flaws: list[str]
     gates_passed: list[str]
+    # M10 crit 3+4 observability fields -- persisted by
+    # meta/reflection_scheduler.py::run_reflection_cycle into the matching
+    # reflections table columns (M8 schema). Default to None so every
+    # pre-existing call site that doesn't populate them keeps working.
+    research_findings_json: str | None = None
+    proposed_changes: str | None = None
+    adversarial_critique: str | None = None
+    holdout_result: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,12 +166,16 @@ def run_reflection(
        the LLM to produce a structured diagnosis (what's working, what's not).
     2. **Propose**: Based on the diagnosis, call the LLM to generate a revised
        strategy spec (YAML).
-    3. **Validate**: Run all existing anti-overfit gates (adversarial pass,
-       holdout split, cross-agent, pattern persistence, walk-forward) against
-       the proposed spec. If all gates pass → ``deploy_spec()``.
+    3. **Validate**: Run the mechanical evidence gates (pattern persistence,
+       a mandatory walk-forward backtest, a complexity budget) against the
+       proposed spec. The adversarial pass also runs here but is advisory
+       only -- it can never block. If all evidence gates pass, the thesis
+       and spec are deployed atomically as a **challenger**
+       (``store.specs.deploy_as_challenger()``).
 
     Falls back to the legacy single-call pipeline when the dossier builder
-    cannot produce a dossier (missing ledger data, no trades, etc.).
+    cannot produce a dossier (missing ledger data, no trades, etc.). The
+    mechanical evidence gates still apply in full on that path.
     """
     gates_passed: list[str] = []
 
@@ -182,7 +213,7 @@ def run_reflection(
         )
     gates_passed.append("min_trades")
 
-    # -- Gate 4: Update throttle ----------------------------------------------
+    # -- Gate 2: Update throttle ----------------------------------------------
     passed, reason = check_update_throttle(conn, agent_id)
     if not passed:
         return ReflectionResult(
@@ -208,11 +239,18 @@ def run_reflection(
     # ------------------------------------------------------------------
     dossier = None
     diagnosis = ""
+    hypotheses: list[dict] = []
     try:
-        ledger_dir = config.get("ledger_dir", "ledger")
-        dossier = build_dossier(conn, agent_id, ledger_dir)
+        dossier_ledger_dir = config.get("ledger_dir", "ledger")
+        dossier = build_dossier(conn, agent_id, dossier_ledger_dir)
     except Exception as exc:
         logger.warning("Dossier build failed for %s: %s — falling back to legacy path", agent_id, exc)
+
+    # research_findings_json: a compact structured digest of the dossier
+    # (not the whole rendered prompt) -- persisted to reflections.
+    # research_findings_json by meta/reflection_scheduler.py for post-hoc
+    # audit of what evidence informed this cycle, regardless of outcome.
+    research_findings_json = json.dumps(_dossier_digest(dossier)) if dossier is not None else None
 
     def _call_llm(
         system_prompt: str, user_prompt: str,
@@ -240,6 +278,7 @@ def run_reflection(
                 blocked_by_gate=None,
                 adversarial_flaws=[],
                 gates_passed=gates_passed,
+                research_findings_json=research_findings_json,
             )
 
     if dossier is not None and dossier.closed_trades:
@@ -248,9 +287,10 @@ def run_reflection(
         diagnosis, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, diagnose_prompt)
         if err is not None:
             return err
+        hypotheses = _parse_diagnose_hypotheses(diagnosis)
         logger.info(
-            "[%s] Stage 1 (Diagnose) complete — %d chars",
-            agent_id, len(diagnosis),
+            "[%s] Stage 1 (Diagnose) complete — %d chars, %d hypotheses",
+            agent_id, len(diagnosis), len(hypotheses),
         )
 
         # Stage 2: Propose — generate revised spec informed by diagnosis
@@ -292,6 +332,7 @@ def run_reflection(
             blocked_by_gate=None,
             adversarial_flaws=[],
             gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
         )
     gates_passed.append("parse_spec")
 
@@ -309,14 +350,33 @@ def run_reflection(
             blocked_by_gate=None,
             adversarial_flaws=[],
             gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
         )
     gates_passed.append("zero_evidence_guard")
 
+    # proposed_changes: Stage-A hypotheses + thesis/spec diff summary --
+    # persisted to reflections.proposed_changes regardless of what happens
+    # next (mechanical gates below may still reject this proposal, but the
+    # LLM's proposal itself is worth auditing either way).
+    change_summary_text = _spec_change_summary(current_spec, revised_spec)
+    proposed_changes_json = json.dumps({
+        "hypotheses": hypotheses,
+        "thesis_diff_summary": change_summary_text,
+        "spec_diff_summary": _spec_diff_summary(current_spec, revised_spec),
+    })
+
     # ------------------------------------------------------------------
-    # Stage 3: Validate — run all anti-overfit gates
+    # Stage 3: Validate — mechanical evidence gates decide; the LLM's own
+    # opinion (adversarial pass) is advisory only. "The LLM proposes; the
+    # ledger disposes."
     # ------------------------------------------------------------------
 
-    # -- Gate 6: Adversarial pass ---------------------------------------------
+    # -- Adversarial pass (ADVISORY — never blocks) ---------------------------
+    # A CRITICAL finding is recorded for observability and appended to the
+    # deployed thesis as a "Known weaknesses" section, but only mechanical
+    # evidence gates (pattern persistence, walk-forward, complexity budget)
+    # below can reject a proposal. blocked_by_gate="adversarial_pass" is no
+    # longer possible.
     try:
         critical_flaw, flaws = adversarial_pass(propose_yaml, revised_spec, llm_fn)
     except Exception as exc:
@@ -332,107 +392,238 @@ def run_reflection(
             blocked_by_gate=None,
             adversarial_flaws=[],
             gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
         )
+    adversarial_critique_text: str | None = None
     if critical_flaw:
+        adversarial_critique_text = (
+            "\n".join(f"- {f}" for f in flaws)
+            if flaws else "critical flaw found by adversarial pass"
+        )
+        logger.info(
+            "[%s] adversarial pass found CRITICAL findings — recorded as advisory,"
+            " mechanical gates still decide", agent_id,
+        )
+    gates_passed.append("adversarial_pass")
+
+    # -- Gate 3: Pattern persistence --------------------------------------------
+    feature_name = revised_spec.evidence[0].feature
+    passed, reason = check_pattern_persistence(conn, agent_id, feature_name)
+    if not passed:
         return ReflectionResult(
             triggered=True,
             new_spec_yaml=propose_yaml,
             spec_version=revised_spec.spec_version,
             deployed=False,
-            rejection_reason="adversarial pass found critical flaws",
-            blocked_by_gate="adversarial_pass",
+            rejection_reason=reason,
+            blocked_by_gate="pattern_persistence",
             adversarial_flaws=flaws,
             gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
         )
-    gates_passed.append("adversarial_pass")
+    gates_passed.append("pattern_persistence")
 
-    # -- Gate 2: Holdout split ------------------------------------------------
-    if current_spec is not None:
-        passed, reason = check_holdout_split(conn, agent_id, revised_spec, trades)
-        if not passed:
-            return ReflectionResult(
-                triggered=True,
-                new_spec_yaml=propose_yaml,
-                spec_version=revised_spec.spec_version,
-                deployed=False,
-                rejection_reason=reason,
-                blocked_by_gate="holdout_split",
-                adversarial_flaws=flaws,
-                gates_passed=gates_passed,
-            )
-        gates_passed.append("holdout_split")
-
-    # -- Gate 3: Cross-agent validation ---------------------------------------
-    if revised_spec.evidence:
-        first_term = revised_spec.evidence[0]
-        condition_text = (
-            f"{first_term.feature} {first_term.thresholds[0].op}"
-            f" {first_term.thresholds[0].value}"
+    # -- Gate 4: Walk-forward backtest (MANDATORY) -------------------------------
+    # Real out-of-sample validation = this test window + the challenger
+    # trial. A missing/too-short ledger or any exception from
+    # run_walk_forward is a hard, logged rejection -- never a silent skip
+    # that lets an unvalidated spec through to deploy. Unconditional: no
+    # incumbent spec is not an excuse to skip validating the proposal.
+    try:
+        ledger_dir_path = Path(config["ledger_dir"])
+        taker_fee = config.get("taker_fee", 0.00035)
+        wf_report = run_walk_forward(revised_spec, ledger_dir_path, taker_fee)
+    except Exception as exc:
+        logger.warning("[%s] walk-forward gate failed: %s", agent_id, exc)
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=f"walk-forward validation failed: {exc}",
+            blocked_by_gate="walk_forward",
+            adversarial_flaws=flaws,
+            gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
         )
-        passed, reason = check_cross_agent_validation(conn, condition_text)
-        if not passed:
+
+    holdout_result_json = json.dumps(_walk_forward_digest(wf_report))
+
+    if wf_report.deflated_sharpe <= 0:
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=(
+                f"walk-forward deflated Sharpe {wf_report.deflated_sharpe:.3f} <= 0"
+            ),
+            blocked_by_gate="walk_forward",
+            adversarial_flaws=flaws,
+            gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
+            holdout_result=holdout_result_json,
+        )
+    if _walk_forward_is_fragile(wf_report):
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=(
+                "walk-forward parameter-sensitivity sweep flags this spec as"
+                " fragile — a 20% parameter perturbation flips it unprofitable"
+            ),
+            blocked_by_gate="walk_forward",
+            adversarial_flaws=flaws,
+            gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
+            holdout_result=holdout_result_json,
+        )
+    gates_passed.append("walk_forward")
+
+    # -- Gate 5: Complexity budget -------------------------------------------
+    # "Complexity must pay for itself": a proposal over the absolute cap, or
+    # carrying more evidence terms than the incumbent, must beat the
+    # incumbent's walk-forward deflated Sharpe. With no incumbent, only the
+    # absolute cap applies (nothing to beat).
+    max_evidence_terms = config.get("desk", {}).get(
+        "max_evidence_terms", DEFAULT_MAX_EVIDENCE_TERMS,
+    )
+    proposed_terms = len(revised_spec.evidence) + len(revised_spec.secondary_evidence)
+    incumbent_terms = (
+        len(current_spec.evidence) + len(current_spec.secondary_evidence)
+        if current_spec is not None else 0
+    )
+    exceeds_cap = proposed_terms > max_evidence_terms
+    exceeds_incumbent = current_spec is not None and proposed_terms > incumbent_terms
+
+    if exceeds_cap or exceeds_incumbent:
+        if current_spec is None:
             return ReflectionResult(
                 triggered=True,
                 new_spec_yaml=propose_yaml,
                 spec_version=revised_spec.spec_version,
                 deployed=False,
-                rejection_reason=reason,
-                blocked_by_gate="cross_agent_validation",
+                rejection_reason=(
+                    f"{proposed_terms} evidence terms exceeds the complexity"
+                    f" budget ({max_evidence_terms}) with no incumbent to"
+                    " compare against"
+                ),
+                blocked_by_gate="complexity_budget",
                 adversarial_flaws=flaws,
                 gates_passed=gates_passed,
+                research_findings_json=research_findings_json,
+                proposed_changes=proposed_changes_json,
+                adversarial_critique=adversarial_critique_text,
+                holdout_result=holdout_result_json,
             )
-        gates_passed.append("cross_agent_validation")
-
-    # -- Gate 5: Pattern persistence ------------------------------------------
-    if revised_spec.evidence:
-        feature_name = revised_spec.evidence[0].feature
-        passed, reason = check_pattern_persistence(conn, agent_id, feature_name)
-        if not passed:
-            return ReflectionResult(
-                triggered=True,
-                new_spec_yaml=propose_yaml,
-                spec_version=revised_spec.spec_version,
-                deployed=False,
-                rejection_reason=reason,
-                blocked_by_gate="pattern_persistence",
-                adversarial_flaws=flaws,
-                gates_passed=gates_passed,
-            )
-        gates_passed.append("pattern_persistence")
-
-    # -- Walk-forward backtest (optional, requires ledger data) ---------------
-    ledger_dir = config.get("ledger_dir")
-    if ledger_dir and current_spec is not None:
         try:
-            from backtest.walk_forward import run_walk_forward
-
-            taker_fee = config.get("taker_fee", 0.00035)
-            wf_report = run_walk_forward(revised_spec, Path(ledger_dir), taker_fee)
-            if wf_report.deflated_sharpe <= 0:
-                return ReflectionResult(
-                    triggered=True,
-                    new_spec_yaml=propose_yaml,
-                    spec_version=revised_spec.spec_version,
-                    deployed=False,
-                    rejection_reason=(
-                        f"walk-forward deflated Sharpe {wf_report.deflated_sharpe:.3f}"
-                        " <= 0"
-                    ),
-                    blocked_by_gate="walk_forward",
-                    adversarial_flaws=flaws,
-                    gates_passed=gates_passed,
-                )
-            gates_passed.append("walk_forward")
+            incumbent_wf_report = run_walk_forward(current_spec, ledger_dir_path, taker_fee)
         except Exception as exc:
-            logger.warning("Walk-forward backtest skipped (%s)", exc)
+            logger.warning(
+                "[%s] complexity-budget incumbent walk-forward failed: %s", agent_id, exc,
+            )
+            return ReflectionResult(
+                triggered=True,
+                new_spec_yaml=propose_yaml,
+                spec_version=revised_spec.spec_version,
+                deployed=False,
+                rejection_reason=(
+                    f"complexity budget: could not evaluate incumbent for"
+                    f" comparison: {exc}"
+                ),
+                blocked_by_gate="complexity_budget",
+                adversarial_flaws=flaws,
+                gates_passed=gates_passed,
+                research_findings_json=research_findings_json,
+                proposed_changes=proposed_changes_json,
+                adversarial_critique=adversarial_critique_text,
+                holdout_result=holdout_result_json,
+            )
+        if wf_report.deflated_sharpe <= incumbent_wf_report.deflated_sharpe:
+            reason_bits = []
+            if exceeds_cap:
+                reason_bits.append(f"{proposed_terms} terms exceeds cap {max_evidence_terms}")
+            if exceeds_incumbent:
+                reason_bits.append(f"{proposed_terms} terms exceeds incumbent's {incumbent_terms}")
+            return ReflectionResult(
+                triggered=True,
+                new_spec_yaml=propose_yaml,
+                spec_version=revised_spec.spec_version,
+                deployed=False,
+                rejection_reason=(
+                    f"complexity budget: {' and '.join(reason_bits)}, and"
+                    f" proposal's deflated Sharpe {wf_report.deflated_sharpe:.3f}"
+                    f" does not beat incumbent's"
+                    f" {incumbent_wf_report.deflated_sharpe:.3f}"
+                ),
+                blocked_by_gate="complexity_budget",
+                adversarial_flaws=flaws,
+                gates_passed=gates_passed,
+                research_findings_json=research_findings_json,
+                proposed_changes=proposed_changes_json,
+                adversarial_critique=adversarial_critique_text,
+                holdout_result=holdout_result_json,
+            )
+    gates_passed.append("complexity_budget")
 
-    # -- All gates passed → deploy --------------------------------------------
-    # config["desk"] is the standing convention (see CLAUDE.md "Config
-    # convention"); config.get("desk") (not "desk_config", which is not a
-    # real key) preserves deploy_spec's own None-means-skip-validation
-    # contract for callers/tests that don't supply a desk config at all.
-    deploy_spec(
-        conn, agent_id, revised_spec, config.get("desk"),
+    # -- All gates passed → atomically deploy thesis + spec as challenger -----
+    # M10 crit 5 contract: an accepted revision becomes CHALLENGER (shadow
+    # evaluation), not active — challenger resolution is a later task.
+    agent_row = get_agent(conn, agent_id) or {}
+    current_thesis_version = agent_row.get("current_thesis_version", 1)
+    next_thesis_version = current_thesis_version + 1
+    previous_thesis_text = dossier.thesis_text if dossier is not None else ""
+    thesis_markdown = _build_revised_thesis_markdown(
+        agent_id,
+        next_thesis_version,
+        previous_thesis_text,
+        diagnosis,
+        change_summary_text,
+        flaws if critical_flaw else [],
+    )
+
+    try:
+        spec_id = _deploy_revision_atomically(
+            conn,
+            agent_id,
+            revised_spec,
+            thesis_markdown,
+            next_thesis_version,
+            change_summary_text,
+            adversarial_critique_text,
+            config.get("desk"),
+        )
+    except Exception as exc:
+        logger.warning("[%s] atomic thesis+spec deploy failed: %s", agent_id, exc)
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=f"atomic thesis+spec deploy failed: {exc}",
+            blocked_by_gate=None,
+            adversarial_flaws=flaws,
+            gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
+            holdout_result=holdout_result_json,
+        )
+
+    logger.info(
+        "[%s] revision v%d deployed as challenger (specs.id=%d, thesis v%d)",
+        agent_id, revised_spec.spec_version, spec_id, next_thesis_version,
     )
 
     return ReflectionResult(
@@ -444,7 +635,276 @@ def run_reflection(
         blocked_by_gate=None,
         adversarial_flaws=flaws if flaws else [],
         gates_passed=gates_passed,
+        research_findings_json=research_findings_json,
+        proposed_changes=proposed_changes_json,
+        adversarial_critique=adversarial_critique_text,
+        holdout_result=holdout_result_json,
     )
+
+
+# ---------------------------------------------------------------------------
+# M10 crit 3: mechanical-gate helpers (walk-forward digest, fragility)
+# ---------------------------------------------------------------------------
+
+
+def _dossier_digest(dossier: Any) -> dict:
+    """Compact structured digest of the evidence dossier used for a
+    reflection cycle -- stored in reflections.research_findings_json.
+    Deliberately NOT the full rendered prompt (that's dossier.to_prompt());
+    just enough to audit after the fact what evidence informed the LLM.
+    """
+    return {
+        "closed_trades": len(dossier.closed_trades),
+        "calibration_buckets": len(dossier.calibration_curve),
+        "top_regret_decisions": len(dossier.top_regret_decisions),
+        "regimes": [r.get("regime") for r in dossier.regime_breakdown],
+        "features_tracked": [f.get("feature") for f in dossier.feature_stats],
+        "hypothesis_history_count": len(dossier.hypothesis_history),
+    }
+
+
+def _spec_change_summary(current_spec: Spec | None, revised_spec: Spec) -> str:
+    """One-line human-readable summary of the proposed spec revision --
+    used both as theses.change_summary and inside proposed_changes_json's
+    thesis_diff_summary."""
+    from_version = current_spec.spec_version if current_spec else 0
+    return (
+        f"spec v{from_version} -> v{revised_spec.spec_version}: "
+        f"evidence={[e.name for e in revised_spec.evidence]}, "
+        f"SL={revised_spec.stop_loss_pct} TP={revised_spec.take_profit_pct} "
+        f"leverage={revised_spec.leverage}x size={revised_spec.position_size_pct:.0%}"
+    )
+
+
+def _spec_diff_summary(current_spec: Spec | None, revised_spec: Spec) -> dict:
+    """Structured spec-diff summary -- the spec_diff_summary half of
+    proposed_changes_json (the other half is the Stage-A hypotheses)."""
+    return {
+        "from_version": current_spec.spec_version if current_spec else None,
+        "to_version": revised_spec.spec_version,
+        "evidence_terms": [e.name for e in revised_spec.evidence],
+        "secondary_evidence_terms": [e.name for e in revised_spec.secondary_evidence],
+        "stop_loss_pct": revised_spec.stop_loss_pct,
+        "take_profit_pct": revised_spec.take_profit_pct,
+        "leverage": revised_spec.leverage,
+        "position_size_pct": revised_spec.position_size_pct,
+    }
+
+
+def _walk_forward_digest(wf_report: Any) -> dict:
+    """Summarize a WalkForwardReport for reflections.holdout_result --
+    the deflated Sharpe, per-window Sharpe, trade counts, and the raw
+    parameter-sensitivity sweep."""
+    return {
+        "deflated_sharpe": wf_report.deflated_sharpe,
+        "train_sharpe": wf_report.train.sharpe,
+        "validate_sharpe": wf_report.validate.sharpe,
+        "test_sharpe": wf_report.test.sharpe,
+        "train_trades": len(wf_report.train.trades),
+        "validate_trades": len(wf_report.validate.trades),
+        "test_trades": len(wf_report.test.trades),
+        "parameter_sensitivity": wf_report.parameter_sensitivity,
+    }
+
+
+def _walk_forward_is_fragile(wf_report: Any) -> bool:
+    """A strategy is fragility-flagged when a modest (20%) perturbation of
+    any risk/entry parameter (see backtest/walk_forward.py's
+    PERTURBATION_PCT sweep) flips it from profitable to unprofitable in the
+    walk-forward test window -- the edge doesn't survive small parameter
+    jitter, a classic overfitting signature. WalkForwardReport has no
+    dedicated fragility field; this derives the verdict from
+    parameter_sensitivity (each perturbed param's resulting Sharpe delta).
+    """
+    base_sharpe = wf_report.test.sharpe
+    if base_sharpe <= 0:
+        return False  # already failing on its own basis -- not a fragility verdict
+    return any(
+        base_sharpe + delta <= 0
+        for delta in wf_report.parameter_sensitivity.values()
+    )
+
+
+# ---------------------------------------------------------------------------
+# M10 crit 3: Stage 1 (Diagnose) as a standalone, testable function
+# ---------------------------------------------------------------------------
+
+
+def diagnose(
+    agent_id: str,
+    dossier: Any,
+    llm_fn: Callable[[str, str], str],
+) -> tuple[str, list[dict]]:
+    """Stage 1 of the reflection pipeline: build the Diagnose prompt from
+    the evidence dossier, call the LLM, and parse falsifiable hypotheses
+    out of its response.
+
+    Returns ``(raw_diagnosis_text, hypotheses)``. Each hypothesis dict has
+    ``claim``, ``evidence_refs``, ``predicted_effect``, and
+    ``falsification_condition`` keys. A diagnosis with no parseable
+    hypotheses block still returns the raw text with an empty hypotheses
+    list -- Stage 2 doesn't require Stage 1 to have parsed any.
+    """
+    prompt = _build_diagnose_prompt(agent_id, dossier)
+    raw = llm_fn(_REFLECTION_SYSTEM_PROMPT, prompt)
+    return raw, _parse_diagnose_hypotheses(raw)
+
+
+def _extract_json_block(text: str) -> Any | None:
+    """Parse *text* as JSON directly, then fall back to a fenced ```json
+    block. Returns ``None`` if neither yields valid JSON (e.g. a
+    plain-text-only diagnosis with no hypotheses block)."""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _parse_diagnose_hypotheses(raw_text: str) -> list[dict]:
+    """Parse the Diagnose stage's LLM output into structured falsifiable
+    hypotheses (claim, evidence_refs, predicted_effect,
+    falsification_condition). Returns ``[]`` for plain-text diagnoses that
+    carry no hypotheses block -- this is a valid, non-error outcome."""
+    parsed = _extract_json_block(raw_text)
+    if isinstance(parsed, dict):
+        candidates = parsed.get("hypotheses")
+    elif isinstance(parsed, list):
+        candidates = parsed
+    else:
+        candidates = None
+    if not isinstance(candidates, list):
+        return []
+
+    hypotheses: list[dict] = []
+    for h in candidates:
+        if not isinstance(h, dict) or not h.get("claim"):
+            continue
+        hypotheses.append({
+            "claim": h["claim"],
+            "evidence_refs": h.get("evidence_refs") or [],
+            "predicted_effect": h.get("predicted_effect", ""),
+            "falsification_condition": h.get("falsification_condition", ""),
+        })
+    return hypotheses
+
+
+# ---------------------------------------------------------------------------
+# M10 crit 4: atomic thesis + spec co-revision
+# ---------------------------------------------------------------------------
+
+
+def _build_revised_thesis_markdown(
+    agent_id: str,
+    next_thesis_version: int,
+    previous_thesis_text: str,
+    diagnosis: str,
+    change_summary: str,
+    critical_flaws: list[str],
+) -> str:
+    """Build the revised thesis markdown written to
+    agents/theses/{agent_id}_v{N+1}.md: the previous thesis text (if any)
+    with a new revision section appended, plus a "## Known weaknesses"
+    section when the adversarial pass found CRITICAL findings (req 2b) --
+    advisory input made visible in the thesis, never a deploy blocker.
+    """
+    lines: list[str] = []
+    if previous_thesis_text.strip():
+        lines.append(previous_thesis_text.rstrip())
+        lines.append("")
+    lines.append(f"## Revision v{next_thesis_version} — {_now()}")
+    lines.append("")
+    lines.append("### Diagnosis")
+    lines.append(diagnosis.strip() or "(no diagnosis text captured)")
+    lines.append("")
+    lines.append("### Changes")
+    lines.append(change_summary.strip() or "(spec revised — see deployed YAML for details)")
+    if critical_flaws:
+        lines.append("")
+        lines.append("## Known weaknesses")
+        for flaw in critical_flaws:
+            lines.append(f"- {flaw}")
+    return "\n".join(lines) + "\n"
+
+
+def _insert_thesis_row(
+    conn,
+    agent_id: str,
+    version: int,
+    text: str,
+    change_summary: str,
+    adversarial_critique: str | None,
+) -> int:
+    """Insert a theses row. Factored out of _deploy_revision_atomically so
+    a test can monkeypatch this specific step to force a mid-deploy
+    failure (the alternative to monkeypatching deploy_as_challenger)."""
+    cursor = conn.execute(
+        """INSERT INTO theses (agent_id, version, text, created_at,
+                                change_summary, adversarial_critique)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (agent_id, version, text, _now(), change_summary, adversarial_critique),
+    )
+    return cursor.lastrowid
+
+
+def _deploy_revision_atomically(
+    conn,
+    agent_id: str,
+    revised_spec: Spec,
+    thesis_markdown: str,
+    next_thesis_version: int,
+    change_summary: str,
+    adversarial_critique: str | None,
+    desk_config: dict | None,
+) -> int:
+    """Atomically deploy an accepted reflection revision: write the revised
+    thesis file, insert its theses row, bump
+    agents.current_thesis_version, and deploy the spec as a challenger
+    (thesis_version stamped to the new version) -- all four together or
+    none.
+
+    All DB writes execute in one uncommitted transaction on *conn*. The
+    thesis file is written before the transaction's only commit (inside
+    deploy_as_challenger, the final step) so a failure at any step —
+    including deploy_as_challenger itself — can be fully unwound: the
+    thesis file is deleted and the transaction rolled back before
+    re-raising, leaving thesis version, specs, theses, and the filesystem
+    exactly as they were.
+    """
+    _THESES_DIR.mkdir(parents=True, exist_ok=True)
+    thesis_path = _THESES_DIR / f"{agent_id}_v{next_thesis_version}.md"
+
+    try:
+        thesis_path.write_text(thesis_markdown, encoding="utf-8")
+
+        _insert_thesis_row(
+            conn, agent_id, next_thesis_version, thesis_markdown,
+            change_summary, adversarial_critique,
+        )
+        conn.execute(
+            "UPDATE agents SET current_thesis_version = ? WHERE id = ?",
+            (next_thesis_version, agent_id),
+        )
+
+        spec_to_deploy = dataclasses.replace(
+            revised_spec, thesis_version=next_thesis_version,
+        )
+        spec_id = deploy_as_challenger(conn, agent_id, spec_to_deploy, desk_config)
+    except Exception:
+        if thesis_path.exists():
+            thesis_path.unlink()
+        conn.rollback()
+        raise
+
+    return spec_id
 
 
 def _build_diagnose_prompt(agent_id: str, dossier: Any) -> str:
@@ -477,7 +937,17 @@ def _build_diagnose_prompt(agent_id: str, dossier: Any) -> str:
         "  4. Calibration assessment — is the agent overconfident or underconfident?",
         "  5. Recommended changes — 2-3 specific, measurable changes to the strategy",
         "",
-        "Output ONLY your diagnosis as plain text. Do NOT include a YAML spec yet.",
+        "After your written diagnosis, output a fenced JSON block with 2-3",
+        "falsifiable hypotheses drawn from the evidence above, in this shape:",
+        "",
+        "```json",
+        '{"hypotheses": [',
+        '  {"claim": "...", "evidence_refs": ["...dossier section refs..."],',
+        '   "predicted_effect": "...", "falsification_condition": "..."}',
+        "]}",
+        "```",
+        "",
+        "Do NOT include a YAML spec yet — that is Stage 2.",
         "",
     ]
     return "\n".join(lines)
@@ -562,57 +1032,10 @@ def check_min_trades(
     return True, None
 
 
-def check_holdout_split(
-    conn,
-    agent_id: str,
-    spec: Spec,
-    trades: list[dict],
-) -> tuple[bool, str | None]:
-    """Gate 2: Holdout-window performance validation.
-
-    In a production deployment this would run a proper backtest on the
-    last-20 trade holdout window.  Here we verify the spec is structurally
-    valid and that sufficient trade history exists to split.
-    """
-    if len(trades) < 30:
-        return False, f"only {len(trades)} trades available (need 30 for holdout)"
-
-    # Structural sanity — the spec must have at least one evidence term.
-    if not spec.evidence:
-        return False, "revised spec has no evidence terms"
-
-    return True, None
-
-
-def check_cross_agent_validation(
-    conn, condition: str,
-) -> tuple[bool, str | None]:
-    """Gate 3: Cross-agent condition check.
-
-    Queries other agents' trade reasoning for the proposed condition.
-    Simplified implementation — a production version would search
-    ``agent_reasoning_json`` and ``key_conditions_met`` across all agents.
-    """
-    # Check if any other agent has trades with similar feature references
-    rows = conn.execute(
-        """SELECT COUNT(*) FROM trades
-           WHERE agent_id NOT IN (
-               SELECT id FROM agents WHERE status = 'culled'
-           )
-           AND status = 'closed' AND voided = 0
-           AND key_conditions_met IS NOT NULL"""
-    ).fetchone()
-    other_trades = rows[0] if rows else 0
-    if other_trades < 5:
-        return True, None  # Not enough cross-agent data to validate — allow
-
-    return True, None
-
-
 def check_update_throttle(
     conn, agent_id: str, min_trades_since: int = 30, min_days: int = 14,
 ) -> tuple[bool, str | None]:
-    """Gate 4: Max one update per *min_trades_since* trades OR *min_days* days.
+    """Gate 2: Max one update per *min_trades_since* trades OR *min_days* days.
 
     Allows an update when *either* condition is met (not both).
     """
@@ -654,7 +1077,7 @@ def check_pattern_persistence(
     min_windows: int = 3,
     window_days: int = 7,
 ) -> tuple[bool, str | None]:
-    """Gate 5: A condition's feature must have trade evidence spanning
+    """Gate 3: A condition's feature must have trade evidence spanning
     at least *min_windows* non-overlapping *window_days*-day windows.
 
     Uses the agent's trade timestamps as a proxy — a production version
@@ -701,7 +1124,10 @@ def adversarial_pass(
     spec: Spec,
     llm_fn: Callable[[str, str], str],
 ) -> tuple[bool, list[str]]:
-    """Gate 6: Second LLM call plays devil's advocate.
+    """Second LLM call plays devil's advocate -- ADVISORY only (M10 crit 3):
+    the caller (run_reflection) records a critical finding for observability
+    and appends it to the deployed thesis's "Known weaknesses" section, but
+    never blocks a deploy on it. Only mechanical evidence gates decide.
 
     Returns ``(critical_flaw_found, flaws_list)``.
     """

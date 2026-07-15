@@ -192,9 +192,16 @@ def run_reflection_cycle(
 
     conn.execute(
         """UPDATE reflections
-           SET outcome = ?, rejection_reason = ?, evidence_summary = ?
+           SET outcome = ?, rejection_reason = ?, evidence_summary = ?,
+               research_findings_json = ?, proposed_changes = ?,
+               adversarial_critique = ?, holdout_result = ?
            WHERE id = ?""",
-        (outcome, rejection, ev_summary or None, reflection_row_id),
+        (
+            outcome, rejection, ev_summary or None,
+            result.research_findings_json, result.proposed_changes,
+            result.adversarial_critique, result.holdout_result,
+            reflection_row_id,
+        ),
     )
     conn.commit()
 
@@ -206,4 +213,8 @@ def run_reflection_cycle(
         "rejection_reason": result.rejection_reason,
         "gates_passed": result.gates_passed,
         "adversarial_flaws": result.adversarial_flaws,
+        "research_findings_json": result.research_findings_json,
+        "proposed_changes": result.proposed_changes,
+        "adversarial_critique": result.adversarial_critique,
+        "holdout_result": result.holdout_result,
     }

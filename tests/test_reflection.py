@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 import yaml
 
+import agents.reflection as reflection_module
 from agents.reflection import (
     ReflectionResult,
     adversarial_pass,
@@ -24,16 +25,29 @@ from agents.reflection import (
     check_pattern_persistence,
     check_update_throttle,
     compute_calibration_curve,
+    diagnose,
     parse_revised_spec,
     run_reflection,
 )
 from backtest.dsl import EvidenceTerm, Spec, Threshold
-from store.db import insert_agent, insert_trade
-from store.specs import deploy_spec as _deploy_spec
+from backtest.engine import BacktestResult
+from backtest.walk_forward import WalkForwardReport
+from store.db import get_agent, insert_agent, insert_trade
+from store.specs import deploy_spec as _deploy_spec, get_challenger_spec
 
 logger = logging.getLogger(__name__)
 
 AGENT_ID = "test_agent"
+
+
+def _passing_wf_report(deflated_sharpe: float = 1.0, sensitivity: dict | None = None) -> WalkForwardReport:
+    """A WalkForwardReport that clears the mandatory walk-forward gate:
+    deflated Sharpe > 0 and no parameter-sensitivity fragility flag."""
+    test_result = BacktestResult(sharpe=deflated_sharpe)
+    return WalkForwardReport(
+        train=BacktestResult(), validate=BacktestResult(), test=test_result,
+        deflated_sharpe=deflated_sharpe, parameter_sensitivity=sensitivity or {},
+    )
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -232,10 +246,15 @@ def _deploy_initial_spec(conn):
 
 @pytest.fixture(autouse=True)
 def _redirect_specs_dir(monkeypatch, tmp_path):
-    """Redirect SPECS_DIR to a temp directory so deploy_spec writes there."""
+    """Redirect SPECS_DIR and reflection's thesis dir to temp directories so
+    deploy_spec/deploy_as_challenger/the atomic thesis+spec deploy never
+    write into the real agents/specs/ or agents/theses/ (see
+    tests/test_smoke.py's redirect of repo-dirtying paths)."""
     import store.specs as specs_module
+    import agents.reflection as reflection_module
 
     monkeypatch.setattr(specs_module, "SPECS_DIR", tmp_path / "agents" / "specs")
+    monkeypatch.setattr(reflection_module, "_THESES_DIR", tmp_path / "agents" / "theses")
 
 
 @pytest.fixture
@@ -490,7 +509,7 @@ def test_min_trade_gate(conn):
     _insert_trades(conn, 5)  # Only 5 trades
 
     llm = _make_llm("should never be called")
-    config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     assert result.triggered is False
@@ -517,7 +536,7 @@ def test_update_throttle(conn):
     conn.commit()
 
     llm = _make_llm("should never be called")
-    config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     assert result.triggered is False
@@ -553,7 +572,12 @@ def test_pattern_persistence(conn):
 
 
 def test_anti_overfit_adversarial_pass(conn):
-    """Adversarial pass blocks a spec with critical flaws."""
+    """A CRITICAL adversarial finding no longer blocks by itself (M10 crit
+    3: the LLM's opinion is advisory) -- but this spec still doesn't deploy,
+    because it also fails the MANDATORY walk-forward gate (no ledger_dir
+    configured here). Equivalent protection, via the correct mechanism: a
+    mechanical evidence gate, not LLM opinion. The critical finding is still
+    recorded for observability."""
     _setup_agent(conn)
     _insert_trades(conn, 25)
     _deploy_initial_spec(conn)
@@ -569,8 +593,10 @@ def test_anti_overfit_adversarial_pass(conn):
 
     assert result.triggered is True
     assert result.deployed is False
-    assert result.blocked_by_gate == "adversarial_pass"
+    assert result.blocked_by_gate == "walk_forward"
     assert len(result.adversarial_flaws) >= 1
+    assert result.adversarial_critique is not None
+    assert "overfit" in result.adversarial_critique.lower()
 
 
 def test_anti_overfit_rejects_overfit(conn):
@@ -624,11 +650,19 @@ def test_calibration_curve(conn):
 class TestEndToEndReflection:
     """Full reflection cycle with a correctly-behaved LLM."""
 
-    def test_full_cycle_deploys_new_spec(self, conn):
-        """When all gates pass and the LLM provides a valid spec, deploy."""
+    def test_full_cycle_deploys_new_spec(self, conn, monkeypatch, tmp_path):
+        """When all gates (including the mandatory walk-forward + complexity
+        budget) pass and the LLM provides a valid spec, it deploys as a
+        CHALLENGER (M10 crit 5 contract) -- not active. The incumbent v1
+        stays active; get_challenger_spec returns the new v2."""
         _setup_agent(conn)
         _deploy_initial_spec(conn)
         _insert_trades(conn, 35)
+
+        monkeypatch.setattr(
+            reflection_module, "run_walk_forward",
+            lambda *a, **k: _passing_wf_report(),
+        )
 
         # LLM: diagnose, then valid YAML, then no critical flaws
         llm = _make_llm(
@@ -636,23 +670,31 @@ class TestEndToEndReflection:
             _valid_spec_yaml(version=2),
             "No critical flaws found. Minor concern: consider tightening the SL.",
         )
-        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        config = {
+            "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+            "ledger_dir": str(tmp_path / "ledger"),
+        }
         result = run_reflection(conn, AGENT_ID, config, llm)
 
         assert result.triggered is True
-        assert result.deployed is True
+        assert result.deployed is True, result.rejection_reason or result.blocked_by_gate
         assert result.spec_version == 2
         assert result.new_spec_yaml is not None
         assert result.blocked_by_gate is None
         assert result.rejection_reason is None
 
-        # Verify the spec was actually deployed in the DB
-        deployed = conn.execute(
+        # The incumbent v1 is untouched and still active.
+        active = conn.execute(
             "SELECT spec_version, status FROM specs WHERE agent_id = ? AND status = 'active'",
             (AGENT_ID,),
         ).fetchone()
-        assert deployed is not None
-        assert deployed["spec_version"] == 2
+        assert active is not None
+        assert active["spec_version"] == 1
+
+        # v2 deployed as challenger, not active.
+        challenger = get_challenger_spec(conn, AGENT_ID)
+        assert challenger is not None
+        assert challenger.spec_version == 2
 
     def test_llm_parse_failure_returns_error(self, conn):
         """When the LLM transport is exhausted/raises mid-pipeline (Stage 1
@@ -750,28 +792,32 @@ class TestEndToEndReflection:
         assert result.adversarial_flaws == []
 
     def test_no_previous_spec_still_works(self, conn):
-        """Reflection without a prior active spec — only tests gates that
-        don't require a current spec (min_trades, throttle, adversarial)."""
+        """Reflection without a prior active spec (agent's first-ever
+        reflection) still runs the full gate pipeline, including the
+        MANDATORY walk-forward gate -- previously skipped outright via
+        `if ledger_dir and current_spec is not None`, which let a
+        never-validated first spec straight through. No incumbent is not an
+        excuse to skip validating the proposal: with no ledger_dir
+        configured, this is a loud walk_forward rejection, not a silent
+        deploy."""
         _setup_agent(conn)
-        _insert_trades(conn, 25)
+        _insert_trades(conn, 25)  # spans 25 days -- pattern_persistence passes
 
-        # No prior spec deployed — check_update_throttle passes (no prior),
-        # but check_holdout_split requires current_spec so it's skipped.
+        # No prior spec deployed -- check_update_throttle passes (no prior
+        # deployment). The dossier has closed trades, so all three LLM
+        # calls (diagnose, propose, adversarial) are needed.
         llm = _make_llm(
+            _DIAGNOSE_RESPONSE,
             _valid_spec_yaml(version=1),
             "No critical flaws found.",
         )
-        config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
         result = run_reflection(conn, AGENT_ID, config, llm)
 
-        # Without a prior spec, holdout_split is skipped. Adversarial + others pass.
-        # Parse might fail if deploy_spec fails validation (spec could be fine)
-        # Let's check what happened...
         assert result.triggered is True
-        # Depending on whether deploy succeeds or fails validation,
-        # deployed could be True (if no desk_config validation) or False.
-        # Since desk_config is provided and leverage=2 <= 10, it should work.
-        assert result.deployed is True or result.rejection_reason is not None
+        assert result.deployed is False
+        assert result.blocked_by_gate == "walk_forward"
+        assert result.rejection_reason is not None
 
 
 # ---------------------------------------------------------------------------
@@ -792,20 +838,312 @@ def test_zero_trades_min_trade_gate(conn):
     assert "0" in result.blocked_by_gate or "only" in result.blocked_by_gate
 
 
-def test_adversarial_empty_string(conn):
+def test_adversarial_empty_string(conn, monkeypatch, tmp_path):
     """Empty LLM response in adversarial pass — treated as no critique."""
     _setup_agent(conn)
     _deploy_initial_spec(conn)
     _insert_trades(conn, 35)
+
+    monkeypatch.setattr(
+        reflection_module, "run_walk_forward",
+        lambda *a, **k: _passing_wf_report(),
+    )
 
     llm = _make_llm(
         _DIAGNOSE_RESPONSE,
         _valid_spec_yaml(version=2),
         "",  # Empty adversarial response
     )
-    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     assert result.triggered is True
-    assert result.deployed is True
+    assert result.deployed is True, result.rejection_reason or result.blocked_by_gate
     assert result.adversarial_flaws == []
+    assert result.adversarial_critique is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: M10 crit 3+4 -- honest evidence gates + atomic thesis/spec deploy
+# ---------------------------------------------------------------------------
+
+
+def test_diagnose_returns_falsifiable_hypotheses():
+    """Stage A (Diagnose) parses structured falsifiable hypotheses out of
+    the LLM's response -- each with claim, evidence_refs, predicted_effect,
+    and falsification_condition."""
+    from types import SimpleNamespace
+
+    hypotheses_payload = json.dumps({
+        "hypotheses": [
+            {
+                "claim": "funding_zscore > 1.5 predicts short-term reversion",
+                "evidence_refs": ["regime_breakdown.trending", "feature_stats.funding_rate_current"],
+                "predicted_effect": "win rate improves by 10pp when filtered",
+                "falsification_condition": "next 20 filtered trades show <= baseline win rate",
+            },
+            {
+                "claim": "confidence >= 0.8 trades outperform 0.5-0.7 trades",
+                "evidence_refs": ["calibration_curve"],
+                "predicted_effect": "avg pnl_pct higher in the top confidence bucket",
+                "falsification_condition": "top bucket avg pnl_pct <= mid bucket avg pnl_pct over next 20 trades",
+            },
+        ],
+    })
+    llm = _make_llm(
+        f"What's working: funding signals in trending regimes.\n\n"
+        f"```json\n{hypotheses_payload}\n```\n"
+    )
+    dossier = SimpleNamespace(to_prompt=lambda max_chars=4000: "dossier text")
+
+    raw_diagnosis, hypotheses = diagnose(AGENT_ID, dossier, llm)
+
+    assert raw_diagnosis  # raw text preserved, not consumed by parsing
+    assert len(hypotheses) == 2
+    for h in hypotheses:
+        assert h["claim"]
+        assert isinstance(h["evidence_refs"], list) and h["evidence_refs"]
+        assert h["predicted_effect"]
+        assert h["falsification_condition"]
+    assert hypotheses[0]["claim"] == "funding_zscore > 1.5 predicts short-term reversion"
+    assert hypotheses[0]["evidence_refs"] == [
+        "regime_breakdown.trending", "feature_stats.funding_rate_current",
+    ]
+
+
+def test_diagnose_plain_text_returns_empty_hypotheses():
+    """A plain-text-only diagnosis (no JSON hypotheses block) is not an
+    error -- diagnose() returns the raw text with an empty hypotheses list."""
+    from types import SimpleNamespace
+
+    llm = _make_llm(_DIAGNOSE_RESPONSE)
+    dossier = SimpleNamespace(to_prompt=lambda max_chars=4000: "dossier text")
+
+    raw_diagnosis, hypotheses = diagnose(AGENT_ID, dossier, llm)
+
+    assert raw_diagnosis == _DIAGNOSE_RESPONSE
+    assert hypotheses == []
+
+
+def test_walk_forward_gate_is_mandatory(conn, tmp_path):
+    """The walk-forward gate is mandatory for every reflection cycle -- a
+    missing/empty ledger is a hard, logged rejection, not the old silent
+    ``except Exception: logger.warning`` skip that let an unvalidated spec
+    straight through to deploy."""
+    from meta.reflection_scheduler import run_reflection_cycle
+
+    _setup_agent(conn)
+    _deploy_initial_spec(conn)
+    _insert_trades(conn, 35)  # spans enough days for pattern_persistence
+
+    llm = _make_llm(
+        _DIAGNOSE_RESPONSE, _valid_spec_yaml(version=2), "No critical flaws found.",
+    )
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "does_not_exist"),
+    }
+    result = run_reflection_cycle(conn, AGENT_ID, config, llm)
+
+    assert result["triggered"] is True
+    assert result["deployed"] is False
+    assert result["blocked_by_gate"] == "walk_forward"
+
+    # nothing deploys
+    challenger_count = conn.execute(
+        "SELECT COUNT(*) FROM specs WHERE agent_id = ? AND status = 'challenger'",
+        (AGENT_ID,),
+    ).fetchone()[0]
+    assert challenger_count == 0
+
+    row = conn.execute(
+        """SELECT outcome, rejection_reason FROM reflections
+           WHERE agent_id = ? ORDER BY id DESC LIMIT 1""",
+        (AGENT_ID,),
+    ).fetchone()
+    assert row is not None
+    assert row["outcome"] == "rejected"
+    assert "walk" in (row["rejection_reason"] or "").lower()
+
+
+def test_complexity_budget_blocks_term_creep(conn, monkeypatch, tmp_path):
+    """A 5th evidence term (over the default max_evidence_terms=4 budget)
+    that doesn't beat the incumbent's walk-forward deflated Sharpe is
+    rejected -- complexity must pay for itself."""
+    _setup_agent(conn)
+    _deploy_initial_spec(conn)  # incumbent: 1 evidence term
+    _insert_trades(conn, 35)
+
+    five_term_yaml = yaml.dump(
+        {
+            "agent_id": AGENT_ID,
+            "spec_version": 2,
+            "thesis_version": 1,
+            "universe": {"include": ["SOL-PERP"]},
+            "regime_filter": {"exclude": []},
+            "entry": {
+                "direction": "long",
+                "confidence_threshold": 0.7,
+                "scale_threshold": 0.5,
+                "evidence": [
+                    {
+                        "name": f"term_{i}",
+                        "feature": "funding_zscore",
+                        "thresholds": [
+                            {"op": ">", "value": -1.0, "weight": 0.2},
+                            {"op": "else", "weight": 0.0},
+                        ],
+                        "missing": "veto",
+                    }
+                    for i in range(5)
+                ],
+                "secondary_evidence": [],
+            },
+            "exit": {"stop_loss_pct": 0.03, "take_profit_pct": 0.06, "max_hold_hours": 24},
+            "position": {"leverage": 2, "position_size_pct": 0.10},
+        },
+        default_flow_style=False,
+    )
+
+    llm = _make_llm(_DIAGNOSE_RESPONSE, five_term_yaml, "No critical flaws found.")
+
+    def _fake_wf(spec, ledger_dir, taker_fee):
+        # The 5-term proposal gets a WORSE deflated Sharpe than the
+        # 1-term incumbent -- complexity doesn't pay for itself.
+        n_terms = len(spec.evidence)
+        sharpe = 0.3 if n_terms >= 5 else 1.0
+        return _passing_wf_report(deflated_sharpe=sharpe)
+
+    monkeypatch.setattr(reflection_module, "run_walk_forward", _fake_wf)
+
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
+    result = run_reflection(conn, AGENT_ID, config, llm)
+
+    assert result.triggered is True
+    assert result.deployed is False
+    assert result.blocked_by_gate == "complexity_budget"
+
+
+def test_adversarial_pass_is_advisory(conn, monkeypatch, tmp_path):
+    """A CRITICAL adversarial finding is recorded (adversarial_critique +
+    thesis Known-weaknesses section) but does NOT block a walk-forward
+    passing spec -- it still deploys as challenger. 'The LLM proposes; the
+    ledger disposes.'"""
+    _setup_agent(conn)
+    _deploy_initial_spec(conn)
+    _insert_trades(conn, 35)
+
+    monkeypatch.setattr(
+        reflection_module, "run_walk_forward",
+        lambda *a, **k: _passing_wf_report(),
+    )
+
+    llm = _make_llm(
+        _DIAGNOSE_RESPONSE,
+        _valid_spec_yaml(version=2),
+        "CRITICAL: The proposed evidence terms are completely overfit.\n- Overfit to noise",
+    )
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
+    result = run_reflection(conn, AGENT_ID, config, llm)
+
+    assert result.triggered is True
+    assert result.deployed is True, result.rejection_reason or result.blocked_by_gate
+    assert result.blocked_by_gate is None
+    assert result.adversarial_critique is not None
+    assert "overfit" in result.adversarial_critique.lower()
+    assert len(result.adversarial_flaws) >= 1
+
+    challenger = get_challenger_spec(conn, AGENT_ID)
+    assert challenger is not None
+    assert challenger.spec_version == 2
+
+    thesis_row = conn.execute(
+        "SELECT text FROM theses WHERE agent_id = ? ORDER BY version DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    assert thesis_row is not None
+    assert "Known weaknesses" in thesis_row["text"]
+
+
+def test_thesis_and_spec_deploy_atomically(conn, monkeypatch, tmp_path):
+    """An accepted proposal deploys thesis + spec atomically: forcing a
+    failure mid-deploy leaves thesis version, specs, theses, and the
+    filesystem unchanged; the successful path bumps all four together."""
+    _setup_agent(conn)
+    _deploy_initial_spec(conn)
+    _insert_trades(conn, 35)
+
+    monkeypatch.setattr(
+        reflection_module, "run_walk_forward",
+        lambda *a, **k: _passing_wf_report(),
+    )
+
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
+
+    before_thesis_version = get_agent(conn, AGENT_ID)["current_thesis_version"]
+
+    # --- Failure path: force deploy_as_challenger to raise mid-deploy ---
+    def _boom(*a, **k):
+        raise RuntimeError("simulated deploy failure")
+
+    monkeypatch.setattr(reflection_module, "deploy_as_challenger", _boom)
+
+    llm_fail = _make_llm(
+        _DIAGNOSE_RESPONSE, _valid_spec_yaml(version=2), "No critical flaws found.",
+    )
+    result = run_reflection(conn, AGENT_ID, config, llm_fail)
+
+    assert result.deployed is False
+    assert result.rejection_reason is not None
+    assert "simulated deploy failure" in result.rejection_reason
+
+    assert get_agent(conn, AGENT_ID)["current_thesis_version"] == before_thesis_version
+    assert conn.execute(
+        "SELECT COUNT(*) FROM theses WHERE agent_id = ?", (AGENT_ID,),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM specs WHERE agent_id = ? AND spec_version = 2", (AGENT_ID,),
+    ).fetchone()[0] == 0
+    thesis_path = reflection_module._THESES_DIR / f"{AGENT_ID}_v{before_thesis_version + 1}.md"
+    assert not thesis_path.exists()
+
+    # --- Success path: same setup, deploy_as_challenger works for real ---
+    from store.specs import deploy_as_challenger as _real_deploy_as_challenger
+
+    monkeypatch.setattr(reflection_module, "deploy_as_challenger", _real_deploy_as_challenger)
+
+    llm_ok = _make_llm(
+        _DIAGNOSE_RESPONSE, _valid_spec_yaml(version=2), "No critical flaws found.",
+    )
+    result2 = run_reflection(conn, AGENT_ID, config, llm_ok)
+
+    assert result2.deployed is True, result2.rejection_reason or result2.blocked_by_gate
+    assert result2.spec_version == 2
+
+    after_thesis_version = get_agent(conn, AGENT_ID)["current_thesis_version"]
+    assert after_thesis_version == before_thesis_version + 1
+
+    theses_count = conn.execute(
+        "SELECT COUNT(*) FROM theses WHERE agent_id = ?", (AGENT_ID,),
+    ).fetchone()[0]
+    assert theses_count == 1
+
+    challenger = get_challenger_spec(conn, AGENT_ID)
+    assert challenger is not None
+    assert challenger.spec_version == 2
+    assert challenger.thesis_version == after_thesis_version
+
+    thesis_path2 = reflection_module._THESES_DIR / f"{AGENT_ID}_v{after_thesis_version}.md"
+    assert thesis_path2.exists()

@@ -33,6 +33,7 @@ desk:
   taker_fee: 0.00035
   maker_fee: -0.00005
   max_gross_exposure_mult: 2.0
+  max_evidence_terms: 4
   event_calendar:
     - name: "FOMC"
       at: "2026-07-29T18:00:00Z"
@@ -49,3 +50,9 @@ desk:
 data_source: hyperliquid          # stub | hyperliquid
 llm_backend: ollama                # stub | ollama — ollama uses the local Ollama instance
 llm_model: "qwen3.6:35b_optimized" # model name passed to Ollama's /api/chat
+
+# Repo-relative path to the git-native JSONL ledger (candles/funding/oi/
+# liquidations). agents/reflection.py's mandatory walk-forward gate reads
+# config["ledger_dir"] directly (fails loudly if absent) -- see CLAUDE.md
+# "Config convention".
+ledger_dir: "ledger"
