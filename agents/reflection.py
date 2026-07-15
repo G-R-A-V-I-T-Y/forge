@@ -148,6 +148,25 @@ def run_reflection(
     """
     gates_passed: list[str] = []
 
+    # -- Gate 0: Benchmark agents never reflect --------------------------------
+    # Benchmark agents (id starts with "benchmark_") are permanent baselines --
+    # their trade history is the null distribution every significance test is
+    # measured against. meta/reflection_scheduler.py::check_agent_eligible
+    # blocks the scheduled path; this guard protects the manual single-agent
+    # web trigger too, which calls run_reflection directly and does not go
+    # through check_agent_eligible.
+    if agent_id.startswith("benchmark_"):
+        return ReflectionResult(
+            triggered=False,
+            new_spec_yaml=None,
+            spec_version=None,
+            deployed=False,
+            rejection_reason=None,
+            blocked_by_gate="benchmark agent — permanent baseline, never reflects",
+            adversarial_flaws=[],
+            gates_passed=[],
+        )
+
     # -- Gate 1: Min trades ---------------------------------------------------
     passed, reason = check_min_trades(conn, agent_id)
     if not passed:

@@ -317,12 +317,19 @@ class TestTriggerAllReflections:
 
     def test_trigger_all_reflections_respects_eligibility(self, conn):
         """Ineligible agents are skipped with a reason; eligible agents get a
-        reflection run via the transport (app.state.llm_fn)."""
+        reflection run via the transport (app.state.llm_fn). Also covers the
+        benchmark-agent guard: a benchmark clearing the trade-count trigger
+        must still be skipped, since it's a permanent baseline, not a
+        lifecycle target."""
         _seed_agent(conn, agent_id="eligible_agent", status="active")
         _seed_agent(conn, agent_id="ineligible_agent", status="active")
+        _seed_agent(conn, agent_id="benchmark_random_walk", status="active")
 
         # eligible_agent clears the default trade_count trigger (interval 20)
         _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1)
+        # benchmark_random_walk also clears the trigger by trade count alone,
+        # but must still be skipped -- benchmarks never reflect.
+        _seed_closed_trades(conn, "benchmark_random_walk", n=20, hours_ago=1)
         # ineligible_agent has zero closed trades -> trades_since=0 < 20
 
         fake_llm = MagicMock(return_value="")
@@ -349,6 +356,8 @@ class TestTriggerAllReflections:
         assert results["eligible_agent"]["status"] == "queued"
         assert results["ineligible_agent"]["status"] == "skipped"
         assert "20" in results["ineligible_agent"]["reason"]
+        assert results["benchmark_random_walk"]["status"] == "skipped"
+        assert "benchmark" in results["benchmark_random_walk"]["reason"].lower()
 
         # The transport (fake llm_fn) was exercised only for the eligible agent.
         assert fake_llm.call_count == 1

@@ -52,6 +52,14 @@ def check_agent_eligible(conn, agent_id: str, trigger: dict[str, Any]) -> tuple[
 
     Returns (True, "") if eligible, (False, reason) if not.
     """
+    # Skip benchmark agents -- they are permanent baselines (e.g.
+    # benchmark_random_walk's trade history IS the null distribution for
+    # every significance test). Reflecting would silently corrupt the null
+    # and invalidate every subsequent cull decision. Matches the guard style
+    # in meta/controller.py::evaluate_agent.
+    if agent_id.startswith("benchmark_"):
+        return False, "benchmark agent — permanent baseline, never reflects"
+
     agent = get_agent(conn, agent_id)
     if agent is None:
         return False, "agent not found"

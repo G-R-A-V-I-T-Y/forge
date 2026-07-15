@@ -199,6 +199,47 @@ def test_trigger_fires_on_trade_count(conn):
     assert eligible is True, reason
 
 
+def test_benchmark_agents_never_reflect(conn):
+    """Benchmark agents (id starts with 'benchmark_') are permanent
+    baselines -- their trade history IS the null distribution for every
+    significance test. They must never reflect, even when trade count alone
+    would otherwise cross the trigger threshold.
+
+    Covers both protection layers: (a) check_agent_eligible, which gates the
+    scheduler path, and (b) run_reflection's own top guard, which protects
+    the manual single-agent web trigger (a path that never calls
+    check_agent_eligible at all)."""
+    from meta.reflection_scheduler import check_agent_eligible, get_reflection_trigger
+    from agents.reflection import run_reflection
+
+    benchmark_id = "benchmark_random_walk"
+    _setup_agent(conn, agent_id=benchmark_id)
+    _insert_trades(conn, benchmark_id, 25)  # crosses the default 20-trade trigger
+
+    trigger = get_reflection_trigger(conn)
+    eligible, reason = check_agent_eligible(conn, benchmark_id, trigger)
+    assert eligible is False
+    assert "benchmark" in reason.lower()
+
+    # run_reflection's own guard must short-circuit before touching the LLM
+    # or deploying anything -- track calls to prove it never invokes llm_fn.
+    calls = []
+
+    def _llm(system_prompt, user_prompt):
+        calls.append((system_prompt, user_prompt))
+        return _DIAGNOSE_RESPONSE
+
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    result = run_reflection(conn, benchmark_id, config, _llm)
+
+    assert result.triggered is False
+    assert result.deployed is False
+    assert result.blocked_by_gate is not None
+    assert "benchmark" in result.blocked_by_gate.lower()
+    assert calls == [], "run_reflection must not call the LLM for benchmark agents"
+    assert get_active_spec(conn, benchmark_id) is None
+
+
 def test_rejected_revision_logged_with_gate(conn, monkeypatch, tmp_path):
     """A gated rejection appears in the reflections log, naming the
     blocking gate."""
