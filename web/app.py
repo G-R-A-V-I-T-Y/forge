@@ -6,6 +6,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -24,7 +25,16 @@ from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
 from store.specs import get_spec_history
+from store.counterfactuals import get_counterfactual_coverage
 from execution.paper_bridge import PaperBridge
+from meta.head_of_desk import (
+    compose_chat_answer,
+    generate_morning_brief,
+    get_chat_history,
+    run_desk_query,
+    save_chat_turn,
+    store_briefing,
+)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -231,6 +241,20 @@ async def overview(request: Request):
         "ORDER BY positions.agent_id, positions.opened_at"
     ).fetchall()
     total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+
+    # Latest Head-of-Desk morning brief (M9 crit 8) for the overview panel.
+    latest_briefing_text = None
+    latest_briefing_date = None
+    try:
+        row = conn.execute(
+            "SELECT date, content FROM briefings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            latest_briefing_date = row["date"]
+            latest_briefing_text = _json.loads(row["content"]).get("briefing_text")
+    except Exception:
+        pass
+
     return templates.TemplateResponse(
         "overview.html",
         {
@@ -245,6 +269,8 @@ async def overview(request: Request):
             "health_items": _build_health_strip(conn, config, provider),
             "activity": _build_activity_feed(conn),
             "evaluation_summaries": _get_evaluation_summaries(conn),
+            "latest_briefing_text": latest_briefing_text,
+            "latest_briefing_date": latest_briefing_date,
         },
     )
 
@@ -1047,3 +1073,111 @@ async def ws_desk(websocket: WebSocket):
         pass
     except Exception:
         pass
+
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    conn = app.state.conn
+    try:
+        row = conn.execute(
+            "SELECT content FROM briefings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        latest_briefing = row["content"] if row else None
+    except Exception:
+        latest_briefing = None
+    try:
+        history = get_chat_history(conn, limit=50)
+    except Exception:
+        history = []
+    return templates.TemplateResponse(
+        "chat.html",
+        {
+            "request": request,
+            "active_page": "chat",
+            "latest_briefing": latest_briefing,
+            "chat_history": history,
+        },
+    )
+
+
+@app.get("/api/briefing/latest")
+async def api_briefing_latest():
+    conn = app.state.conn
+    try:
+        row = conn.execute(
+            "SELECT * FROM briefings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return JSONResponse({"briefing": None})
+        return JSONResponse({
+            "briefing": {
+                "date": row["date"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+            }
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/briefing/generate")
+async def api_briefing_generate():
+    conn = app.state.conn
+    config = getattr(app.state, "config", None)
+    brief = generate_morning_brief(conn, config)
+    store_briefing(conn, brief)
+    return JSONResponse({
+        "ok": True,
+        "briefing_text": brief["briefing_text"],
+        "date": brief["date"],
+        "agents_covered": brief["agents_covered"],
+        "summary": brief["summary"],
+    })
+
+
+@app.websocket("/api/ws/chat")
+async def ws_chat(websocket: WebSocket):
+    """Head-of-Desk chat (M9 crit 8).
+
+    Protocol: client sends {"query": <text>}; server streams the answer as
+    {"role": "assistant", "chunk": <text>} frames followed by a terminal
+    {"role": "assistant", "done": true, "content": <full answer>}. Turns
+    (user + assistant) are persisted to chat_history. Answers are composed
+    by the reflection-transport LLM over query-tool results when
+    app.state.llm_fn is wired (forge.py startup), with a structured
+    non-LLM fallback otherwise.
+    """
+    await websocket.accept()
+    conn = app.state.conn
+    llm_fn = getattr(app.state, "llm_fn", None)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            query_text = data.get("query", "").strip()
+            if not query_text:
+                await websocket.send_json(
+                    {"role": "assistant", "done": True, "content": "Please enter a query."}
+                )
+                continue
+
+            save_chat_turn(conn, "user", query_text)
+            result = await run_in_threadpool(
+                compose_chat_answer, conn, query_text, llm_fn
+            )
+
+            # Stream in line chunks so long answers render progressively.
+            for line in result.splitlines(keepends=True):
+                await websocket.send_json({"role": "assistant", "chunk": line})
+            await websocket.send_json(
+                {"role": "assistant", "done": True, "content": result}
+            )
+            save_chat_turn(conn, "assistant", result)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_json(
+                {"role": "assistant", "done": True, "content": f"Error: {exc}"}
+            )
+        except Exception:
+            pass

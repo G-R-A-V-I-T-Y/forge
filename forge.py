@@ -24,6 +24,7 @@ from pathlib import Path
 import uvicorn
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backtest.dsl import load_spec
@@ -547,20 +548,36 @@ async def main():
     logger.info("Reflection scheduler job scheduled — runs every 30 min")
 
     # ------------------------------------------------------------------
-    # M9: Head of desk — population management.  JOB DISABLED (R12-style
-    # latch, 2026-07-11 pre-run review finding F8): the current
-    # run_head_of_desk_cycle is the C7 archetype auto-spawner — it reads
-    # target_agent_count from the wrong config level and mints junk
-    # "agent_momentum_1"-style agents (bypassing the graveyard check and
-    # the seeds table) whenever suspensions drop the active count below 5.
-    # Do NOT re-register this job until R7 replaces the spawner with the
-    # graveyard-checked, seeds-fed spawn path and the briefing/chat Head
-    # of Desk the proposal specifies.
+    # M9: Head of desk — daily briefing (crit 8). The old auto-spawner
+    # this job once latched off (pre-run finding F8) was replaced by the
+    # briefing/chat Head of Desk; population management now lives with
+    # the evaluator/spawner path, not here.
     # ------------------------------------------------------------------
-    logger.info(
-        "Head of desk job DISABLED (pre-run latch; see R7 in "
-        "docs/STRATEGIC_ASSESSMENT_07_09_2026.md)"
+    async def _run_daily_briefing_job():
+        try:
+            from meta.head_of_desk import generate_morning_brief, store_briefing
+            conn = get_connection(str(DB_PATH))
+            try:
+                brief = generate_morning_brief(conn, config)
+                store_briefing(conn, brief)
+                logger.info(
+                    "Morning brief stored for %s (%d agents, %d alerts)",
+                    brief.get("date"),
+                    len(brief.get("agents_covered", [])),
+                    brief.get("summary", {}).get("alert_count", 0),
+                )
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Daily briefing job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_daily_briefing_job,
+        trigger=CronTrigger(hour=6, minute=0, timezone=timezone.utc),
+        id="daily_briefing",
+        replace_existing=True,
     )
+    logger.info("Head of Desk daily briefing job scheduled — 06:00 UTC")
 
     # ------------------------------------------------------------------
     # Agent fleet — independent asyncio loop.  Every wake_interval all

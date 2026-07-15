@@ -1,0 +1,307 @@
+{% extends "base.html" %}
+{% block title %}Forge — Head of Desk{% endblock %}
+{% block head %}
+<style>
+  .chat-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 140px);
+    max-height: 800px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-accent);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .chat-header {
+    padding: var(--space-md) var(--space-xl);
+    border-bottom: 1px solid var(--border-primary);
+    background: var(--bg-tertiary);
+  }
+
+  .chat-header h2 {
+    font-size: var(--font-size-lg);
+    color: var(--accent-blue);
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+
+  .chat-header p {
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+    margin: var(--space-xs) 0 0;
+  }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+  }
+
+  .chat-msg {
+    max-width: 85%;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-base);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .chat-msg.user {
+    align-self: flex-end;
+    background: var(--accent-blue-bg);
+    color: var(--text-primary);
+    border-bottom-right-radius: var(--radius-sm);
+  }
+
+  .chat-msg.assistant {
+    align-self: flex-start;
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border-accent);
+    border-bottom-left-radius: var(--radius-sm);
+  }
+
+  .chat-msg.system {
+    align-self: center;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+    padding: var(--space-xs) 0;
+  }
+
+  .chat-input-row {
+    display: flex;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-xl);
+    border-top: 1px solid var(--border-primary);
+    background: var(--bg-tertiary);
+  }
+
+  .chat-input-row input {
+    flex: 1;
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-accent);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-base);
+    outline: none;
+    transition: border-color var(--transition-fast);
+  }
+
+  .chat-input-row input:focus {
+    border-color: var(--border-focus);
+  }
+
+  .chat-input-row button {
+    padding: var(--space-sm) var(--space-lg);
+    background: var(--accent-blue-bg);
+    color: var(--text-primary);
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    font-weight: bold;
+    transition: opacity var(--transition-fast);
+  }
+
+  .chat-input-row button:hover { opacity: 0.9; }
+  .chat-input-row button:disabled { opacity: 0.4; cursor: default; }
+
+  .chat-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    padding: 0 var(--space-xl) var(--space-sm);
+  }
+
+  .chat-suggestions button {
+    padding: 3px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-accent);
+    border-radius: 12px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast);
+  }
+
+  .chat-suggestions button:hover {
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+  }
+
+  .typing-indicator {
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+    padding: var(--space-xs) 0;
+    display: none;
+  }
+
+  .typing-indicator.visible { display: block; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="chat-container">
+  <div class="chat-header">
+    <h2>Head of Desk</h2>
+    <p>Ask me anything about the desk — trades, agents, regimes, performance</p>
+  </div>
+
+  <div class="chat-messages" id="chatMessages">
+    {% for turn in chat_history %}
+    <div class="chat-msg {{ turn.role }}">{{ turn.content }}</div>
+    {% endfor %}
+    <div class="chat-msg system">Connected to Head of Desk query engine.</div>
+  </div>
+
+  <div class="chat-suggestions" id="chatSuggestions">
+    <button onclick="sendQuery('desk summary')">desk summary</button>
+    <button onclick="sendQuery('what is working best')">what's working best</button>
+    <button onclick="sendQuery('which agents are losing')">which agents are losing</button>
+    <button onclick="sendQuery('recent trades')">recent trades</button>
+    <button onclick="sendQuery('list agents')">list agents</button>
+    <button onclick="sendQuery('regime breakdown')">regime breakdown</button>
+  </div>
+
+  <div id="typingIndicator" class="typing-indicator">Thinking...</div>
+
+  <div class="chat-input-row">
+    <input
+      type="text"
+      id="chatInput"
+      placeholder="e.g. win rate for jade_hawk"
+      autocomplete="off"
+      autofocus
+    />
+    <button id="sendBtn" onclick="sendFromInput()">Send</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  const messages = document.getElementById('chatMessages');
+  const input = document.getElementById('chatInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const typingIndicator = document.getElementById('typingIndicator');
+  const suggestions = document.getElementById('chatSuggestions');
+
+  let ws = null;
+  let expecting = false;
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/api/ws/chat');
+
+    ws.onopen = function() {
+      addSystem('Connection established.');
+    };
+
+    let streamingDiv = null;
+
+    ws.onmessage = function(evt) {
+      try {
+        const data = JSON.parse(evt.data);
+        if (data.role !== 'assistant') return;
+
+        if (data.chunk !== undefined) {
+          // Streaming frame: append progressively into one bubble.
+          if (!streamingDiv) {
+            streamingDiv = document.createElement('div');
+            streamingDiv.className = 'chat-msg assistant';
+            messages.appendChild(streamingDiv);
+            typingIndicator.classList.remove('visible');
+          }
+          streamingDiv.textContent += data.chunk;
+          messages.scrollTop = messages.scrollHeight;
+        } else if (data.done) {
+          // Terminal frame carries the full answer (authoritative).
+          if (streamingDiv) {
+            streamingDiv.textContent = data.content;
+            streamingDiv = null;
+          } else {
+            addMessage('assistant', data.content);
+          }
+          expecting = false;
+          typingIndicator.classList.remove('visible');
+          sendBtn.disabled = false;
+          messages.scrollTop = messages.scrollHeight;
+        }
+      } catch(e) {
+        streamingDiv = null;
+        expecting = false;
+        typingIndicator.classList.remove('visible');
+        sendBtn.disabled = false;
+      }
+    };
+
+    ws.onclose = function() {
+      addSystem('Disconnected. Reconnecting in 3s...');
+      setTimeout(connect, 3000);
+    };
+
+    ws.onerror = function() {};
+  }
+
+  function addMessage(role, text) {
+    const div = document.createElement('div');
+    div.className = 'chat-msg ' + role;
+    div.textContent = text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function addSystem(text) {
+    const div = document.createElement('div');
+    div.className = 'chat-msg system';
+    div.textContent = text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  window.sendQuery = function(text) {
+    input.value = text;
+    sendFromInput();
+  };
+
+  window.sendFromInput = function() {
+    const text = input.value.trim();
+    if (!text || expecting) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      addSystem('Not connected. Please wait for reconnection.');
+      return;
+    }
+
+    addMessage('user', text);
+    input.value = '';
+    expecting = true;
+    sendBtn.disabled = true;
+    typingIndicator.classList.add('visible');
+    suggestions.style.display = 'none';
+
+    ws.send(JSON.stringify({ query: text }));
+  };
+
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendFromInput();
+    }
+  });
+
+  connect();
+})();
+</script>
+{% endblock %}

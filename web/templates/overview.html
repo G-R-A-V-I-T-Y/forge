@@ -37,6 +37,14 @@
   </div>
 </div>
 
+<!-- Morning Brief (Head of Desk, M9 crit 8) -->
+{% if latest_briefing_text %}
+<h3 class="section-header">Morning Brief{% if latest_briefing_date %} — {{ latest_briefing_date }}{% endif %}</h3>
+<div class="card" style="overflow-x:auto;">
+  <pre style="margin:0; font-size:12px; line-height:1.5; white-space:pre;">{{ latest_briefing_text }}</pre>
+</div>
+{% endif %}
+
 <!-- Leaderboard -->
 <h3 class="section-header">Leaderboard</h3>
 <table class="data-table" id="leaderboard">
