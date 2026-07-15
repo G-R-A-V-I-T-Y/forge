@@ -391,6 +391,28 @@ async def run_decision(
                 ),
             )
 
+            # M9 crit 7: the risk officer's entry gate is enforced here —
+            # per-agent disables (gross-exposure throttle, human stops),
+            # the desk-wide event blackout, and the kill switch all block
+            # NEW entries. Closes/SL-TP handling never pass through this
+            # branch, so risk reduction is never blocked.
+            from meta.risk_officer import RiskOfficer
+
+            gate_open, gate_reason = RiskOfficer(conn, config).entry_gate_status(agent_id)
+            if not gate_open:
+                logger.warning(
+                    "[%s] Risk officer blocked entry: %s", agent_id, gate_reason
+                )
+                log_decision(
+                    conn, agent_id, "risk_blocked",
+                    f"risk officer blocked entry: {gate_reason}",
+                    {"risk_reason": f"risk officer: {gate_reason}", "order": str(response)},
+                    confidence=response.get("confidence"),
+                    evidence_strength=response.get("evidence_strength"),
+                    model_used=model_label,
+                )
+                return {"action": "risk_blocked", "detail": f"risk officer: {gate_reason}"}
+
             open_positions = get_positions(conn, agent_id)
             asset_data = (heartbeat.get("assets") or {}).get(response.get("asset", ""))
             heartbeat_price = (asset_data or {}).get("price") if asset_data else None

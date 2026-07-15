@@ -373,17 +373,31 @@ class RiskOfficer:
     # ── Per-Agent Checks ──────────────────────────────────────────
 
     def agent_position_limit_exceeded(self, agent_id: str) -> bool:
-        max_pos = float(self.config.get("max_position_size", 1000))
+        """Absolute per-agent notional cap. Default-OFF: this rule only
+        applies when `max_position_size` is explicitly configured — the
+        old invented default ($1,000) would have frozen every agent after
+        its first ~$10k position the moment the entry gate became
+        enforced at decision time (config convention: never silently
+        invent numbers)."""
+        max_pos = self.config.get("max_position_size")
+        if max_pos is None:
+            return False
         current_size = self.conn.execute(
             """SELECT COALESCE(SUM(notional_usd), 0) FROM positions
                WHERE agent_id = ?""",
             (agent_id,),
         ).fetchone()[0]
-        return current_size > max_pos
+        return current_size > float(max_pos)
 
     def agent_daily_loss_exceeded(self, agent_id: str) -> bool:
-        """Check if agent exceeded its daily loss limit."""
-        daily_limit = float(self.config.get("agent_daily_loss", 100))
+        """Check if agent exceeded its daily loss limit. Default-OFF when
+        `agent_daily_loss` is not explicitly configured (same rationale
+        as agent_position_limit_exceeded — no invented thresholds in an
+        enforced gate)."""
+        daily_limit_cfg = self.config.get("agent_daily_loss")
+        if daily_limit_cfg is None:
+            return False
+        daily_limit = float(daily_limit_cfg)
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         pnl = self.conn.execute(
@@ -466,6 +480,41 @@ class RiskOfficer:
 
     # ── Entry-Gate Management ─────────────────────────────────────
 
+    def entry_gate_status(
+        self, agent_id: str, now: datetime | None = None
+    ) -> tuple[bool, str | None]:
+        """Composite live entry-gate check with a human-readable reason.
+
+        Returns (True, None) when the agent may open NEW positions, or
+        (False, reason) naming the first blocking condition. This is the
+        single source of truth consumed at decision time
+        (agents/decision_loop.py) — closes/exits never pass through it,
+        so the officer can stop new risk but never prevent risk reduction.
+        """
+        if self.desk_in_kill_switch():
+            return False, "desk kill switch active"
+
+        blackout = self.event_blackout_active(now)
+        if blackout is not None:
+            return False, f"event blackout ({blackout.get('name')})"
+
+        disabled = self.conn.execute(
+            """SELECT reason FROM entry_disables
+               WHERE agent_id = ? AND enabled_at IS NULL
+               ORDER BY id DESC LIMIT 1""",
+            (agent_id,),
+        ).fetchone()
+        if disabled:
+            return False, f"entry disabled: {disabled['reason'] or 'no reason recorded'}"
+
+        if self.agent_position_limit_exceeded(agent_id):
+            return False, "per-agent position limit exceeded"
+
+        if self.agent_daily_loss_exceeded(agent_id):
+            return False, "daily loss limit exceeded"
+
+        return True, None
+
     def is_entry_gate_open(self, agent_id: str, now: datetime | None = None) -> bool:
         """Check if the entry gate is open for this agent.
 
@@ -475,28 +524,8 @@ class RiskOfficer:
           - Agent-specific disable (via entry_disables table)
           - Individual risk rule violation
         """
-        if self.desk_in_kill_switch():
-            return False
-
-        if self.event_blackout_active(now) is not None:
-            return False
-
-        disabled = self.conn.execute(
-            """SELECT 1 FROM entry_disables
-               WHERE agent_id = ? AND enabled_at IS NULL
-               LIMIT 1""",
-            (agent_id,),
-        ).fetchone()
-        if disabled:
-            return False
-
-        if self.agent_position_limit_exceeded(agent_id):
-            return False
-
-        if self.agent_daily_loss_exceeded(agent_id):
-            return False
-
-        return True
+        gate_open, _reason = self.entry_gate_status(agent_id, now)
+        return gate_open
 
     def disable_entry(self, agent_id: str, reason: str, disabled_by: str = "risk_officer") -> None:
         """Disable the entry gate for an agent."""

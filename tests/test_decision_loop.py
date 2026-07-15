@@ -1218,3 +1218,156 @@ async def test_run_postmortem_forwards_agent_id_to_llm_fn(conn):
     await run_postmortem(conn, AGENT_ID, trade_id, capturing_llm, "system prompt")
 
     assert captured_kwargs.get("agent_id") == AGENT_ID
+
+
+# ===================================================================
+# M9 criterion 7: risk-officer entry-gate enforcement in the decision
+# path (T4b). Entries blocked when the gate is closed; closes never.
+# ===================================================================
+
+
+def _entry_disable(conn, agent_id, reason="human stop"):
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason) "
+        "VALUES (?, 'human', '2026-07-10T00:00:00Z', ?)",
+        (agent_id, reason),
+    )
+    conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_entry_blocked_when_risk_officer_disabled(conn, tmp_path):
+    """An enter decision for an entry-disabled agent is risk_blocked with
+    the risk-officer reason, logged as a decision, and creates no trade."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+    _entry_disable(conn, AGENT_ID, "gross exposure throttle: test")
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=_stub_llm_fn,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "risk_blocked"
+    assert "risk officer" in result["detail"]
+    assert "gross exposure throttle" in result["detail"]
+
+    from store.db import get_trades
+
+    assert get_trades(conn, AGENT_ID) == []
+    row = conn.execute(
+        "SELECT decision_action, decision_reason FROM decisions WHERE agent_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (AGENT_ID,),
+    ).fetchone()
+    assert row["decision_action"] == "risk_blocked"
+    assert "risk officer" in row["decision_reason"]
+
+
+@pytest.mark.asyncio
+async def test_entry_blocked_desk_wide_during_event_blackout(conn, tmp_path):
+    """Within the 2h pre-event window, enter decisions are blocked for any
+    agent, purely dynamically (no entry_disables rows involved)."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+    event_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    config["desk"]["event_calendar"] = [
+        {"name": "FOMC", "at": event_at.isoformat().replace("+00:00", "Z")}
+    ]
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=_stub_llm_fn,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "risk_blocked"
+    assert "event blackout" in result["detail"]
+    assert "FOMC" in result["detail"]
+
+    from store.db import get_trades
+
+    assert get_trades(conn, AGENT_ID) == []
+    n_disable_rows = conn.execute(
+        "SELECT COUNT(*) FROM entry_disables"
+    ).fetchone()[0]
+    assert n_disable_rows == 0
+
+
+@pytest.mark.asyncio
+async def test_close_never_blocked_by_entry_gate(conn, tmp_path, monkeypatch):
+    """Risk reduction is never blocked: a close decision executes even for
+    an agent whose entry gate is closed (reduce-only principle)."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    insert_account_snapshot(conn, AGENT_ID, "paper", 50000.0, 50000.0)
+    _entry_disable(conn, AGENT_ID)
+
+    from store.db import insert_trade, insert_position
+
+    trade_id = "gate_close_trade"
+    pos_id = "pos_gate_close_trade"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    insert_trade(conn, {
+        "id": trade_id, "agent_id": AGENT_ID, "asset": "SOL-PERP",
+        "direction": "long", "entry_price": 145.20, "stop_loss_price": 143.0,
+        "take_profit_price": 150.0, "leverage": 3, "position_size_pct": 0.10,
+        "notional_usd": 5000.0, "account_balance_at_entry": 50000.0,
+        "entry_timestamp": now, "status": "open", "mode": "paper",
+        "thesis_version": 1,
+    })
+    insert_position(conn, {
+        "id": pos_id, "agent_id": AGENT_ID, "asset": "SOL-PERP",
+        "direction": "long", "entry_price": 145.20, "stop_loss_price": 143.0,
+        "take_profit_price": 150.0, "leverage": 3, "position_size_pct": 0.10,
+        "notional_usd": 5000.0, "opened_at": now, "mode": "paper",
+        "trade_id": trade_id,
+    })
+
+    async def fake_run_postmortem(conn, agent_id, trade_id, llm_fn, system_prompt):
+        pass
+
+    monkeypatch.setattr("agents.decision_loop.run_postmortem", fake_run_postmortem)
+
+    def close_llm(sys, prompt, **kwargs):
+        return {
+            "action": "close", "position_id": pos_id, "reason": "test_close",
+        }, "Test Close Model"
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _fresh_heartbeat_packet())
+    config = _config(heartbeat_path)
+
+    provider = MarketProvider(config)
+    async with provider:
+        result = await run_decision(
+            agent_id=AGENT_ID,
+            thesis_text=THESIS,
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=close_llm,
+            bridge_factory=_bridge_factory(config),
+        )
+
+    assert result["action"] == "close"
