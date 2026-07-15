@@ -54,14 +54,19 @@ class TestRootDebrisAbsent:
 
 
 def _orphan_thesis_names() -> list[str]:
-    """Return the list of orphan thesis filenames that R11 removed."""
+    """Return the list of orphan thesis filenames that R11 removed.
+
+    amber_wolf_v1.md and gray_finch_v1.md are deliberately NOT listed here:
+    commit fce2df3 ("chore(theses): track gray_finch/amber_wolf seed theses",
+    2026-07-11) re-tracked both as legitimate seed theses after R11 deleted
+    them, since fresh_start's seed list still spawns both agents and
+    seed_desk recreates these files on every fresh start.
+    """
     return [
         "agent_mean_reversion_2_v1.md",
         "agent_momentum_1_v1.md",
-        "amber_wolf_v1.md",
         "config_test_v1.md",
         "dupe_agent_v1.md",
-        "gray_finch_v1.md",
         "test_trader_v1.md",
     ]
 

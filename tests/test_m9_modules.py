@@ -4,6 +4,7 @@ Covers: evaluator, reflection_scheduler, controller, risk_officer, head_of_desk.
 """
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -13,6 +14,21 @@ from store.db import init_schema
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+def _iso(hours_ago: float = 0) -> str:
+    """Timestamp relative to *now*, in the same format the trades table uses.
+
+    meta/evaluator.py::get_lifecycle_decision runs a zero-trades-in-5-days
+    pre-check (before any win-rate/PF rule) that compares a trade's
+    entry_timestamp to datetime.now(). A hardcoded literal date (e.g.
+    "2026-07-09T00:00:00Z") ages past that 5-day window and silently flips
+    every affected fixture's expected decision to "review" — this bit 6
+    tests once real time passed 2026-07-14. Always seed trade timestamps
+    relative to now instead.
+    """
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 @pytest.fixture
 def conn():
@@ -29,7 +45,7 @@ def conn():
 
 def _seed_agents(c):
     """Seed minimal agent + account rows for testing."""
-    now = "2026-07-09T00:00:00Z"
+    now = _iso(0)
     agents = [
         ("alpha_trader", "alpha_trader", "active", now, "{}"),
         ("beta_trader", "beta_trader", "rookie", now, "{}"),
@@ -56,7 +72,7 @@ def _seed_trades(c):
     beta_trader: 10 trades, 50% win rate, slightly profitable — rookie.
     gamma_trader: 60 trades, 30% win rate, unprofitable — termination candidate.
     """
-    now = "2026-07-09T00:00:00Z"
+    now = _iso(1)  # 1h ago: recent enough to never trip the zero-trades-5d gate
     
     # alpha_trader: 60 trades, 60% win (36 win / 24 loss)
     for i in range(60):
@@ -181,7 +197,7 @@ class TestEvaluator:
         from store.performance import compute_metrics
 
         aid = "latch_test_agent"
-        now = "2026-07-09T00:00:00Z"
+        now = _iso(1)  # 1h ago: recent enough to never trip the zero-trades-5d gate
         conn.execute(
             "INSERT INTO agents (id, name, status, spawn_date, config_json) VALUES (?, ?, 'active', ?, '{}')",
             (aid, aid, now),
@@ -424,40 +440,42 @@ class TestHeadOfDesk:
         distribution = get_strategy_distribution(conn)
         assert isinstance(distribution, dict)
 
-    def test_ensure_agent_count_below_target(self, conn):
-        from meta.head_of_desk import ensure_agent_count
-        # 3 non-benchmark active/rookie agents (alpha, beta, gamma).
-        # benchmark_random_walk is excluded from the population count.
-        spawned = ensure_agent_count(conn, {
-            "target_agent_count": 5,
-            "max_agents": 20,
-        })
-        assert len(spawned) == 2  # deficit = 5 - 3 = 2
+    def test_generate_morning_brief(self, conn):
+        from meta.head_of_desk import generate_morning_brief
+        brief = generate_morning_brief(conn)
+        assert "briefing_text" in brief
+        assert "generated_at" in brief
+        assert "agents_covered" in brief
+        assert "summary" in brief
+        assert "FORGE DAILY BRIEFING" in brief["briefing_text"]
+        assert brief["summary"]["agent_count"] >= 1
 
-    def test_ensure_agent_count_already_at_target(self, conn):
-        from meta.head_of_desk import ensure_agent_count
-        spawned = ensure_agent_count(conn, {
-            "target_agent_count": 3,
-            "max_agents": 20,
-        })
-        assert spawned == []  # already at target
+    def test_store_briefing(self, conn):
+        from meta.head_of_desk import store_briefing, generate_morning_brief
+        brief = generate_morning_brief(conn)
+        store_briefing(conn, brief)
+        row = conn.execute(
+            "SELECT * FROM briefings ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row["date"] == brief["date"]
 
-    def test_cull_if_under_max(self, conn):
-        from meta.head_of_desk import cull_if_overpopulated
-        culled = cull_if_overpopulated(conn, {
-            "max_agents": 20,
-        })
-        assert culled == []  # 3 active agents, under 20
+    def test_run_desk_query_summary(self, conn):
+        from meta.head_of_desk import run_desk_query
+        result = run_desk_query(conn, "desk summary")
+        assert "Desk summary" in result
+        assert "Agents:" in result
 
-    def test_run_head_of_desk_cycle(self, conn):
-        from meta.head_of_desk import run_head_of_desk_cycle
-        report = run_head_of_desk_cycle(conn, {
-            "target_agent_count": 5,
-            "max_agents": 20,
-        })
-        assert "spawned" in report
-        assert "culled" in report
-        assert report["agent_count"] > 0
+    def test_run_desk_query_agents(self, conn):
+        from meta.head_of_desk import run_desk_query
+        result = run_desk_query(conn, "list agents")
+        assert "Agent roster" in result
+        assert "alpha_trader" in result
+
+    def test_run_desk_query_unknown(self, conn):
+        from meta.head_of_desk import run_desk_query
+        result = run_desk_query(conn, "asdfghjkl")
+        assert "didn't understand" in result.lower()
 
 
 # ---------------------------------------------------------------------------
