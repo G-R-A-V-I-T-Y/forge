@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Forge &mdash; Decisions{% endblock %}
+{% block content %}
+
+<!-- Counterfactual Coverage Summary -->
+<h3 class="section-header">Counterfactual Coverage</h3>
+<div class="stat-row">
+  <div class="stat-card">
+    <div class="stat-label">Eligible Waits (&ge;24h)</div>
+    <div class="stat-value">{{ coverage.get('eligible_waits', 0) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Filled</div>
+    <div class="stat-value win">{{ coverage.get('filled', 0) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Coverage %</div>
+    <div class="stat-value {{ 'win' if coverage.get('coverage_pct', 0) >= 80 else ('loss' if coverage.get('coverage_pct', 0) < 50 else '') }}">
+      {{ "{:.1f}%".format(coverage.get('coverage_pct', 0)) }}
+    </div>
+  </div>
+</div>
+
+<!-- Forward Labeling Coverage -->
+<h3 class="section-header">Forward Labeling Coverage</h3>
+<div class="stat-row">
+  <div class="stat-card">
+    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
+    <div class="stat-value">{{ labeling_coverage.get('eligible_decisions', 0) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Labeled</div>
+    <div class="stat-value win">{{ labeling_coverage.get('labeled', 0) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Coverage %</div>
+    <div class="stat-value {{ 'win' if labeling_coverage.get('coverage_pct', 0) >= 80 else ('loss' if labeling_coverage.get('coverage_pct', 0) < 50 else '') }}">
+      {{ "{:.1f}%".format(labeling_coverage.get('coverage_pct', 0)) }}
+    </div>
+  </div>
+</div>
+
+<!-- Decisions Per Agent -->
+<h3 class="section-header">Recent Decisions</h3>
+{% for aid in agents %}
+{% set agent_decisions = decisions_by_agent.get(aid, []) %}
+{% if agent_decisions %}
+<div class="panel" style="margin-bottom: 1rem;">
+  <div class="panel-header" style="cursor: pointer;" onclick="toggleDecisions('{{ aid }}')">
+    <strong>{{ aid }}</strong> <span id="toggle-{{ aid }}">&#9660;</span>
+  </div>
+  <div id="decisions-{{ aid }}" class="panel-body" style="padding: 0;">
+    <table class="data-table" style="margin: 0;">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Action</th>
+          <th>Reason</th>
+          <th>Counterfactual</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in agent_decisions %}
+        <tr>
+          <td>{{ d.timestamp[:19] if d.timestamp else '' }}</td>
+          <td><span class="badge badge-{{ d.decision_action }}">{{ d.decision_action.upper() }}</span></td>
+          <td>{{ d.decision_reason[:60] if d.decision_reason else '&mdash;' }}</td>
+          <td>
+            {% if d.counterfactual_result %}
+              {% if d.counterfactual_was_better %}
+              <span class="win">&#9650; Better</span>
+              {% else %}
+              <span class="loss">&#9660; Worse</span>
+              {% endif %}
+            {% else %}
+            <span class="neutral">pending</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+
+<!-- Recent Hypotheses -->
+{% if hypotheses %}
+<h3 class="section-header">Recent Hypotheses</h3>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Hypothesis</th>
+      <th>Status</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for h in hypotheses %}
+    <tr>
+      <td>{{ h.agent_id }}</td>
+      <td>{{ h.claim[:80] if h.claim else '&mdash;' }}</td>
+      <td><span class="badge badge-{{ h.status }}">{{ h.status.upper() if h.status else '&mdash;' }}</span></td>
+      <td>{{ h.created_at[:19] if h.created_at else '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleDecisions(aid) {
+  var el = document.getElementById('decisions-' + aid);
+  var toggle = document.getElementById('toggle-' + aid);
+  if (!el) return;
+  var hidden = el.style.display === 'none';
+  el.style.display = hidden ? '' : 'none';
+  toggle.innerHTML = hidden ? '&#9660;' : '&#9654;';
+}
+</script>
+{% endblock %}

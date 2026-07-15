@@ -370,6 +370,62 @@ async def main():
     logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
 
     # ------------------------------------------------------------------
+    # M10: Forward labeling -- runs nightly at 02:30 UTC, after the 02:00
+    # counterfactual filler above (which keeps running independently).
+    # meta/labeling.py::run_labeling_job forward-labels every decision at
+    # least LONGEST_HOURS old against recorded 5m candles (return, MFE/MAE,
+    # best action, regret at 1h/4h/24h) -- feeds agents/dossier.py's
+    # top-regret evidence and the /decisions coverage tiles.
+    # ------------------------------------------------------------------
+    async def _run_labeling_job():
+        try:
+            from meta.labeling import run_labeling_job
+
+            ledger_dir = config.get("ledger_dir", "ledger")
+            summary = run_labeling_job(conn, ledger_dir)
+            logger.info("Forward labeling complete: %s", summary)
+        except Exception as exc:
+            logger.error("Forward labeling job failed: %s", exc, exc_info=True)
+
+    scheduler.add_job(
+        _run_labeling_job,
+        trigger="cron",
+        hour=2,
+        minute=30,
+        id="labeling",
+        replace_existing=True,
+    )
+    logger.info("Forward labeling job scheduled — runs nightly at 02:30 UTC")
+
+    # ------------------------------------------------------------------
+    # M10: Training dataset refresh -- runs nightly at 03:30 UTC.
+    # scripts/build_training_dataset.py is an offline, read-only batch job
+    # that flattens ledger history into
+    # data/historical_data/training_dataset.parquet for feature-conditioned
+    # stats (agents/dossier.py) and future model training. Never wired into
+    # the live decision loop -- log-and-continue on failure so a bad or
+    # stale ledger partition can never break the fleet cycle.
+    # ------------------------------------------------------------------
+    async def _run_training_dataset_job():
+        try:
+            from scripts.build_training_dataset import build_dataset
+
+            df = await asyncio.get_event_loop().run_in_executor(None, build_dataset)
+            logger.info("Training dataset refresh complete: %d row(s)", len(df))
+        except Exception as exc:
+            logger.error("Training dataset refresh failed: %s", exc, exc_info=True)
+
+    scheduler.add_job(
+        _run_training_dataset_job,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="training_dataset_refresh",
+        replace_existing=True,
+    )
+    logger.info("Training dataset refresh job scheduled — runs nightly at 03:30 UTC")
+
+    # ------------------------------------------------------------------
     # Ledger git sync -- commits + pushes ledger/ and state/ every cycle.
     # Best-effort: a failed push just retries next cycle (see
     # store/git_sync.py). Runs on the heartbeat cadence so it never lags

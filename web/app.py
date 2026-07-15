@@ -26,6 +26,7 @@ from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
 from store.specs import get_spec_history
 from store.counterfactuals import get_counterfactual_coverage
+from meta.labeling import get_labeling_coverage
 from execution.paper_bridge import PaperBridge
 from meta.head_of_desk import (
     compose_chat_answer,
@@ -415,6 +416,60 @@ async def trades_page(
             "page": page,
             "total_pages": total_pages,
             "total": total,
+        },
+    )
+
+
+@app.get("/decisions", response_class=HTMLResponse)
+async def decisions_page(request: Request):
+    conn = app.state.conn
+
+    # Counterfactual coverage
+    coverage = get_counterfactual_coverage(conn)
+
+    # M10: Forward-labeling coverage (meta/labeling.py's nightly job).
+    labeling_coverage = get_labeling_coverage(conn)
+
+    # All decisions grouped by agent
+    agents = conn.execute("SELECT id FROM agents ORDER BY id").fetchall()
+    decisions_by_agent = {}
+    for row in agents:
+        aid = row["id"]
+        rows = conn.execute(
+            """SELECT id, timestamp, decision_action, decision_reason,
+                      counterfactual_result, counterfactual_was_better
+               FROM decisions
+               WHERE agent_id = ?
+               ORDER BY timestamp DESC
+               LIMIT 20""",
+            (aid,),
+        ).fetchall()
+        decisions_by_agent[aid] = [dict(r) for r in rows]
+
+    # Recent hypotheses. The hypotheses table has no `summary` column (it
+    # has `claim`) -- a bare `except: pass` previously swallowed the
+    # resulting sqlite3.OperationalError on every request, so the panel
+    # silently rendered empty. Column list fixed; unexpected errors are now
+    # logged instead of hidden.
+    hypotheses = []
+    try:
+        rows = conn.execute(
+            "SELECT id, agent_id, created_at, status, claim FROM hypotheses ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        hypotheses = [dict(r) for r in rows]
+    except Exception:
+        logger.warning("Failed to query hypotheses for /decisions", exc_info=True)
+
+    return templates.TemplateResponse(
+        "decisions.html",
+        {
+            "request": request,
+            "active_page": "decisions",
+            "coverage": coverage,
+            "labeling_coverage": labeling_coverage,
+            "decisions_by_agent": decisions_by_agent,
+            "hypotheses": hypotheses,
+            "agents": [r["id"] for r in agents],
         },
     )
 

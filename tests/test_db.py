@@ -193,6 +193,75 @@ def test_init_schema_migration_is_idempotent_on_pre_model_chain_db(tmp_path):
     conn.close()
 
 
+def test_init_schema_adds_decision_labels_and_hypotheses_tables(tmp_path):
+    """Simulates a local data/forge.db created before M10 labeling: agents/
+    decisions/trades exist but decision_labels and hypotheses do not (both
+    are whole new tables, not new columns on an existing one, so
+    CREATE TABLE IF NOT EXISTS in schema.sql is sufficient -- no
+    ALTER TABLE migration function needed). init_schema() must create both
+    without erroring and without touching pre-existing rows, and a second
+    call must be a no-op."""
+    db_file = str(tmp_path / "pre_m10.db")
+    conn = get_connection(db_file)
+    conn.executescript("""
+        CREATE TABLE agents (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'rookie', spawn_date TEXT NOT NULL,
+            cull_date TEXT, config_json TEXT NOT NULL DEFAULT '{}',
+            current_thesis_version INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL, decision_action TEXT NOT NULL,
+            decision_reason TEXT, decision_details_json TEXT,
+            counterfactual_result TEXT,
+            counterfactual_was_better INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE trades (
+            id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+            thesis_version INTEGER NOT NULL DEFAULT 1,
+            account_balance_at_entry REAL, mode TEXT NOT NULL DEFAULT 'paper',
+            asset TEXT NOT NULL, direction TEXT NOT NULL, entry_price REAL,
+            stop_loss_price REAL, take_profit_price REAL, leverage INTEGER,
+            position_size_pct REAL, notional_usd REAL, entry_timestamp TEXT,
+            exit_price REAL, exit_timestamp TEXT, exit_reason TEXT,
+            duration_minutes REAL, pnl_pct REAL, pnl_usd REAL, result TEXT,
+            status TEXT NOT NULL DEFAULT 'open', market_context_json TEXT,
+            agent_reasoning_json TEXT, postmortem TEXT, hypothesis TEXT,
+            key_conditions_met TEXT, key_conditions_missing TEXT,
+            confidence REAL, expected_value TEXT, agent_postmortem TEXT
+        );
+    """)
+    conn.commit()
+    insert_agent(conn, "jade_hawk", "jade_hawk", "2026-06-29T00:00:00Z", "{}")
+    conn.execute(
+        "INSERT INTO decisions (agent_id, timestamp, decision_action) VALUES (?, ?, ?)",
+        ("jade_hawk", "2026-06-29T00:00:00Z", "wait"),
+    )
+    conn.commit()
+
+    tables_before = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "decision_labels" not in tables_before
+    assert "hypotheses" not in tables_before
+
+    init_schema(conn)  # should CREATE TABLE both, not fail
+
+    tables_after = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    assert "decision_labels" in tables_after
+    assert "hypotheses" in tables_after
+
+    # Pre-existing row survives the migration.
+    row = dict(conn.execute(
+        "SELECT * FROM decisions WHERE agent_id = ?", ("jade_hawk",)
+    ).fetchone())
+    assert row["decision_action"] == "wait"
+
+    init_schema(conn)  # second call must be a no-op, not raise
+    conn.close()
+
+
 def test_init_schema_migration_is_idempotent_on_pre_m4_db(tmp_path):
     """Simulates a local data/forge.db created before M4: trades table exists
     without the new fingerprint columns. init_schema() must backfill them

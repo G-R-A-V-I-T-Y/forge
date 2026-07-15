@@ -179,6 +179,24 @@ CREATE TABLE IF NOT EXISTS briefings (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hypotheses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    reflection_id INTEGER,
+    claim TEXT NOT NULL,
+    feature TEXT,
+    direction TEXT,
+    regime_context TEXT,
+    predicted_effect TEXT NOT NULL,
+    falsification_condition TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    effect_observed REAL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (agent_id) REFERENCES agents(id),
+    FOREIGN KEY (reflection_id) REFERENCES reflections(id)
+);
+
 CREATE TABLE IF NOT EXISTS entry_disables (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
@@ -231,3 +249,22 @@ CREATE INDEX IF NOT EXISTS idx_trades_direction ON trades(direction);
 CREATE INDEX IF NOT EXISTS idx_positions_agent ON positions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_positions_asset ON positions(asset);
 CREATE INDEX IF NOT EXISTS idx_accounts_agent ON accounts(agent_id);
+
+CREATE TABLE IF NOT EXISTS decision_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id INTEGER NOT NULL,
+    horizon TEXT NOT NULL,  -- '1h', '4h', '24h'
+    fwd_return_pct REAL,
+    max_runup_pct REAL,
+    max_drawdown_pct REAL,
+    chosen_outcome_pct REAL,
+    best_action TEXT,  -- 'wait', 'enter_long', 'enter_short'
+    best_outcome_pct REAL,
+    regret_pct REAL,
+    labeled_at TEXT NOT NULL,
+    FOREIGN KEY (decision_id) REFERENCES decisions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_decision_labels_decision ON decision_labels(decision_id);
+CREATE INDEX IF NOT EXISTS idx_decision_labels_horizon ON decision_labels(horizon);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_agent ON hypotheses(agent_id);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);

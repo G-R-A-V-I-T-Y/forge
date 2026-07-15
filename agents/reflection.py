@@ -29,11 +29,27 @@ import yaml
 
 from agents.dossier import build_dossier
 from backtest.dsl import EvidenceTerm, Spec, Threshold
+from backtest.validator import validate_spec
 from backtest.walk_forward import run_walk_forward
 from store.db import get_agent, get_trades
 from store.specs import deploy_as_challenger, deploy_spec, get_active_spec, get_spec_history
 
 logger = logging.getLogger(__name__)
+
+
+class DeployValidationError(RuntimeError):
+    """Raised when a proposed spec fails desk validation
+    (backtest.validator.validate_spec) during the atomic thesis+spec
+    deploy. store.specs.deploy_as_challenger does NOT raise on this itself
+    -- it commits a status='rejected' spec row and returns normally, and
+    its conn.commit() is the only commit in the atomic sequence, so
+    letting it run unconditionally would silently finalize the
+    theses/agents writes alongside a rejected spec (a real atomicity
+    violation, not just a misreported result). _deploy_revision_atomically
+    therefore replicates that same validation BEFORE any DB write is
+    attempted, so a validation failure is caught before the transaction
+    ever opens -- there is never a commit to unwind.
+    """
 
 #: Directory where versioned thesis markdown files live -- same convention as
 #: store/specs.py's SPECS_DIR (module-level constant tests monkeypatch to a
@@ -405,7 +421,7 @@ def run_reflection(
             "[%s] adversarial pass found CRITICAL findings — recorded as advisory,"
             " mechanical gates still decide", agent_id,
         )
-    gates_passed.append("adversarial_pass")
+    gates_passed.append("adversarial_advisory")
 
     # -- Gate 3: Pattern persistence --------------------------------------------
     feature_name = revised_spec.evidence[0].feature
@@ -603,6 +619,22 @@ def run_reflection(
             change_summary_text,
             adversarial_critique_text,
             config.get("desk"),
+        )
+    except DeployValidationError as exc:
+        logger.warning("[%s] revision rejected by desk validation: %s", agent_id, exc)
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=str(exc),
+            blocked_by_gate="desk_validation",
+            adversarial_flaws=flaws,
+            gates_passed=gates_passed,
+            research_findings_json=research_findings_json,
+            proposed_changes=proposed_changes_json,
+            adversarial_critique=adversarial_critique_text,
+            holdout_result=holdout_result_json,
         )
     except Exception as exc:
         logger.warning("[%s] atomic thesis+spec deploy failed: %s", agent_id, exc)
@@ -878,7 +910,31 @@ def _deploy_revision_atomically(
     thesis file is deleted and the transaction rolled back before
     re-raising, leaving thesis version, specs, theses, and the filesystem
     exactly as they were.
+
+    IMPORTANT: deploy_as_challenger does NOT raise when the spec fails
+    desk validation (e.g. leverage over the desk cap) -- it commits a
+    status='rejected' spec row and returns normally, and that commit is
+    the only commit in this whole sequence. If that were allowed to run
+    unconditionally, its conn.commit() would silently finalize the
+    theses/agents writes above alongside a rejected spec: a genuine
+    atomicity violation that a post-hoc rollback CANNOT undo (the commit
+    already happened by the time any status check could run). So the
+    identical validation deploy_as_challenger performs internally
+    (backtest.validator.validate_spec, same spec + desk_config) runs here
+    FIRST, before any DB write is attempted -- a validation failure raises
+    DeployValidationError before the transaction ever opens.
     """
+    spec_to_deploy = dataclasses.replace(
+        revised_spec, thesis_version=next_thesis_version,
+    )
+
+    if desk_config is not None:
+        pre_flight_errors = validate_spec(spec_to_deploy, desk_config)
+        if pre_flight_errors:
+            raise DeployValidationError(
+                "spec failed desk validation: " + "; ".join(pre_flight_errors)
+            )
+
     _THESES_DIR.mkdir(parents=True, exist_ok=True)
     thesis_path = _THESES_DIR / f"{agent_id}_v{next_thesis_version}.md"
 
@@ -894,10 +950,34 @@ def _deploy_revision_atomically(
             (next_thesis_version, agent_id),
         )
 
-        spec_to_deploy = dataclasses.replace(
-            revised_spec, thesis_version=next_thesis_version,
-        )
         spec_id = deploy_as_challenger(conn, agent_id, spec_to_deploy, desk_config)
+
+        # Defence-in-depth invariant check, not the primary guarantee: the
+        # pre-flight validation above uses the identical (spec,
+        # desk_config) pair deploy_as_challenger validates internally, so
+        # this should never fire. Kept because store/specs.py is another
+        # task's in-flight work -- if its validation logic ever diverges
+        # from what's replicated above, surface that loudly instead of
+        # silently reporting deployed=True for a rejected spec. Rolling
+        # back here is best-effort only: deploy_as_challenger's commit
+        # (above) has already landed by this point, so if this ever
+        # fires it means thesis_version/theses may already be
+        # permanently committed alongside a non-challenger spec --
+        # a real bug requiring investigation, not something this
+        # rollback call can undo after the fact.
+        row = conn.execute(
+            "SELECT status, rejection_reason, validation_errors FROM specs WHERE id = ?",
+            (spec_id,),
+        ).fetchone()
+        if row is None or row["status"] != "challenger":
+            detail = (
+                (row["validation_errors"] or row["rejection_reason"]) if row
+                else "spec row missing"
+            )
+            raise DeployValidationError(
+                f"deploy_as_challenger produced status="
+                f"{row['status'] if row else 'missing'} instead of challenger: {detail}"
+            )
     except Exception:
         if thesis_path.exists():
             thesis_path.unlink()

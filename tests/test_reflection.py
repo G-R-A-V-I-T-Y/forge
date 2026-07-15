@@ -1147,3 +1147,79 @@ def test_thesis_and_spec_deploy_atomically(conn, monkeypatch, tmp_path):
 
     thesis_path2 = reflection_module._THESES_DIR / f"{AGENT_ID}_v{after_thesis_version}.md"
     assert thesis_path2.exists()
+
+
+def test_desk_validation_failure_does_not_deploy_atomically(conn, monkeypatch, tmp_path):
+    """A proposal that clears every mechanical gate (walk-forward
+    monkeypatched to pass) but fails desk validation (leverage over the
+    desk cap) must not be reported as deployed, and must not leave a
+    partial commit behind.
+
+    store.specs.deploy_as_challenger does NOT raise on a desk-validation
+    failure -- it commits a status='rejected' spec row and returns
+    normally, and that commit is the only commit in the atomic sequence.
+    This guards _deploy_revision_atomically's pre-flight validate_spec
+    check, which must catch this BEFORE any DB write -- a post-hoc rollback
+    after deploy_as_challenger's own commit cannot undo it."""
+    _setup_agent(conn)
+    _deploy_initial_spec(conn)
+    _insert_trades(conn, 35)
+
+    monkeypatch.setattr(
+        reflection_module, "run_walk_forward",
+        lambda *a, **k: _passing_wf_report(),
+    )
+
+    over_leverage_yaml = yaml.dump(
+        {
+            "agent_id": AGENT_ID,
+            "spec_version": 2,
+            "thesis_version": 1,
+            "universe": {"include": ["SOL-PERP"]},
+            "regime_filter": {"exclude": []},
+            "entry": {
+                "direction": "long",
+                "confidence_threshold": 0.7,
+                "scale_threshold": 0.5,
+                "evidence": [
+                    {
+                        "name": "funding_signal",
+                        "feature": "funding_zscore",
+                        "thresholds": [
+                            {"op": ">", "value": -1.0, "weight": 0.7},
+                            {"op": "else", "weight": 0.0},
+                        ],
+                        "missing": "veto",
+                    }
+                ],
+                "secondary_evidence": [],
+            },
+            "exit": {"stop_loss_pct": 0.03, "take_profit_pct": 0.06, "max_hold_hours": 24},
+            "position": {"leverage": 99, "position_size_pct": 0.10},  # over desk cap (10x)
+        },
+        default_flow_style=False,
+    )
+
+    llm = _make_llm(_DIAGNOSE_RESPONSE, over_leverage_yaml, "No critical flaws found.")
+    before_thesis_version = get_agent(conn, AGENT_ID)["current_thesis_version"]
+
+    config = {
+        "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+        "ledger_dir": str(tmp_path / "ledger"),
+    }
+    result = run_reflection(conn, AGENT_ID, config, llm)
+
+    assert result.deployed is False
+    assert result.blocked_by_gate == "desk_validation"
+    assert result.rejection_reason is not None
+    assert "leverage" in result.rejection_reason.lower()
+
+    # No partial commit: thesis version untouched, no theses row, no thesis
+    # file, no challenger spec.
+    assert get_agent(conn, AGENT_ID)["current_thesis_version"] == before_thesis_version
+    assert conn.execute(
+        "SELECT COUNT(*) FROM theses WHERE agent_id = ?", (AGENT_ID,),
+    ).fetchone()[0] == 0
+    thesis_path = reflection_module._THESES_DIR / f"{AGENT_ID}_v{before_thesis_version + 1}.md"
+    assert not thesis_path.exists()
+    assert get_challenger_spec(conn, AGENT_ID) is None
