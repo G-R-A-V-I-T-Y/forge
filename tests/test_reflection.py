@@ -168,11 +168,23 @@ def _valid_spec_yaml(version: int = 1) -> str:
     )
 
 
+#: Stage 1 (Diagnose) is plain text, unparsed -- any non-empty string works.
+_DIAGNOSE_RESPONSE = (
+    "What's working: funding_zscore entries perform well in trending regimes. "
+    "What's not: none flagged with this sample size. "
+    "Recommended changes: none at this time."
+)
+
+
 def _make_llm(*responses):
-    """Create a callable that returns the given responses in order."""
+    """Create a callable that returns the given responses in order.
+
+    Matches the reflection transport contract: ``llm_fn(system_prompt,
+    user_prompt) -> str`` (see llm/reflection_client.py::complete).
+    """
     it = iter(responses)
 
-    def _fn(prompt: str) -> str:
+    def _fn(system_prompt: str, user_prompt: str) -> str:
         return next(it)
 
     return _fn
@@ -527,9 +539,11 @@ def test_pattern_persistence(conn):
         t = _trade(days_ago=0)
         insert_trade(conn, t)
 
-    # LLM returns a valid spec YAML
-    llm = _make_llm(_valid_spec_yaml(version=2), "No critical flaws found.")
-    config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    # LLM returns: diagnose text, then a valid spec YAML, then no critical flaws
+    llm = _make_llm(
+        _DIAGNOSE_RESPONSE, _valid_spec_yaml(version=2), "No critical flaws found.",
+    )
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     # Should be blocked by pattern_persistence
@@ -544,12 +558,13 @@ def test_anti_overfit_adversarial_pass(conn):
     _insert_trades(conn, 25)
     _deploy_initial_spec(conn)
 
-    # LLM: first call returns valid spec, second call (adversarial) finds flaws
+    # LLM: diagnose, then valid spec, then adversarial call finds flaws
     llm = _make_llm(
+        _DIAGNOSE_RESPONSE,
         _valid_spec_yaml(version=2),
         "CRITICAL: The proposed evidence terms are completely overfit.\n- Overfit to noise",
     )
-    config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     assert result.triggered is True
@@ -615,12 +630,13 @@ class TestEndToEndReflection:
         _deploy_initial_spec(conn)
         _insert_trades(conn, 35)
 
-        # LLM: first call → valid YAML, second call → no critical flaws
+        # LLM: diagnose, then valid YAML, then no critical flaws
         llm = _make_llm(
+            _DIAGNOSE_RESPONSE,
             _valid_spec_yaml(version=2),
             "No critical flaws found. Minor concern: consider tightening the SL.",
         )
-        config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
         result = run_reflection(conn, AGENT_ID, config, llm)
 
         assert result.triggered is True
@@ -639,20 +655,23 @@ class TestEndToEndReflection:
         assert deployed["spec_version"] == 2
 
     def test_llm_parse_failure_returns_error(self, conn):
-        """When the LLM returns unparseable YAML, triggered but not deployed."""
+        """When the LLM transport is exhausted/raises mid-pipeline (Stage 1
+        Diagnose consumes the only queued response, then Stage 2 Propose
+        hits the mock's StopIteration), reflection is triggered but
+        gracefully rejected -- the exception must not escape run_reflection."""
         _setup_agent(conn)
         _insert_trades(conn, 25)
         _deploy_initial_spec(conn)
 
         llm = _make_llm("I don't want to output YAML. Here's a plain text analysis instead.")
-        config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
         result = run_reflection(conn, AGENT_ID, config, llm)
 
         assert result.triggered is True
         assert result.deployed is False
         assert result.spec_version is None
         assert result.rejection_reason is not None
-        assert "parse" in result.rejection_reason.lower()
+        assert "llm transport failed" in result.rejection_reason.lower()
 
     def test_zero_evidence_guard_rejects_empty_spec(self, conn):
         """R12 Latch 2: reflection rejects a spec with zero evidence terms
@@ -691,10 +710,11 @@ class TestEndToEndReflection:
         )
 
         llm = _make_llm(
+            _DIAGNOSE_RESPONSE,
             empty_evidence_yaml,
             "No critical flaws found.",  # adversarial pass — won't be reached
         )
-        config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
         result = run_reflection(conn, AGENT_ID, config, llm)
 
         assert result.triggered is True  # LLM was called, spec was parsed
@@ -756,10 +776,11 @@ def test_adversarial_empty_string(conn):
     _insert_trades(conn, 35)
 
     llm = _make_llm(
+        _DIAGNOSE_RESPONSE,
         _valid_spec_yaml(version=2),
         "",  # Empty adversarial response
     )
-    config = {"desk_config": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+    config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
     result = run_reflection(conn, AGENT_ID, config, llm)
 
     assert result.triggered is True

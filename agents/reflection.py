@@ -6,6 +6,7 @@ validates through anti-overfit code gates, and deploys via
 store.specs.deploy_spec() if all gates pass.
 
 M11 feature: see docs/FORGE_PROPOSAL.md for the full design.
+M10 feature: hypothesis registry for challenger trial falsification.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typing import Any, Callable
 
 import yaml
 
+from agents.dossier import build_dossier
 from backtest.dsl import EvidenceTerm, Spec, Threshold
 from store.db import get_agent, get_trades
 from store.specs import deploy_spec, get_active_spec, get_spec_history
@@ -103,6 +105,19 @@ position:
   position_size_pct: 0.10
 """
 
+# System prompts for the dedicated reflection transport (llm/reflection_client.py),
+# which takes (system_prompt, user_prompt) -- raw text in, raw text out, no
+# decision-schema coercion. See M9 criterion 1+2.
+_REFLECTION_SYSTEM_PROMPT = (
+    "You are a trading-strategy reflection engine. Analyze the evidence "
+    "provided and respond precisely to the stage instructions in the "
+    "user prompt."
+)
+_ADVERSARIAL_SYSTEM_PROMPT = (
+    "You are a skeptical trading strategist performing an adversarial "
+    "review of a proposed strategy revision."
+)
+
 
 # ---------------------------------------------------------------------------
 # Public API — main entry point
@@ -113,18 +128,23 @@ def run_reflection(
     conn,
     agent_id: str,
     config: dict,
-    llm_fn: Callable[[str], str],
+    llm_fn: Callable[[str, str], str],
 ) -> ReflectionResult:
-    """Full reflection cycle for one agent.
+    """Full reflection cycle for one agent — M10 three-stage pipeline.
 
-    Steps
-    -----
-    1. Check all anti-overfit gates — skip if any blocks.
-    2. Build reflection prompt with trade bank, decisions, backtest results.
-    3. Call LLM → get revised thesis + spec YAML.
-    4. Run adversarial second pass against the revised spec.
-    5. Run holdout-split / pattern-persistence / cross-agent gates.
-    6. If gates pass → ``deploy_spec()``.
+    Stages
+    ------
+    1. **Diagnose**: Build an evidence dossier from the agent's trade history,
+       calibration curve, regret decisions, and regime breakdown, then call
+       the LLM to produce a structured diagnosis (what's working, what's not).
+    2. **Propose**: Based on the diagnosis, call the LLM to generate a revised
+       strategy spec (YAML).
+    3. **Validate**: Run all existing anti-overfit gates (adversarial pass,
+       holdout split, cross-agent, pattern persistence, walk-forward) against
+       the proposed spec. If all gates pass → ``deploy_spec()``.
+
+    Falls back to the legacy single-call pipeline when the dossier builder
+    cannot produce a dossier (missing ledger data, no trades, etc.).
     """
     gates_passed: list[str] = []
 
@@ -164,18 +184,74 @@ def run_reflection(
     trades = get_trades(conn, agent_id, limit=500)
     decisions = _get_decisions(conn, agent_id, limit=100)
 
-    # Build reflection prompt & call LLM
-    prompt = build_reflection_prompt(
-        agent_id, trades, decisions, {}, current_spec,
-    )
-    llm_response = llm_fn(prompt)
+    # ------------------------------------------------------------------
+    # Stage 1: Diagnose — build dossier + call LLM for analysis
+    # ------------------------------------------------------------------
+    dossier = None
+    diagnosis = ""
+    try:
+        ledger_dir = config.get("ledger_dir", "ledger")
+        dossier = build_dossier(conn, agent_id, ledger_dir)
+    except Exception as exc:
+        logger.warning("Dossier build failed for %s: %s — falling back to legacy path", agent_id, exc)
+
+    try:
+        if dossier is not None and dossier.closed_trades:
+            # Three-stage pipeline: Diagnose → Propose → Validate
+            diagnose_prompt = _build_diagnose_prompt(agent_id, dossier)
+            diagnosis = llm_fn(_REFLECTION_SYSTEM_PROMPT, diagnose_prompt)
+            logger.info(
+                "[%s] Stage 1 (Diagnose) complete — %d chars",
+                agent_id, len(diagnosis),
+            )
+
+            # Stage 2: Propose — generate revised spec informed by diagnosis
+            propose_prompt = _build_propose_prompt(
+                agent_id, diagnosis, current_spec, current_version,
+            )
+            llm_response = llm_fn(_REFLECTION_SYSTEM_PROMPT, propose_prompt)
+            logger.info(
+                "[%s] Stage 2 (Propose) complete — %d chars",
+                agent_id, len(llm_response),
+            )
+        else:
+            # Legacy single-call pipeline (fallback)
+            prompt = build_reflection_prompt(
+                agent_id, trades, decisions, {}, current_spec,
+            )
+            llm_response = llm_fn(_REFLECTION_SYSTEM_PROMPT, prompt)
+    except Exception as exc:
+        # A transport failure (network error, exhausted mock, timeout) must
+        # not escape run_reflection as an unhandled exception -- it should
+        # surface as a normal rejected cycle so the scheduler can log it and
+        # move on to the next agent.
+        logger.warning(
+            "[%s] reflection LLM transport failed mid-pipeline: %s", agent_id, exc,
+        )
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=None,
+            spec_version=None,
+            deployed=False,
+            rejection_reason=f"reflection LLM transport failed: {exc}",
+            blocked_by_gate=None,
+            adversarial_flaws=[],
+            gates_passed=gates_passed,
+        )
+
+    # -- Capture the Stage 2 YAML spec before any further LLM calls ----------
+    # The three-stage pipeline reuses ``llm_response`` for Stage 2 output,
+    # but ``adversarial_pass()`` calls ``llm_fn`` again which can overwrite
+    # it (especially in tests where the mock tracks call count).  Save the
+    # YAML text in a dedicated variable so it survives the adversarial pass.
+    propose_yaml = llm_response
 
     # -- Parse revised spec ---------------------------------------------------
-    revised_spec = parse_revised_spec(llm_response, agent_id, current_version + 1)
+    revised_spec = parse_revised_spec(propose_yaml, agent_id, current_version + 1)
     if revised_spec is None:
         return ReflectionResult(
             triggered=True,
-            new_spec_yaml=llm_response,
+            new_spec_yaml=propose_yaml,
             spec_version=None,
             deployed=False,
             rejection_reason="failed to parse revised spec from LLM YAML output",
@@ -186,15 +262,10 @@ def run_reflection(
     gates_passed.append("parse_spec")
 
     # -- Gate: Zero-evidence guard (R12 safety latch) --------------------------
-    # Pre-run safety latch: never deploy a revised spec that has zero evidence
-    # terms.  The LLM can silently produce an all-defaults hollow spec when
-    # the prompt context is thin, and without this guard it would overwrite
-    # the active spec with a trading strategy that has no signal conditions.
-    # This is a partial early landing of R8's deploy guard.
     if not revised_spec.evidence:
         return ReflectionResult(
             triggered=True,
-            new_spec_yaml=llm_response,
+            new_spec_yaml=propose_yaml,
             spec_version=revised_spec.spec_version,
             deployed=False,
             rejection_reason=(
@@ -207,12 +278,31 @@ def run_reflection(
         )
     gates_passed.append("zero_evidence_guard")
 
+    # ------------------------------------------------------------------
+    # Stage 3: Validate — run all anti-overfit gates
+    # ------------------------------------------------------------------
+
     # -- Gate 6: Adversarial pass ---------------------------------------------
-    critical_flaw, flaws = adversarial_pass(llm_response, revised_spec, llm_fn)
+    try:
+        critical_flaw, flaws = adversarial_pass(propose_yaml, revised_spec, llm_fn)
+    except Exception as exc:
+        logger.warning(
+            "[%s] adversarial pass LLM transport failed: %s", agent_id, exc,
+        )
+        return ReflectionResult(
+            triggered=True,
+            new_spec_yaml=propose_yaml,
+            spec_version=revised_spec.spec_version,
+            deployed=False,
+            rejection_reason=f"reflection LLM transport failed: {exc}",
+            blocked_by_gate=None,
+            adversarial_flaws=[],
+            gates_passed=gates_passed,
+        )
     if critical_flaw:
         return ReflectionResult(
             triggered=True,
-            new_spec_yaml=llm_response,
+            new_spec_yaml=propose_yaml,
             spec_version=revised_spec.spec_version,
             deployed=False,
             rejection_reason="adversarial pass found critical flaws",
@@ -228,7 +318,7 @@ def run_reflection(
         if not passed:
             return ReflectionResult(
                 triggered=True,
-                new_spec_yaml=llm_response,
+                new_spec_yaml=propose_yaml,
                 spec_version=revised_spec.spec_version,
                 deployed=False,
                 rejection_reason=reason,
@@ -249,7 +339,7 @@ def run_reflection(
         if not passed:
             return ReflectionResult(
                 triggered=True,
-                new_spec_yaml=llm_response,
+                new_spec_yaml=propose_yaml,
                 spec_version=revised_spec.spec_version,
                 deployed=False,
                 rejection_reason=reason,
@@ -266,7 +356,7 @@ def run_reflection(
         if not passed:
             return ReflectionResult(
                 triggered=True,
-                new_spec_yaml=llm_response,
+                new_spec_yaml=propose_yaml,
                 spec_version=revised_spec.spec_version,
                 deployed=False,
                 rejection_reason=reason,
@@ -287,7 +377,7 @@ def run_reflection(
             if wf_report.deflated_sharpe <= 0:
                 return ReflectionResult(
                     triggered=True,
-                    new_spec_yaml=llm_response,
+                    new_spec_yaml=propose_yaml,
                     spec_version=revised_spec.spec_version,
                     deployed=False,
                     rejection_reason=(
@@ -303,13 +393,17 @@ def run_reflection(
             logger.warning("Walk-forward backtest skipped (%s)", exc)
 
     # -- All gates passed → deploy --------------------------------------------
+    # config["desk"] is the standing convention (see CLAUDE.md "Config
+    # convention"); config.get("desk") (not "desk_config", which is not a
+    # real key) preserves deploy_spec's own None-means-skip-validation
+    # contract for callers/tests that don't supply a desk config at all.
     deploy_spec(
-        conn, agent_id, revised_spec, config.get("desk_config"),
+        conn, agent_id, revised_spec, config.get("desk"),
     )
 
     return ReflectionResult(
         triggered=True,
-        new_spec_yaml=llm_response,
+        new_spec_yaml=propose_yaml,
         spec_version=revised_spec.spec_version,
         deployed=True,
         rejection_reason=None,
@@ -317,6 +411,101 @@ def run_reflection(
         adversarial_flaws=flaws if flaws else [],
         gates_passed=gates_passed,
     )
+
+
+def _build_diagnose_prompt(agent_id: str, dossier: Any) -> str:
+    """Build the Stage 1 (Diagnose) prompt from the evidence dossier.
+
+    Asks the LLM to analyze what's working, what's not, and what
+    changes are needed — forming a structured diagnosis that feeds
+    into Stage 2 (Propose).
+    """
+    dossier_text = dossier.to_prompt(max_chars=4000)
+    lines = [
+        f"DIAGNOSE — {agent_id}",
+        "=" * 60,
+        "",
+        "You are an evolutionary trading strategist performing a structured",
+        "diagnosis of an agent's recent performance.",
+        "",
+        "Below is the agent's evidence dossier: trade history, calibration",
+        "curve, regret analysis, regime breakdown, and feature-conditioned",
+        "statistics.",
+        "",
+        dossier_text,
+        "",
+        "DIAGNOSIS INSTRUCTIONS",
+        "-" * 40,
+        "Analyze the dossier above and produce a structured diagnosis with:",
+        "  1. What's working — conditions, regimes, or features beating expectations",
+        "  2. What's not working — underperforming conditions, regimes, or features",
+        "  3. Regret analysis — which missed trades would have been most profitable",
+        "  4. Calibration assessment — is the agent overconfident or underconfident?",
+        "  5. Recommended changes — 2-3 specific, measurable changes to the strategy",
+        "",
+        "Output ONLY your diagnosis as plain text. Do NOT include a YAML spec yet.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _build_propose_prompt(
+    agent_id: str,
+    diagnosis: str,
+    current_spec: Spec | None,
+    next_version: int,
+) -> str:
+    """Build the Stage 2 (Propose) prompt informed by the diagnosis.
+
+    The LLM receives the diagnosis from Stage 1 and produces a revised
+    strategy spec in YAML format.
+    """
+    spec_text = ""
+    if current_spec:
+        spec_text = yaml.dump(
+            {
+                "direction": current_spec.direction,
+                "evidence": [e.name for e in current_spec.evidence],
+                "secondary_evidence": [e.name for e in current_spec.secondary_evidence],
+                "stop_loss_pct": current_spec.stop_loss_pct,
+                "take_profit_pct": current_spec.take_profit_pct,
+                "max_hold_hours": current_spec.max_hold_hours,
+                "leverage": current_spec.leverage,
+                "position_size_pct": current_spec.position_size_pct,
+            },
+            default_flow_style=False,
+        ).strip()
+
+    lines = [
+        f"PROPOSE — {agent_id} v{next_version}",
+        "=" * 60,
+        "",
+        "You are an evolutionary trading strategist. Based on the diagnosis",
+        "below, produce a revised strategy spec in YAML format.",
+        "",
+        "DIAGNOSIS",
+        "-" * 40,
+        diagnosis,
+        "",
+    ]
+    if spec_text:
+        lines.extend([
+            "CURRENT SPEC",
+            "-" * 40,
+            spec_text,
+            "",
+        ])
+    lines.extend([
+        "INSTRUCTIONS",
+        "-" * 40,
+        "Output ONLY a revised strategy spec in the following YAML format:",
+        "",
+        _SPEC_TEMPLATE.strip(),
+        "",
+        "Focus on: adjusting evidence terms and risk parameters based on",
+        "the diagnosis above. Include at least one evidence term.",
+    ])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +665,7 @@ def check_pattern_persistence(
 def adversarial_pass(
     revised_spec_yaml: str,
     spec: Spec,
-    llm_fn: Callable[[str], str],
+    llm_fn: Callable[[str, str], str],
 ) -> tuple[bool, list[str]]:
     """Gate 6: Second LLM call plays devil's advocate.
 
@@ -485,8 +674,6 @@ def adversarial_pass(
     evidence_names = [e.name for e in spec.evidence]
 
     prompt = (
-        "You are a skeptical trading strategist reviewing a proposed strategy"
-        " revision.\n\n"
         f"Proposed spec:\n"
         f"  Direction: {spec.direction}\n"
         f"  Evidence: {evidence_names}\n"
@@ -499,7 +686,7 @@ def adversarial_pass(
         "Otherwise list minor concerns or say 'No critical flaws found.'"
     )
 
-    response = llm_fn(prompt)
+    response = llm_fn(_ADVERSARIAL_SYSTEM_PROMPT, prompt)
     flaws: list[str] = []
 
     if not response:
@@ -856,3 +1043,287 @@ def compute_calibration_curve(
             },
         )
     return results
+
+
+# ---------------------------------------------------------------------------
+# M10: Hypothesis registry
+# ---------------------------------------------------------------------------
+
+
+def register_hypotheses(
+    conn,
+    agent_id: str,
+    reflection_id: int | None,
+    hypotheses: list[dict],
+) -> list[int]:
+    """Insert falsifiable hypotheses produced by a reflection cycle.
+
+    Each hypothesis dict should contain at minimum ``claim`` and
+    ``predicted_effect``.  Optional keys: ``feature``, ``direction``,
+    ``regime_context``, ``falsification_condition``.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    agent_id:
+        Agent identifier.
+    reflection_id:
+        The ``reflections.id`` that produced these hypotheses, or ``None``
+        for ad-hoc registration.
+    hypotheses:
+        List of hypothesis dicts.
+
+    Returns
+    -------
+    list[int]
+        Row IDs of the inserted hypotheses.
+    """
+    if not hypotheses:
+        return []
+
+    timestamp = _now()
+    ids: list[int] = []
+    for h in hypotheses:
+        cursor = conn.execute(
+            """INSERT INTO hypotheses
+                   (agent_id, reflection_id, claim, feature, direction,
+                    regime_context, predicted_effect, falsification_condition,
+                    status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)""",
+            (
+                agent_id,
+                reflection_id,
+                h.get("claim", ""),
+                h.get("feature"),
+                h.get("direction"),
+                h.get("regime_context"),
+                h.get("predicted_effect", ""),
+                h.get("falsification_condition"),
+                timestamp,
+            ),
+        )
+        ids.append(cursor.lastrowid)
+    conn.commit()
+    return ids
+
+
+def resolve_hypotheses(
+    conn,
+    reflection_id: int,
+    challenger_result: dict,
+) -> int:
+    """Update hypothesis statuses based on challenger trial outcome.
+
+    Hypotheses linked to *reflection_id* that are in ``'proposed'`` or
+    ``'challenger'`` status are resolved:
+
+    - If the challenger verdict is ``'promoted'``, hypotheses are marked
+      ``'validated'``.
+    - If the challenger verdict is ``'rejected'``, hypotheses are marked
+      ``'falsified'``.
+    - If the challenger had zero logged decisions (``'no_challenger'``),
+      hypotheses are marked ``'inconclusive'``.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    reflection_id:
+        The reflection cycle whose hypotheses to resolve.
+    challenger_result:
+        Output from :func:`store.specs.resolve_challenger`.
+
+    Returns
+    -------
+    int
+        Number of hypotheses resolved.
+    """
+    verdict = challenger_result.get("verdict", "no_challenger")
+    status_map = {
+        "promoted": "validated",
+        "rejected": "falsified",
+        "no_challenger": "inconclusive",
+    }
+    new_status = status_map.get(verdict, "inconclusive")
+
+    # Only resolve hypotheses still in a pre-resolution state.
+    cursor = conn.execute(
+        """UPDATE hypotheses
+           SET status = ?, resolved_at = ?
+           WHERE reflection_id = ?
+             AND status IN ('proposed', 'challenger')""",
+        (new_status, _now(), reflection_id),
+    )
+    conn.commit()
+    return cursor.rowcount
+
+
+def get_agent_hypothesis_history(conn, agent_id: str) -> list[dict]:
+    """Return all hypotheses for *agent_id*, newest first.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    agent_id:
+        Agent identifier.
+
+    Returns
+    -------
+    list[dict]
+        Hypothesis rows as dicts.
+    """
+    rows = conn.execute(
+        """SELECT id, agent_id, reflection_id, claim, feature, direction,
+                  regime_context, predicted_effect, falsification_condition,
+                  status, effect_observed, created_at, resolved_at
+           FROM hypotheses
+           WHERE agent_id = ?
+           ORDER BY created_at DESC""",
+        (agent_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_hypothesis_digest(conn, limit: int = 10) -> str:
+    """Return a formatted summary of the most recent hypotheses across agents.
+
+    Designed for injection into the agent dossier or web UI summary panels.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    limit:
+        Maximum number of hypotheses to include.
+
+    Returns
+    -------
+    str
+        Human-readable multi-line summary.
+    """
+    rows = conn.execute(
+        """SELECT agent_id, claim, status, feature, direction, created_at
+           FROM hypotheses
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    if not rows:
+        return "No hypotheses registered."
+
+    lines = ["HYPOTHESIS DIGEST", "=" * 40]
+    for r in rows:
+        status_tag = r["status"].upper()
+        feature_note = f" [{r['feature']}]" if r["feature"] else ""
+        dir_note = f" ({r['direction']})" if r["direction"] else ""
+        lines.append(
+            f"  [{status_tag}] {r['agent_id']}: {r['claim']}"
+            f"{feature_note}{dir_note}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# M10: Challenger resolution scheduler
+# ---------------------------------------------------------------------------
+
+
+def check_challenger_resolution(
+    conn,
+    agent_id: str,
+    desk_config: dict,
+) -> dict:
+    """Check whether the challenger trial for *agent_id* has enough data and
+    resolve it if so.
+
+    This is the entry point for the APScheduler job that periodically
+    evaluates challenger trials.  It reads thresholds from *desk_config*:
+
+    - ``challenger_min_decisions`` (default 20): minimum number of shadow
+      decisions the challenger must have logged before resolution.
+    - ``challenger_max_days`` (default 7): maximum trial duration in days;
+      the challenger is force-resolved when this elapses even if the
+      decision count is below the threshold.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    agent_id:
+        Agent identifier.
+    desk_config:
+        Desk configuration dict (``config["desk"]``).
+
+    Returns
+    -------
+    dict
+        ``{"resolved": bool, ...}`` — includes the full output of
+        :func:`store.specs.resolve_challenger` when resolution ran, or
+        ``{"resolved": False, "reason": str}`` when the trial is still
+        in progress.
+    """
+    from store.specs import get_challenger_spec, resolve_challenger  # noqa: PLC0415
+
+    challenger = get_challenger_spec(conn, agent_id)
+    if challenger is None:
+        return {"resolved": False, "reason": "no active challenger"}
+
+    min_decisions = desk_config.get("challenger_min_decisions", 20)
+    max_days = desk_config.get("challenger_max_days", 7)
+
+    # Count logged challenger decisions.
+    row = conn.execute(
+        """SELECT COUNT(*) FROM decisions
+           WHERE agent_id = ? AND decision_details_json IS NOT NULL""",
+        (agent_id,),
+    ).fetchone()
+    total_decisions = row[0] if row else 0
+
+    challenger_decisions = 0
+    all_rows = conn.execute(
+        """SELECT decision_details_json, timestamp FROM decisions
+           WHERE agent_id = ? AND decision_details_json IS NOT NULL
+           ORDER BY timestamp ASC""",
+        (agent_id,),
+    ).fetchall()
+
+    deployed_at: datetime | None = None
+    for dr in all_rows:
+        try:
+            details = json.loads(dr["decision_details_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if details.get("challenger_spec_version") == challenger.spec_version:
+            challenger_decisions += 1
+            if deployed_at is None:
+                try:
+                    deployed_at = datetime.fromisoformat(
+                        dr["timestamp"].replace("Z", "+00:00"),
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+    # Check time-based threshold.
+    now = datetime.now(timezone.utc)
+    days_elapsed = 0.0
+    if deployed_at is not None:
+        days_elapsed = (now - deployed_at).days
+
+    # Resolve when EITHER threshold is met.
+    if challenger_decisions >= min_decisions or days_elapsed >= max_days:
+        result = resolve_challenger(conn, agent_id)
+        result["resolved"] = True
+        result["challenger_decisions_count"] = challenger_decisions
+        result["days_elapsed"] = round(days_elapsed, 1)
+        return result
+
+    return {
+        "resolved": False,
+        "reason": (
+            f"trial in progress: {challenger_decisions}/{min_decisions} decisions, "
+            f"{days_elapsed:.0f}/{max_days} days"
+        ),
+    }

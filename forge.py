@@ -282,6 +282,17 @@ async def main():
     web_app.state.config = config
     web_app.state.llama_server = llama_server
 
+    # Expose the reflection transport so manual trigger endpoints
+    # (trigger-reflection, trigger-all-reflections) can invoke it from the
+    # web layer. Per M9 criterion 2, reflection must NEVER go through
+    # model_chain.decide — that transport validates every response as a
+    # trade decision (action ∈ enter/wait/close) and silently rejects
+    # reflection output (spec YAML, diagnosis text) by construction.
+    # trigger-evaluation does not use state.llm_fn at all (it calls
+    # meta.controller directly).
+    from llm import reflection_client
+    web_app.state.llm_fn = reflection_client.complete
+
     # Start the local llama-server if configured.
     local_settings = load_settings(conn)
     if local_settings.get("spawn_on_startup"):
@@ -496,22 +507,14 @@ async def main():
 
                     logger.info("Reflection due for agent %s — starting cycle", agent_id)
 
-                    # Build an llm_fn closure using the model chain.
-                    # The reflection pipeline calls llm_fn(prompt) where
-                    # prompt is a combined system + decision message.
-                    def _llm_fn(prompt: str, _aid: str = agent_id) -> str:
-                        from llm.model_chain import decide as mc_decide
-                        result, _model_name = mc_decide(
-                            system_prompt="You are a trading strategy reflection engine.",
-                            decision_prompt=prompt,
-                            config=config,
-                            agent_id=_aid,
-                        )
-                        return json.dumps(result)
-
+                    # Use the reflection_client transport that returns raw text
+                    # with NO decision-schema validation (mc_decide was rejecting
+                    # every reflection by construction — see defect D1 in
+                    # docs/STRATEGIC_ASSESSMENT_M9_M10.md).
+                    from llm.reflection_client import complete as reflection_complete
                     try:
                         from meta.reflection_scheduler import run_reflection_cycle as _run_reflection
-                        _run_reflection(conn, agent_id, config, _llm_fn)
+                        _run_reflection(conn, agent_id, config, reflection_complete)
                     except Exception as exc:
                         logger.error(
                             "Reflection failed for %s: %s", agent_id, exc, exc_info=True,
