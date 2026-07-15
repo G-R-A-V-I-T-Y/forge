@@ -37,6 +37,11 @@ EVENT_BLACKOUT_HOURS = 2
 # table needed; only the latest memo is required by downstream readers.
 REGIME_MEMO_SETTINGS_KEY = "risk_officer_latest_regime_memo"
 
+# Reason prefix identifying entry_disables rows authored by the
+# gross-exposure throttle. _reconcile_throttle uses it to recognise its own
+# rows across cycles (idempotent disable, restore-when-under-threshold).
+THROTTLE_REASON_PREFIX = "gross exposure throttle"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -298,6 +303,34 @@ class RiskOfficer:
             remaining_total -= notional
         return to_disable
 
+    def _reconcile_throttle(self, throttled: list[str], desk_cfg: dict[str, Any]) -> None:
+        """Idempotently sync entry_disables with the current throttle set:
+        disable newly-throttled agents (once — repeated cycles over the
+        limit must not stack duplicate rows), and restore agents the
+        throttle no longer needs once exposure falls back under the
+        threshold. Restoring is safe by construction: enable_entry can
+        only lift the officer's own disables (validator-enforced), never
+        a human-set one.
+        """
+        open_rows = self.conn.execute(
+            """SELECT DISTINCT agent_id FROM entry_disables
+               WHERE enabled_at IS NULL AND disabled_by = 'risk_officer'
+                 AND reason LIKE ?""",
+            (THROTTLE_REASON_PREFIX + "%",),
+        ).fetchall()
+        currently_disabled = {row["agent_id"] for row in open_rows}
+
+        for agent_id in throttled:
+            if agent_id not in currently_disabled:
+                self.disable_entry(
+                    agent_id,
+                    f"{THROTTLE_REASON_PREFIX}: desk exposure exceeds "
+                    f"{desk_cfg['max_gross_exposure_mult']}x equity",
+                )
+
+        for agent_id in sorted(currently_disabled - set(throttled)):
+            self.enable_entry(agent_id)
+
     def event_blackout_active(self, now: datetime | None = None) -> dict[str, Any] | None:
         """Criterion (c): desk-wide blackout within EVENT_BLACKOUT_HOURS
         before any desk.event_calendar entry. Returns the triggering event
@@ -496,22 +529,21 @@ class RiskOfficer:
             "agents": {},
         }
 
-        if "desk" in self.config:
-            report["event_blackout"] = self.event_blackout_active()
+        # config["desk"] is required — per the repo config convention a
+        # missing desk block must fail loudly here, never silently skip
+        # the throttle/blackout/memo protections.
+        desk_cfg = self.config["desk"]
 
-            throttled = self.gross_exposure_throttle()
-            report["gross_exposure_throttled_agents"] = throttled
-            for agent_id in throttled:
-                self.disable_entry(
-                    agent_id,
-                    f"gross exposure throttle: desk exposure exceeds "
-                    f"{self.config['desk']['max_gross_exposure_mult']}x equity",
-                )
+        report["event_blackout"] = self.event_blackout_active()
 
-            memo = self.build_regime_memo()
-            if memo is not None:
-                self.persist_regime_memo(memo)
-                report["regime_memo"] = memo
+        throttled = self.gross_exposure_throttle()
+        report["gross_exposure_throttled_agents"] = throttled
+        self._reconcile_throttle(throttled, desk_cfg)
+
+        memo = self.build_regime_memo()
+        if memo is not None:
+            self.persist_regime_memo(memo)
+            report["regime_memo"] = memo
 
         # Check each active/rookie agent
         rows = self.conn.execute(
@@ -530,8 +562,14 @@ class RiskOfficer:
                 "entry_gate_open": self.is_entry_gate_open(agent_id),
             }
 
-            if not agent_report["entry_gate_open"] and status not in ("suspended", "terminated"):
-                self.disable_entry(agent_id, "Entry blocked by risk check")
+            # NOTE: a closed gate is deliberately NOT materialized into an
+            # entry_disables row here. is_entry_gate_open() is the live
+            # composite check (kill switch, blackout, disables, per-agent
+            # limits) consumed at decision time; persisting its transient
+            # components (a 2h blackout, a daily-loss day) would outlive
+            # the condition and freeze agents permanently. Only the
+            # gross-exposure throttle persists rows, and it reconciles
+            # them each cycle (_reconcile_throttle).
 
             report["agents"][agent_id] = agent_report
 

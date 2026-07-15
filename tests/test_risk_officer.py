@@ -120,6 +120,101 @@ def test_gross_exposure_throttle_no_action_under_threshold(conn):
     assert officer.gross_exposure_throttle() == []
 
 
+def test_throttle_idempotent_across_cycles(conn):
+    """Repeated run_cycle calls while over-exposed must not stack duplicate
+    entry_disables rows — one open row per throttled agent, total."""
+    _seed_agent_with_position(conn, "agent_a", balance=1000, notional=15000)
+    _seed_agent_with_position(conn, "agent_b", balance=1000, notional=500)
+    officer = RiskOfficer(conn, _config())
+
+    officer.run_cycle()
+    officer.run_cycle()
+    officer.run_cycle()
+
+    rows = conn.execute(
+        """SELECT agent_id, COUNT(*) AS n FROM entry_disables
+           WHERE enabled_at IS NULL GROUP BY agent_id"""
+    ).fetchall()
+    counts = {r["agent_id"]: r["n"] for r in rows}
+    assert counts == {"agent_a": 1}
+
+
+def test_throttle_reenables_when_exposure_falls(conn):
+    """Once desk exposure falls back under the threshold, the officer must
+    restore the entry gates it closed (restore-to-baseline, not add-risk:
+    it only ever lifts its own disables)."""
+    _seed_agent_with_position(conn, "agent_a", balance=1000, notional=15000)
+    _seed_agent_with_position(conn, "agent_b", balance=1000, notional=500)
+    officer = RiskOfficer(conn, _config())
+
+    report = officer.run_cycle()
+    assert report["gross_exposure_throttled_agents"] == ["agent_a"]
+    assert officer.is_entry_gate_open("agent_a") is False
+
+    # Position closes; exposure back under 2x equity.
+    conn.execute("DELETE FROM positions WHERE agent_id = 'agent_a'")
+    conn.commit()
+
+    report = officer.run_cycle()
+    assert report["gross_exposure_throttled_agents"] == []
+    assert officer.is_entry_gate_open("agent_a") is True
+
+    # A HUMAN-set disable must survive the officer's reconciliation.
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason) "
+        "VALUES ('agent_b', 'human', '2026-07-10T00:00:00Z', 'human stop')"
+    )
+    conn.commit()
+    officer.run_cycle()
+    human_row = conn.execute(
+        "SELECT 1 FROM entry_disables WHERE agent_id = 'agent_b' AND enabled_at IS NULL"
+    ).fetchone()
+    assert human_row is not None
+
+
+def test_transient_gate_closures_not_materialized(conn):
+    """A desk-wide transient condition (event blackout) must close the live
+    gate WITHOUT writing entry_disables rows — otherwise a 2h blackout
+    would outlive itself and freeze the desk permanently.
+
+    The event is 1h from now so run_cycle really executes INSIDE the
+    blackout window (run_cycle reads the real clock)."""
+    from datetime import timedelta
+
+    _seed_agent_with_position(conn, "agent_a", balance=10000, notional=1000)
+    event_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    config = _config(event_calendar=[
+        {"name": "FOMC", "at": event_at.isoformat().replace("+00:00", "Z")}
+    ])
+    officer = RiskOfficer(conn, config)
+
+    # We really are inside the window right now.
+    assert officer.event_blackout_active() is not None
+    assert officer.is_entry_gate_open("agent_a") is False
+
+    report = officer.run_cycle()
+    assert report["event_blackout"] is not None
+    assert report["agents"]["agent_a"]["entry_gate_open"] is False
+
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM entry_disables WHERE enabled_at IS NULL"
+    ).fetchone()[0]
+    assert rows == 0, "blackout/kill-switch closures must stay dynamic, never persisted"
+
+    after_event = event_at + timedelta(minutes=30)
+    assert officer.is_entry_gate_open("agent_a", now=after_event) is True
+
+
+def test_run_cycle_requires_desk_config(conn):
+    """Per the repo config convention, a truthy config missing the desk
+    block must fail loudly — the throttle/blackout/memo protections must
+    never be skipped silently."""
+    _seed_agent_with_position(conn, "agent_a", balance=10000, notional=1000)
+    officer = RiskOfficer(conn, {"not_desk": {}})
+    with pytest.raises(KeyError):
+        officer.run_cycle()
+
+
 def test_gross_exposure_throttle_requires_desk_config(conn):
     officer = RiskOfficer(conn, {"not_desk": {}})
     with pytest.raises(KeyError):
