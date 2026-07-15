@@ -453,8 +453,12 @@ async def main():
 
     # ------------------------------------------------------------------
     # M9: Risk officer — central risk oversight.
-    # Runs every 5 minutes (tied to heartbeat cadence) to check desk
-    # kill switch, concentration, per-agent limits.
+    # Runs on a 30-min cadence (criterion: "30-60 min cadence") to check
+    # desk kill switch, concentration, per-agent limits, gross-exposure
+    # throttle, event-calendar blackout, and produce the regime memo.
+    # Nothing else in the codebase currently reads entry_disables /
+    # is_entry_gate_open on a tighter, independently-wired cadence, so the
+    # whole cycle moves to 30 min as a unit — see meta/risk_officer.py.
     # ------------------------------------------------------------------
     async def _run_risk_officer_job():
         try:
@@ -468,6 +472,16 @@ async def main():
                         "Risk officer: concentration violators: %s",
                         ", ".join(report["concentration_violators"]),
                     )
+                if report.get("gross_exposure_throttled_agents"):
+                    logger.warning(
+                        "Risk officer: gross exposure throttle disabled entries for: %s",
+                        ", ".join(report["gross_exposure_throttled_agents"]),
+                    )
+                if report.get("event_blackout"):
+                    logger.warning(
+                        "Risk officer: event blackout active (%s) — all entries blocked",
+                        report["event_blackout"].get("name"),
+                    )
             finally:
                 conn.close()
         except Exception:
@@ -475,11 +489,11 @@ async def main():
 
     scheduler.add_job(
         _run_risk_officer_job,
-        trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
+        trigger=IntervalTrigger(minutes=30, timezone=timezone.utc),
         id="risk_officer",
         replace_existing=True,
     )
-    logger.info("Risk officer job scheduled — runs every %ds", heartbeat_interval)
+    logger.info("Risk officer job scheduled — runs every 30 min")
 
     # ------------------------------------------------------------------
     # M9: Reflection scheduler — checks agent eligibility and triggers

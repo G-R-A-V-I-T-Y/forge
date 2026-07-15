@@ -32,6 +32,16 @@ desk:
   heartbeat_path: "data/heartbeat.json"
   taker_fee: 0.00035
   maker_fee: -0.00005
+  max_gross_exposure_mult: 2.0
+  event_calendar:
+    - name: "FOMC"
+      at: "2026-07-29T18:00:00Z"
+    - name: "CPI"
+      at: "2026-08-12T12:30:00Z"
+    - name: "FOMC"
+      at: "2026-09-16T18:00:00Z"
+    - name: "CPI"
+      at: "2026-09-10T12:30:00Z"
 
 # coinalyze:
 #   api_key: "..."              # alternative to COINALYZE_API_KEY env var; heartbeat liq_* fields degrade to null if neither is set
