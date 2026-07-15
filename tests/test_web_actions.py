@@ -13,7 +13,8 @@ Covers all 8 exec endpoints plus the close-position endpoint:
 
 Every exec action requires ``?reason=...`` and each writes an audit_log row.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -59,6 +60,28 @@ def _seed_agent(conn, agent_id=AGENT_ID, status="active") -> None:
 
 def _count_audit_log(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+
+
+def _iso(hours_ago: float = 0) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _seed_closed_trades(conn, agent_id, n, hours_ago=1) -> None:
+    """n closed winning trades, patterned on tests/test_meta_controller.py's
+    _seed_trades -- entry_timestamp is always relative to now() so these
+    fixtures don't age past meta/evaluator.py's zero-trades-in-5-days rule."""
+    ts = _iso(hours_ago)
+    for i in range(n):
+        conn.execute(
+            """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+               leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp)
+               VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+               'closed', 0.01, 100.0, 'win', ?, ?)""",
+            (f"{agent_id}_t{i}", agent_id, ts, ts),
+        )
+    conn.commit()
 
 
 def _assert_missing_reason(r):
@@ -226,6 +249,152 @@ class TestTriggerEvaluation:
         r = _client(conn).post("/api/exec/trigger-evaluation/ghost?reason=test")
         assert r.status_code == 404
         assert "Agent not found" in r.json().get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Trigger all evaluations / trigger all reflections (M9 criterion 3)
+# ---------------------------------------------------------------------------
+
+class TestTriggerAllEvaluations:
+
+    def test_trigger_all_evaluations(self, conn):
+        """POST evaluates every active/rookie agent via meta/controller.py::
+        evaluate_agent(force=True) -- force-bypassing the interval-due check
+        -- and writes one evaluations row per agent that wasn't already due."""
+        _seed_agent(conn, agent_id="alpha_agent", status="active")
+        _seed_agent(conn, agent_id="beta_agent", status="rookie")
+        _seed_agent(conn, agent_id="gamma_agent", status="suspended")  # excluded
+
+        # alpha_agent: 3 closed trades landing AFTER a prior evaluation row,
+        # so trades_since=3 is under the default interval of 30 -- without
+        # force this agent would be skipped as "not due".
+        conn.execute(
+            "INSERT INTO evaluations (agent_id, evaluated_at, trades_evaluated, "
+            "metrics_json, decision, reason) VALUES (?, ?, ?, '{}', 'active', 'seed')",
+            ("alpha_agent", _iso(hours_ago=2), 0),
+        )
+        conn.commit()
+        _seed_closed_trades(conn, "alpha_agent", n=3, hours_ago=1)
+
+        r = _client(conn).post("/api/exec/trigger-all-evaluations?reason=test")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        # alpha_agent: 1 pre-seeded row + 1 new row from the force-bypassed call
+        alpha_evals = conn.execute(
+            "SELECT * FROM evaluations WHERE agent_id = 'alpha_agent' ORDER BY id"
+        ).fetchall()
+        assert len(alpha_evals) == 2, "force=True must bypass the interval-due skip"
+
+        # beta_agent (rookie, no history) gets its first evaluation too
+        beta_evals = conn.execute(
+            "SELECT * FROM evaluations WHERE agent_id = 'beta_agent'"
+        ).fetchall()
+        assert len(beta_evals) == 1
+
+        # gamma_agent (suspended) is outside the active/rookie set
+        gamma_evals = conn.execute(
+            "SELECT * FROM evaluations WHERE agent_id = 'gamma_agent'"
+        ).fetchall()
+        assert len(gamma_evals) == 0
+
+        # Audit trail: one audit_log row per evaluated agent
+        rows = conn.execute(
+            "SELECT agent_id FROM audit_log WHERE action = 'trigger_evaluation' ORDER BY agent_id"
+        ).fetchall()
+        assert [row["agent_id"] for row in rows] == ["alpha_agent", "beta_agent"]
+
+    def test_no_active_or_rookie_agents(self, conn):
+        _seed_agent(conn, status="suspended")
+        r = _client(conn).post("/api/exec/trigger-all-evaluations?reason=test")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["count"] == 0
+
+
+class TestTriggerAllReflections:
+
+    def test_trigger_all_reflections_respects_eligibility(self, conn):
+        """Ineligible agents are skipped with a reason; eligible agents get a
+        reflection run via the transport (app.state.llm_fn)."""
+        _seed_agent(conn, agent_id="eligible_agent", status="active")
+        _seed_agent(conn, agent_id="ineligible_agent", status="active")
+
+        # eligible_agent clears the default trade_count trigger (interval 20)
+        _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1)
+        # ineligible_agent has zero closed trades -> trades_since=0 < 20
+
+        fake_llm = MagicMock(return_value="")
+
+        def _fake_run_reflection(conn, agent_id, config, llm_fn):
+            # Mirrors the real run_reflection/llm_fn contract (Task 1): the
+            # pipeline calls llm_fn(system_prompt, user_prompt) internally.
+            # agents/reflection.py internals are out of scope for this task,
+            # so this stands in for the real pipeline while still exercising
+            # the transport wiring end to end.
+            llm_fn("system prompt", "user prompt")
+            return None
+
+        client = _client(conn)
+        app.state.llm_fn = fake_llm
+
+        with patch("web.app.run_reflection", side_effect=_fake_run_reflection) as mock_run:
+            r = client.post("/api/exec/trigger-all-reflections?reason=test")
+
+        assert r.status_code == 200
+        data = r.json()
+        results = {row["agent_id"]: row for row in data["results"]}
+
+        assert results["eligible_agent"]["status"] == "queued"
+        assert results["ineligible_agent"]["status"] == "skipped"
+        assert "20" in results["ineligible_agent"]["reason"]
+
+        # The transport (fake llm_fn) was exercised only for the eligible agent.
+        assert fake_llm.call_count == 1
+        assert mock_run.call_count == 1
+        assert mock_run.call_args[0][1] == "eligible_agent"
+
+        # Audit trail: only the queued agent gets an audit_log row.
+        rows = conn.execute(
+            "SELECT agent_id FROM audit_log WHERE action = 'trigger_reflection'"
+        ).fetchall()
+        assert [row["agent_id"] for row in rows] == ["eligible_agent"]
+
+    def test_no_llm_fn_returns_503(self, conn):
+        _seed_agent(conn)
+        r = _client(conn).post("/api/exec/trigger-all-reflections?reason=test")
+        assert r.status_code == 503
+
+
+def test_reflect_endpoint_has_llm_fn(conn):
+    """Belt-and-braces companion to tests/test_reflection_client.py::
+    test_scheduler_uses_reflection_transport: with forge's startup wiring in
+    place (app.state.llm_fn = llm.reflection_client.complete, set up the same
+    way forge.py does it), /api/exec/trigger-reflection/{agent_id} must not
+    return 503."""
+    _seed_agent(conn)
+    client = _client(conn)
+
+    from llm import reflection_client
+    app.state.llm_fn = reflection_client.complete
+
+    with patch("web.app.run_reflection") as mock_run:
+        mock_run.return_value = None
+        r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
+
+    assert r.status_code == 200
+    assert r.status_code != 503
+
+    # Source-level belt-and-braces: forge.py's startup literally wires
+    # app.state.llm_fn to reflection_client.complete. Read the source instead
+    # of importing forge.py, which imports apscheduler (not installed in this
+    # Python env -- see CLAUDE.md's Local LLM server notes).
+    forge_source = (Path(__file__).resolve().parents[1] / "forge.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from llm import reflection_client" in forge_source
+    assert "web_app.state.llm_fn = reflection_client.complete" in forge_source
 
 
 # ---------------------------------------------------------------------------

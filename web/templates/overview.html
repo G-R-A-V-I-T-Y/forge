@@ -17,6 +17,7 @@
 <div class="action-bar">
   <button class="btn btn-danger" onclick="openModal('Emergency Stop', 'Suspends ALL agents immediately. This action cannot be undone without manual re-activation.', '/api/exec/emergency-stop', 'POST')">Emergency Stop</button>
   <button class="btn btn-warning" onclick="openModal('Trigger All Evaluations', 'Force an evaluation cycle for every active agent.', '/api/exec/trigger-all-evaluations', 'POST')">Trigger All Evaluations</button>
+  <button class="btn btn-warning" onclick="openModal('Trigger All Reflections', 'Force a thesis reflection cycle for every active agent.', '/api/exec/trigger-all-reflections', 'POST')">Trigger All Reflections</button>
   <span class="badge badge-{{ 'live-data' if exchange_ok else 'stub' }}">{{ data_source }}</span>
 </div>
 
