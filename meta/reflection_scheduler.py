@@ -141,7 +141,7 @@ def run_reflection_cycle(
     conn,
     agent_id: str,
     config: dict,
-    llm_fn: Callable[[str], str],
+    llm_fn: Callable[[str, str], str],
 ) -> dict[str, Any]:
     """Run one reflection cycle for an agent, logging the result.
 

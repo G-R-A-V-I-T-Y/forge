@@ -673,6 +673,29 @@ class TestEndToEndReflection:
         assert result.rejection_reason is not None
         assert "llm transport failed" in result.rejection_reason.lower()
 
+    def test_llm_unparseable_yaml_returns_error(self, conn):
+        """When both LLM stages respond (no transport exhaustion) but Stage 2
+        (Propose) returns YAML that cannot be parsed into a Spec, reflection
+        is triggered and rejected with the parse-failure reason -- NOT the
+        transport-failure reason from test_llm_parse_failure_returns_error."""
+        _setup_agent(conn)
+        _insert_trades(conn, 25)
+        _deploy_initial_spec(conn)
+
+        llm = _make_llm(
+            _DIAGNOSE_RESPONSE,
+            "not valid yaml {{{",
+        )
+        config = {"desk": {"max_leverage": 10, "max_position_size_pct": 0.5}}
+        result = run_reflection(conn, AGENT_ID, config, llm)
+
+        assert result.triggered is True
+        assert result.deployed is False
+        assert result.spec_version is None
+        assert result.rejection_reason is not None
+        assert "failed to parse revised spec" in result.rejection_reason.lower()
+        assert "llm transport failed" not in result.rejection_reason.lower()
+
     def test_zero_evidence_guard_rejects_empty_spec(self, conn):
         """R12 Latch 2: reflection rejects a spec with zero evidence terms
         even when all other gates would pass."""

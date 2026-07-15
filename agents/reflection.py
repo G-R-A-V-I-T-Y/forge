@@ -195,49 +195,64 @@ def run_reflection(
     except Exception as exc:
         logger.warning("Dossier build failed for %s: %s — falling back to legacy path", agent_id, exc)
 
-    try:
-        if dossier is not None and dossier.closed_trades:
-            # Three-stage pipeline: Diagnose → Propose → Validate
-            diagnose_prompt = _build_diagnose_prompt(agent_id, dossier)
-            diagnosis = llm_fn(_REFLECTION_SYSTEM_PROMPT, diagnose_prompt)
-            logger.info(
-                "[%s] Stage 1 (Diagnose) complete — %d chars",
-                agent_id, len(diagnosis),
+    def _call_llm(
+        system_prompt: str, user_prompt: str,
+    ) -> tuple[str | None, ReflectionResult | None]:
+        """Invoke ``llm_fn``, catching only transport failures (network
+        error, exhausted mock, timeout) -- these must not escape
+        run_reflection as an unhandled exception; they should surface as a
+        normal rejected cycle so the scheduler can log it and move on to the
+        next agent. Prompt-building bugs are NOT caught here -- they
+        propagate to the caller so they aren't mislabeled as transport
+        failures.
+        """
+        try:
+            return llm_fn(system_prompt, user_prompt), None
+        except Exception as exc:
+            logger.warning(
+                "[%s] reflection LLM transport failed mid-pipeline: %s", agent_id, exc,
+            )
+            return None, ReflectionResult(
+                triggered=True,
+                new_spec_yaml=None,
+                spec_version=None,
+                deployed=False,
+                rejection_reason=f"reflection LLM transport failed: {exc}",
+                blocked_by_gate=None,
+                adversarial_flaws=[],
+                gates_passed=gates_passed,
             )
 
-            # Stage 2: Propose — generate revised spec informed by diagnosis
-            propose_prompt = _build_propose_prompt(
-                agent_id, diagnosis, current_spec, current_version,
-            )
-            llm_response = llm_fn(_REFLECTION_SYSTEM_PROMPT, propose_prompt)
-            logger.info(
-                "[%s] Stage 2 (Propose) complete — %d chars",
-                agent_id, len(llm_response),
-            )
-        else:
-            # Legacy single-call pipeline (fallback)
-            prompt = build_reflection_prompt(
-                agent_id, trades, decisions, {}, current_spec,
-            )
-            llm_response = llm_fn(_REFLECTION_SYSTEM_PROMPT, prompt)
-    except Exception as exc:
-        # A transport failure (network error, exhausted mock, timeout) must
-        # not escape run_reflection as an unhandled exception -- it should
-        # surface as a normal rejected cycle so the scheduler can log it and
-        # move on to the next agent.
-        logger.warning(
-            "[%s] reflection LLM transport failed mid-pipeline: %s", agent_id, exc,
+    if dossier is not None and dossier.closed_trades:
+        # Three-stage pipeline: Diagnose → Propose → Validate
+        diagnose_prompt = _build_diagnose_prompt(agent_id, dossier)
+        diagnosis, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, diagnose_prompt)
+        if err is not None:
+            return err
+        logger.info(
+            "[%s] Stage 1 (Diagnose) complete — %d chars",
+            agent_id, len(diagnosis),
         )
-        return ReflectionResult(
-            triggered=True,
-            new_spec_yaml=None,
-            spec_version=None,
-            deployed=False,
-            rejection_reason=f"reflection LLM transport failed: {exc}",
-            blocked_by_gate=None,
-            adversarial_flaws=[],
-            gates_passed=gates_passed,
+
+        # Stage 2: Propose — generate revised spec informed by diagnosis
+        propose_prompt = _build_propose_prompt(
+            agent_id, diagnosis, current_spec, current_version,
         )
+        llm_response, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, propose_prompt)
+        if err is not None:
+            return err
+        logger.info(
+            "[%s] Stage 2 (Propose) complete — %d chars",
+            agent_id, len(llm_response),
+        )
+    else:
+        # Legacy single-call pipeline (fallback)
+        prompt = build_reflection_prompt(
+            agent_id, trades, decisions, {}, current_spec,
+        )
+        llm_response, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, prompt)
+        if err is not None:
+            return err
 
     # -- Capture the Stage 2 YAML spec before any further LLM calls ----------
     # The three-stage pipeline reuses ``llm_response`` for Stage 2 output,
