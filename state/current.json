@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-16T05:21:52Z",
+  "generated_at": "2026-07-16T05:26:52Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.011643514659130142,
+      "current_pnl_pct": 0.0129545806803497,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 2476.6935394186567,
       "true_notional": 7430.08061825597,
       "opened_at": "2026-07-15T05:11:19.122559Z",
-      "current_pnl_pct": 0.056363558263421744,
+      "current_pnl_pct": 0.04560686463140498,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260715_051119_ARB_625b"
@@ -195,7 +195,7 @@
       "notional_usd": 6113.268987934088,
       "true_notional": 18339.806963802264,
       "opened_at": "2026-07-15T00:07:11.640638Z",
-      "current_pnl_pct": -0.02648641104918608,
+      "current_pnl_pct": -0.020510855412113872,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "copper_vane_20260715_000711_SOL_16b9"
@@ -213,7 +213,7 @@
       "notional_usd": 3614.48452985326,
       "true_notional": 7228.96905970652,
       "opened_at": "2026-07-14T15:32:26.343247Z",
-      "current_pnl_pct": 0.008459474396125115,
+      "current_pnl_pct": 0.011062390278766354,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260714_153226_BTC_532e"
@@ -231,7 +231,7 @@
       "notional_usd": 2817.0504988165376,
       "true_notional": 5634.100997633075,
       "opened_at": "2026-07-14T16:18:07.104919Z",
-      "current_pnl_pct": -0.0036167488055153787,
+      "current_pnl_pct": -0.006213388630553383,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260714_161807_BTC_edce"
@@ -249,7 +249,7 @@
       "notional_usd": 2314.0057668850136,
       "true_notional": 4628.011533770027,
       "opened_at": "2026-07-15T00:47:48.342067Z",
-      "current_pnl_pct": 0.00024688262461472764,
+      "current_pnl_pct": 0.002839155182940876,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260715_004748_BTC_ec83"
