@@ -426,14 +426,35 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
     incumbent = get_active_spec(conn, agent_id)
     incumbent_version = incumbent.spec_version if incumbent else 0
 
+    # Trial window = the challenger's deployed_at forward. Both sides of the
+    # comparison must be scoped to this window: an unbounded incumbent query
+    # would average confidence over the agent's ENTIRE decision history,
+    # including decisions logged under prior spec versions that predate this
+    # challenger trial entirely (T6 review finding 3).
+    trial_row = conn.execute(
+        """SELECT deployed_at FROM specs
+           WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
+           ORDER BY id DESC LIMIT 1""",
+        (agent_id, challenger.spec_version),
+    ).fetchone()
+    trial_start = trial_row["deployed_at"] if trial_row else None
+
     # Gather challenger trial decisions (logged via decision_loop with
-    # challenger_spec_version in decision_details_json).
-    challenger_rows = conn.execute(
-        """SELECT decision_details_json FROM decisions
-           WHERE agent_id = ? AND decision_details_json IS NOT NULL
-           ORDER BY timestamp ASC""",
-        (agent_id,),
-    ).fetchall()
+    # challenger_spec_version in decision_details_json), scoped to the
+    # trial window on both sides of the comparison.
+    if trial_start is not None:
+        challenger_rows = conn.execute(
+            """SELECT decision_details_json FROM decisions
+               WHERE agent_id = ? AND decision_details_json IS NOT NULL
+                 AND timestamp >= ?
+               ORDER BY timestamp ASC""",
+            (agent_id, trial_start),
+        ).fetchall()
+    else:
+        # No deployed_at on record for this challenger (shouldn't happen in
+        # practice) — fail toward the safer empty-window rather than
+        # silently falling back to the unbounded, unscoped query.
+        challenger_rows = []
 
     challenger_conf_sum = 0.0
     challenger_count = 0

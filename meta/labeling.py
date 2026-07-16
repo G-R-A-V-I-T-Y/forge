@@ -49,6 +49,14 @@ LONGEST_HOURS: int = max(HORIZONS_HOURS.values())
 DEFAULT_SL_PCT: float = 0.02
 DEFAULT_TP_PCT: float = 0.05
 
+#: Max allowed gap (ms) between a horizon's cutoff and the nearest available
+#: candle before that horizon is left unlabeled rather than computed from a
+#: stale candle across a ledger gap. Mirrors
+#: ``scripts/build_training_dataset.py``'s STALENESS_THRESHOLD convention:
+#: 2x the expected 5-minute candle cadence.
+CANDLE_INTERVAL_MS: int = 5 * 60 * 1000
+STALENESS_THRESHOLD_MS: int = CANDLE_INTERVAL_MS * 2
+
 
 # ═════════════════════════════════════════════════════════════════════════
 #  Public API
@@ -302,16 +310,39 @@ def _extract_wait_info(details: dict | None) -> dict | None:
 
 
 def _extract_close_info(decision: dict, conn) -> dict | None:
-    """Extract from a close decision by looking up the most-recently closed trade."""
+    """Extract from a close decision by correlating it to its actual trade.
+
+    ``agents/decision_loop.py``'s close branch logs
+    ``{"position_id": ..., "fill": "<dict repr>"}`` where ``fill`` is
+    ``execute_close()``'s return value and always carries the exact
+    ``trade_id`` this decision closed. That is the only reliable
+    correlation key — picking "the agent's most-recently-closed trade"
+    is wrong whenever the agent has closed more than one trade since,
+    which silently mislabels a historical close decision with a
+    different trade's asset/direction/exit price. When the trade_id
+    can't be recovered (missing/malformed details, or the trade no
+    longer exists), the decision is left unlabeled rather than guessed.
+    """
+    details = None
+    if decision["decision_details_json"]:
+        try:
+            details = json.loads(decision["decision_details_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not details:
+        return None
+
+    fill = _safe_parse_dict(details.get("fill"))
+    trade_id = fill.get("trade_id") if fill else None
+    if not trade_id:
+        return None
+
     row = conn.execute(
         """SELECT asset, direction, exit_price,
                   stop_loss_price, take_profit_price
            FROM trades
-           WHERE agent_id = ? AND status = 'closed'
-             AND exit_timestamp IS NOT NULL
-           ORDER BY exit_timestamp DESC
-           LIMIT 1""",
-        (decision["agent_id"],),
+           WHERE id = ? AND agent_id = ?""",
+        (trade_id, decision["agent_id"]),
     ).fetchone()
     if not row:
         return None
@@ -584,11 +615,18 @@ def _fwd_return_at_cutoff(
     entry_price: float,
     cutoff_ms: float,
 ) -> float | None:
-    """Return the % price change from entry to the candle nearest *cutoff_ms*."""
+    """Return the % price change from entry to the candle nearest *cutoff_ms*.
+
+    Returns ``None`` (label left null) when the nearest candle is farther
+    than ``STALENESS_THRESHOLD_MS`` from the cutoff — a ledger gap spanning
+    the horizon boundary must never be silently bridged with a stale candle.
+    """
     if not horizon_candles or entry_price <= 0:
         return None
 
     best = min(horizon_candles, key=lambda c: abs(c[0] - cutoff_ms))
+    if abs(best[0] - cutoff_ms) > STALENESS_THRESHOLD_MS:
+        return None
     close = best[4]
     return (close - entry_price) / entry_price * 100
 

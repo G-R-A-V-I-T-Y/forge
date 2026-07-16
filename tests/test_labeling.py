@@ -176,6 +176,69 @@ def _insert_enter_decision(
     return cur.lastrowid
 
 
+def _insert_trade(
+    conn: sqlite3.Connection,
+    trade_id: str,
+    agent_id: str,
+    asset: str,
+    direction: str,
+    exit_price: float,
+    exit_dt: datetime,
+    sl_pct: float = 0.02,
+    tp_pct: float = 0.05,
+) -> None:
+    """Insert a closed trade row (minimal columns labeling reads)."""
+    if direction == "long":
+        sl = exit_price * (1 - sl_pct)
+        tp = exit_price * (1 + tp_pct)
+    else:
+        sl = exit_price * (1 + sl_pct)
+        tp = exit_price * (1 - tp_pct)
+
+    conn.execute(
+        """INSERT INTO trades
+           (id, agent_id, asset, direction, entry_price, stop_loss_price,
+            take_profit_price, exit_price, exit_timestamp, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed')""",
+        (
+            trade_id, agent_id, asset, direction, exit_price, sl, tp,
+            exit_price, _ts_iso(exit_dt),
+        ),
+    )
+    conn.commit()
+
+
+def _insert_close_decision(
+    conn: sqlite3.Connection,
+    agent_id: str,
+    dt: datetime,
+    trade_id: str,
+    exit_price: float,
+) -> int:
+    """Insert a close decision with the exact decision_details_json shape
+    agents/decision_loop.py's log_decision() writes for a close action:
+    {"position_id": ..., "fill": "<dict repr of execute_close()'s return>"}.
+    """
+    fill = {
+        "trade_id": trade_id,
+        "exit_price": exit_price,
+        "pnl_pct": 0.0,
+        "pnl_usd": 0.0,
+        "fees_paid": 0.0,
+        "funding_paid": 0.0,
+    }
+    details = {"position_id": f"pos_{trade_id}", "fill": str(fill)}
+
+    cur = conn.execute(
+        """INSERT INTO decisions
+           (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (agent_id, _ts_iso(dt), "close", "agent_close", json.dumps(details)),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
 def _insert_wait_decision(
     conn: sqlite3.Connection,
     agent_id: str,
@@ -559,3 +622,238 @@ class TestExtractInfo:
         assert _extract_wait_info(None) is None
         assert _extract_wait_info({}) is None
         assert _extract_wait_info({"candidate": None}) is None
+
+
+# ── Finding 1: close decisions must correlate to their actual trade ───────
+
+
+class TestExtractCloseInfo:
+    """_extract_close_info must correlate a close decision to the trade it
+    actually closed (via the trade_id embedded in decision_details_json's
+    "fill" field) — never the agent's most-recently-closed trade."""
+
+    def test_extract_close_info_correlates_via_trade_id(self):
+        from meta.labeling import _extract_close_info
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+        now = datetime.now(timezone.utc)
+
+        _insert_trade(conn, "trade_a", "test_agent", "BTC-PERP", "long", 100.0, now)
+        # A second, more-recently-closed trade for the SAME agent on a
+        # DIFFERENT asset/direction — the old "most recently closed" query
+        # would pick this one instead.
+        _insert_trade(
+            conn, "trade_b", "test_agent", "ETH-PERP", "short", 500.0,
+            now + timedelta(hours=2),
+        )
+
+        decision_id = _insert_close_decision(conn, "test_agent", now, "trade_a", 100.0)
+        row = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+
+        info = _extract_close_info(dict(row), conn)
+        assert info is not None
+        assert info["asset"] == "BTC-PERP"
+        assert info["direction"] == "long"
+        assert info["entry_price"] == 100.0
+
+    def test_extract_close_info_missing_fill_is_null(self):
+        """No decision_details_json at all → no correlation possible → None."""
+        from meta.labeling import _extract_close_info
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        cur = conn.execute(
+            """INSERT INTO decisions
+               (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            ("test_agent", _now_iso(), "close", "agent_close", None),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+
+        assert _extract_close_info(dict(row), conn) is None
+
+    def test_extract_close_info_unknown_trade_id_is_null(self):
+        """trade_id present in details but no matching trade row → None,
+        never guessed from a different trade."""
+        from meta.labeling import _extract_close_info
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+        now = datetime.now(timezone.utc)
+
+        # Some OTHER closed trade exists, but not the one referenced.
+        _insert_trade(conn, "trade_other", "test_agent", "SOL-PERP", "long", 10.0, now)
+
+        decision_id = _insert_close_decision(
+            conn, "test_agent", now, "trade_does_not_exist", 10.0
+        )
+        row = conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+
+        assert _extract_close_info(dict(row), conn) is None
+
+
+class TestLabelCloseDecision:
+    """End-to-end run_labeling_job coverage for close-action decisions —
+    there was previously NO test exercising a close decision at all."""
+
+    def test_earlier_close_decision_labeled_from_correct_trade(self):
+        """Regression for T6 review finding 1: an agent with MULTIPLE closed
+        trades on different assets/directions must have its earlier close
+        decision labeled from ITS OWN trade, not the agent's latest closed
+        trade.
+
+        trade_b (ETH-PERP) closes AFTER trade_a (BTC-PERP) but the decision
+        under test is trade_a's close. Only BTC-PERP candles are written to
+        the ledger, so the old "most-recently-closed trade" query (which
+        would resolve to trade_b/ETH-PERP) finds no candles and labels
+        nothing (total_labeled == 0). The fix must correlate to trade_a and
+        label successfully.
+        """
+        from meta.labeling import LONGEST_HOURS, run_labeling_job
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        now = datetime.now(timezone.utc)
+        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
+        exit_price = 100.0
+
+        _insert_trade(
+            conn, "trade_a", "test_agent", "BTC-PERP", "long", exit_price, dec_ts,
+        )
+        # Closed later than trade_a, different asset/direction — this is
+        # what the buggy "most recently closed" query would return.
+        _insert_trade(
+            conn, "trade_b", "test_agent", "ETH-PERP", "short", 500.0,
+            dec_ts + timedelta(hours=2),
+        )
+
+        _insert_close_decision(conn, "test_agent", dec_ts, "trade_a", exit_price)
+
+        start_ms = int(dec_ts.timestamp() * 1000)
+        candles = _make_candles(start_ms, 360, base_price=exit_price, drift=0.001)
+        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            # Only BTC-PERP (trade_a's asset) has candle data.
+            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
+            result = run_labeling_job(conn, td)
+
+        assert result["total_processed"] == 1
+        assert result["total_labeled"] == 3, (
+            "close decision must be labeled from trade_a (BTC-PERP, which "
+            "has candle data), not trade_b (ETH-PERP, which has none)"
+        )
+        assert result["errors"] == 0
+
+        labels = conn.execute(
+            "SELECT horizon FROM decision_labels ORDER BY horizon"
+        ).fetchall()
+        assert {r[0] for r in labels} == {"1h", "4h", "24h"}
+
+    def test_close_decision_without_correlatable_trade_left_unlabeled(self):
+        """A close decision whose fill can't be correlated to a trade row
+        (e.g. the trade was later deleted/voided) is skipped, not guessed."""
+        from meta.labeling import LONGEST_HOURS, run_labeling_job
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        now = datetime.now(timezone.utc)
+        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
+
+        _insert_close_decision(conn, "test_agent", dec_ts, "trade_missing", 100.0)
+
+        start_ms = int(dec_ts.timestamp() * 1000)
+        candles = _make_candles(start_ms, 360, base_price=100.0)
+        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
+            result = run_labeling_job(conn, td)
+
+        assert result["total_processed"] == 1
+        assert result["total_labeled"] == 0
+
+
+# ── Finding 4: staleness bound on the forward-return candle lookup ────────
+
+
+class TestForwardReturnStaleness:
+    """_fwd_return_at_cutoff must never bridge a ledger gap with a stale
+    candle — labels must be left null across gaps, not interpolated."""
+
+    def test_candle_within_threshold_labels(self):
+        from meta.labeling import STALENESS_THRESHOLD_MS, _fwd_return_at_cutoff
+
+        candles = [[0, 100.0, 101.0, 99.0, 105.0, 1000.0]]
+        result = _fwd_return_at_cutoff(candles, 100.0, STALENESS_THRESHOLD_MS)
+        assert result is not None
+        assert abs(result - 5.0) < 1e-9
+
+    def test_candle_beyond_threshold_is_null(self):
+        from meta.labeling import STALENESS_THRESHOLD_MS, _fwd_return_at_cutoff
+
+        candles = [[0, 100.0, 101.0, 99.0, 105.0, 1000.0]]
+        result = _fwd_return_at_cutoff(
+            candles, 100.0, STALENESS_THRESHOLD_MS + 1,
+        )
+        assert result is None
+
+    def test_gap_at_horizon_boundary_leaves_that_horizon_null(self):
+        """A decision whose forward window has a mid-window gap spanning the
+        1h horizon boundary must get a null (unwritten) label for 1h, while
+        4h/24h — unaffected by the gap — label normally."""
+        from meta.labeling import LONGEST_HOURS, run_labeling_job
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        now = datetime.now(timezone.utc)
+        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
+        entry_price = 100.0
+        interval_ms = 5 * 60 * 1000
+        start_ms = int(dec_ts.timestamp() * 1000)
+
+        # Segment 1: minutes 0..40 (9 candles) — covers up to 40 min.
+        seg1 = _make_candles(start_ms, 9, base_price=entry_price, interval_ms=interval_ms)
+
+        # Gap: no candles between minute 40 and minute 80. The 1h (60 min)
+        # cutoff falls inside this gap — nearest available candle (40 min)
+        # is 20 min away, well beyond the 10-min staleness threshold.
+        seg2_start_ms = start_ms + 80 * 60 * 1000
+        # Segment 2 resumes at minute 80 and runs every 5 min through
+        # minute 1450 — covers the 4h (240 min) and 24h (1440 min) cutoffs
+        # exactly, so those horizons are unaffected by the gap.
+        count2 = (1450 - 80) // 5 + 1
+        seg2 = _make_candles(
+            seg2_start_ms, count2, base_price=seg1[-1][4], interval_ms=interval_ms,
+        )
+        candles = seg1 + seg2
+
+        _insert_enter_decision(conn, "test_agent", dec_ts, "BTC-PERP", "long", entry_price)
+
+        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        with tempfile.TemporaryDirectory() as td:
+            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
+            result = run_labeling_job(conn, td)
+
+        assert result["errors"] == 0
+        assert result["total_labeled"] == 2, "1h must be skipped, 4h and 24h must label"
+
+        horizons = {
+            r[0] for r in conn.execute(
+                "SELECT horizon FROM decision_labels"
+            ).fetchall()
+        }
+        assert horizons == {"4h", "24h"}
+        assert "1h" not in horizons
