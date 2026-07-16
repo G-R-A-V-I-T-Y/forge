@@ -168,7 +168,9 @@ def run_reflection_cycle(
     reflection_row_id = cur.lastrowid
     conn.commit()
 
-    result = _reflection_mod.run_reflection(conn, agent_id, config, llm_fn)
+    result = _reflection_mod.run_reflection(
+        conn, agent_id, config, llm_fn, reflection_id=reflection_row_id,
+    )
 
     rejection = None
     if not result.deployed:

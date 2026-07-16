@@ -696,6 +696,59 @@ class TestEndToEndReflection:
         assert challenger is not None
         assert challenger.spec_version == 2
 
+    def test_full_cycle_registers_and_transitions_hypotheses(self, conn, monkeypatch, tmp_path):
+        """T8 deliverable 3: Stage A's parsed hypotheses are persisted
+        (status 'proposed', linked to the reflection row) the moment
+        Diagnose runs, and move to 'challenger' once the cycle's proposal
+        deploys as a challenger."""
+        _setup_agent(conn)
+        _deploy_initial_spec(conn)
+        _insert_trades(conn, 35)
+
+        monkeypatch.setattr(
+            reflection_module, "run_walk_forward",
+            lambda *a, **k: _passing_wf_report(),
+        )
+
+        diagnose_with_hypotheses = (
+            _DIAGNOSE_RESPONSE + "\n\n"
+            '```json\n{"hypotheses": [\n'
+            '  {"claim": "funding_zscore > 1.5 predicts short-term reversion",\n'
+            '   "evidence_refs": ["regret_decision_12"],\n'
+            '   "predicted_effect": "regret decreases by 0.5pp",\n'
+            '   "falsification_condition": "no regret improvement in trial"}\n'
+            "]}\n```\n"
+        )
+        llm = _make_llm(
+            diagnose_with_hypotheses,
+            _valid_spec_yaml(version=2),
+            "No critical flaws found.",
+        )
+        config = {
+            "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
+            "ledger_dir": str(tmp_path / "ledger"),
+        }
+
+        cur = conn.execute(
+            "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, '2026-07-10T00:00:00Z')",
+            (AGENT_ID,),
+        )
+        reflection_id = cur.lastrowid
+        conn.commit()
+
+        result = run_reflection(conn, AGENT_ID, config, llm, reflection_id=reflection_id)
+        assert result.deployed is True, result.rejection_reason or result.blocked_by_gate
+
+        rows = conn.execute(
+            "SELECT claim, status, reflection_id, agent_id FROM hypotheses WHERE reflection_id = ?",
+            (reflection_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["agent_id"] == AGENT_ID
+        assert rows[0]["claim"] == "funding_zscore > 1.5 predicts short-term reversion"
+        # Deployed as challenger -> hypothesis moved out of 'proposed'.
+        assert rows[0]["status"] == "challenger"
+
     def test_llm_parse_failure_returns_error(self, conn):
         """When the LLM transport is exhausted/raises mid-pipeline (Stage 1
         Diagnose consumes the only queued response, then Stage 2 Propose

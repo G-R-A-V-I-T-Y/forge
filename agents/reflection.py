@@ -172,6 +172,7 @@ def run_reflection(
     agent_id: str,
     config: dict,
     llm_fn: Callable[[str, str], str],
+    reflection_id: int | None = None,
 ) -> ReflectionResult:
     """Full reflection cycle for one agent — M10 three-stage pipeline.
 
@@ -180,6 +181,11 @@ def run_reflection(
     1. **Diagnose**: Build an evidence dossier from the agent's trade history,
        calibration curve, regret decisions, and regime breakdown, then call
        the LLM to produce a structured diagnosis (what's working, what's not).
+       Every falsifiable hypothesis parsed out of the diagnosis is
+       immediately persisted via :func:`register_hypotheses` (status
+       ``proposed``) -- regardless of what Stage 2/3 later decide, so a
+       Propose-call transport failure or a mechanical-gate rejection never
+       silently drops a hypothesis the LLM already stated (M10 crit 6).
     2. **Propose**: Based on the diagnosis, call the LLM to generate a revised
        strategy spec (YAML).
     3. **Validate**: Run the mechanical evidence gates (pattern persistence,
@@ -187,11 +193,24 @@ def run_reflection(
        proposed spec. The adversarial pass also runs here but is advisory
        only -- it can never block. If all evidence gates pass, the thesis
        and spec are deployed atomically as a **challenger**
-       (``store.specs.deploy_as_challenger()``).
+       (``store.specs.deploy_as_challenger()``), and this cycle's
+       hypotheses move from ``proposed`` to ``challenger`` status.
 
     Falls back to the legacy single-call pipeline when the dossier builder
     cannot produce a dossier (missing ledger data, no trades, etc.). The
-    mechanical evidence gates still apply in full on that path.
+    mechanical evidence gates still apply in full on that path. No
+    hypotheses are registered on the legacy path (Stage A never runs).
+
+    Parameters
+    ----------
+    reflection_id:
+        The ``reflections.id`` row this cycle is writing into (created by
+        the caller -- see meta/reflection_scheduler.py::run_reflection_cycle
+        -- *before* calling run_reflection). Passed straight through to
+        :func:`register_hypotheses` so each hypothesis is linked back to
+        the reflection cycle that proposed it. ``None`` is accepted for
+        ad-hoc/manual invocations that don't first insert a reflections row
+        (register_hypotheses treats that as ad-hoc registration).
     """
     gates_passed: list[str] = []
 
@@ -256,6 +275,7 @@ def run_reflection(
     dossier = None
     diagnosis = ""
     hypotheses: list[dict] = []
+    hypothesis_ids: list[int] = []
     try:
         dossier_ledger_dir = config.get("ledger_dir", "ledger")
         dossier = build_dossier(conn, agent_id, dossier_ledger_dir)
@@ -308,6 +328,10 @@ def run_reflection(
             "[%s] Stage 1 (Diagnose) complete — %d chars, %d hypotheses",
             agent_id, len(diagnosis), len(hypotheses),
         )
+
+        # M10 crit 6: register hypotheses the moment Stage A states them --
+        # persisted as 'proposed' regardless of what Stage 2/3 do next.
+        hypothesis_ids = register_hypotheses(conn, agent_id, reflection_id, hypotheses)
 
         # Stage 2: Propose — generate revised spec informed by diagnosis
         propose_prompt = _build_propose_prompt(
@@ -657,6 +681,16 @@ def run_reflection(
         "[%s] revision v%d deployed as challenger (specs.id=%d, thesis v%d)",
         agent_id, revised_spec.spec_version, spec_id, next_thesis_version,
     )
+
+    # M10 crit 6: this cycle's hypotheses now have a live challenger trial
+    # to be judged by -- move them out of 'proposed' into 'challenger'.
+    if hypothesis_ids:
+        placeholders = ",".join("?" * len(hypothesis_ids))
+        conn.execute(
+            f"UPDATE hypotheses SET status = 'challenger' WHERE id IN ({placeholders})",
+            hypothesis_ids,
+        )
+        conn.commit()
 
     return ReflectionResult(
         triggered=True,
@@ -1653,17 +1687,31 @@ def resolve_hypotheses(
     reflection_id: int,
     challenger_result: dict,
 ) -> int:
-    """Update hypothesis statuses based on challenger trial outcome.
+    """Update hypothesis statuses based on a challenger trial outcome.
 
-    Hypotheses linked to *reflection_id* that are in ``'proposed'`` or
-    ``'challenger'`` status are resolved:
+    Hypotheses linked to *reflection_id* that are still in ``'proposed'``
+    or ``'challenger'`` status are resolved. Mechanical interpretation of
+    "predicted effect realized" (T8): a reflection cycle's hypotheses are
+    the claims that motivated ITS spec revision, and the challenger trial
+    is the out-of-sample test of that whole revision -- so the trial
+    verdict stands in for per-hypothesis direction-matching, which Stage A
+    doesn't currently parse a structured direction for anyway:
 
-    - If the challenger verdict is ``'promoted'``, hypotheses are marked
-      ``'validated'``.
-    - If the challenger verdict is ``'rejected'``, hypotheses are marked
-      ``'falsified'``.
-    - If the challenger had zero logged decisions (``'no_challenger'``),
-      hypotheses are marked ``'inconclusive'``.
+    - ``'promoted'`` (challenger's mean regret beat the incumbent's) →
+      the predicted effect was realized → ``'validated'``.
+    - ``'rejected'`` → per spec text, "challenger rejected" alone is
+      sufficient to falsify → ``'falsified'`` (no separate
+      falsification_condition text-matching is attempted).
+    - ``'not_resolvable'`` or ``'no_challenger'`` (no labeled evidence, or
+      the trial window expired without enough signal) → ``'inconclusive'``.
+
+    ``effect_observed`` is recorded in every case it can be computed: the
+    regret improvement the challenger achieved over the incumbent
+    (``incumbent_mean_regret - challenger_mean_regret`` from
+    :func:`store.specs.resolve_challenger`'s result -- positive means the
+    challenger reduced regret). It is left ``NULL`` only when
+    *challenger_result* carries no regret numbers at all (the
+    zero-evidence / not-resolvable case).
 
     Parameters
     ----------
@@ -1683,17 +1731,24 @@ def resolve_hypotheses(
     status_map = {
         "promoted": "validated",
         "rejected": "falsified",
+        "not_resolvable": "inconclusive",
         "no_challenger": "inconclusive",
     }
     new_status = status_map.get(verdict, "inconclusive")
 
+    incumbent_mean = challenger_result.get("incumbent_mean_regret")
+    challenger_mean = challenger_result.get("challenger_mean_regret")
+    effect_observed = None
+    if isinstance(incumbent_mean, (int, float)) and isinstance(challenger_mean, (int, float)):
+        effect_observed = round(incumbent_mean - challenger_mean, 4)
+
     # Only resolve hypotheses still in a pre-resolution state.
     cursor = conn.execute(
         """UPDATE hypotheses
-           SET status = ?, resolved_at = ?
+           SET status = ?, effect_observed = ?, resolved_at = ?
            WHERE reflection_id = ?
              AND status IN ('proposed', 'challenger')""",
-        (new_status, _now(), reflection_id),
+        (new_status, effect_observed, _now(), reflection_id),
     )
     conn.commit()
     return cursor.rowcount
@@ -1780,13 +1835,19 @@ def check_challenger_resolution(
     resolve it if so.
 
     This is the entry point for the APScheduler job that periodically
-    evaluates challenger trials.  It reads thresholds from *desk_config*:
+    evaluates challenger trials (forge.py's ``challenger_resolution`` job).
+    It reads thresholds from *desk_config*:
 
-    - ``challenger_min_decisions`` (default 20): minimum number of shadow
-      decisions the challenger must have logged before resolution.
-    - ``challenger_max_days`` (default 7): maximum trial duration in days;
-      the challenger is force-resolved when this elapses even if the
-      decision count is below the threshold.
+    - ``challenger_min_decisions`` (default 20): minimum number of
+      **labeled** shadow decisions (T8 -- joined against
+      ``decision_labels`` at :data:`store.specs.RESOLUTION_HORIZON`, not
+      raw ``decisions`` rows) the challenger must have before resolution.
+      An unlabeled shadow row (the nightly labeling job hasn't caught up
+      yet) does not count.
+    - ``challenger_max_days`` (default 7): maximum trial duration in days,
+      measured from the challenger's ``specs.deployed_at``; the challenger
+      is force-resolved when this elapses even if the labeled-decision
+      count is below the threshold.
 
     Parameters
     ----------
@@ -1805,7 +1866,11 @@ def check_challenger_resolution(
         ``{"resolved": False, "reason": str}`` when the trial is still
         in progress.
     """
-    from store.specs import get_challenger_spec, resolve_challenger  # noqa: PLC0415
+    from store.specs import (  # noqa: PLC0415
+        RESOLUTION_HORIZON,
+        get_challenger_spec,
+        resolve_challenger,
+    )
 
     challenger = get_challenger_spec(conn, agent_id)
     if challenger is None:
@@ -1814,56 +1879,60 @@ def check_challenger_resolution(
     min_decisions = desk_config.get("challenger_min_decisions", 20)
     max_days = desk_config.get("challenger_max_days", 7)
 
-    # Count logged challenger decisions.
-    row = conn.execute(
-        """SELECT COUNT(*) FROM decisions
-           WHERE agent_id = ? AND decision_details_json IS NOT NULL""",
-        (agent_id,),
+    # deployed_at comes straight from the specs row -- the authoritative
+    # trial start (matches resolve_challenger's own trial-window scoping),
+    # not inferred from the first matching decisions row (which lags the
+    # true deploy time and would undercount days_elapsed).
+    trial_row = conn.execute(
+        """SELECT deployed_at FROM specs
+           WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
+           ORDER BY id DESC LIMIT 1""",
+        (agent_id, challenger.spec_version),
     ).fetchone()
-    total_decisions = row[0] if row else 0
+    deployed_at_str = trial_row["deployed_at"] if trial_row else None
 
-    challenger_decisions = 0
-    all_rows = conn.execute(
-        """SELECT decision_details_json, timestamp FROM decisions
-           WHERE agent_id = ? AND decision_details_json IS NOT NULL
-           ORDER BY timestamp ASC""",
-        (agent_id,),
-    ).fetchall()
+    challenger_labeled = 0
+    if deployed_at_str is not None:
+        rows = conn.execute(
+            """SELECT d.decision_details_json
+               FROM decisions d
+               JOIN decision_labels dl
+                 ON dl.decision_id = d.id AND dl.horizon = ?
+               WHERE d.agent_id = ? AND d.timestamp >= ?""",
+            (RESOLUTION_HORIZON, agent_id, deployed_at_str),
+        ).fetchall()
+        for row in rows:
+            try:
+                details = json.loads(row["decision_details_json"]) if row["decision_details_json"] else {}
+            except (json.JSONDecodeError, TypeError):
+                details = {}
+            if details.get("challenger_spec_version") == challenger.spec_version:
+                challenger_labeled += 1
 
-    deployed_at: datetime | None = None
-    for dr in all_rows:
-        try:
-            details = json.loads(dr["decision_details_json"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if details.get("challenger_spec_version") == challenger.spec_version:
-            challenger_decisions += 1
-            if deployed_at is None:
-                try:
-                    deployed_at = datetime.fromisoformat(
-                        dr["timestamp"].replace("Z", "+00:00"),
-                    )
-                except (ValueError, TypeError):
-                    pass
-
-    # Check time-based threshold.
-    now = datetime.now(timezone.utc)
+    # Time-based threshold, measured fractionally (not truncated to whole
+    # days) so a trial deployed 6h ago never misreads as "0 days elapsed".
     days_elapsed = 0.0
-    if deployed_at is not None:
-        days_elapsed = (now - deployed_at).days
+    if deployed_at_str is not None:
+        try:
+            deployed_at = datetime.fromisoformat(deployed_at_str.replace("Z", "+00:00"))
+            days_elapsed = (
+                datetime.now(timezone.utc) - deployed_at
+            ).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            pass
 
     # Resolve when EITHER threshold is met.
-    if challenger_decisions >= min_decisions or days_elapsed >= max_days:
+    if challenger_labeled >= min_decisions or days_elapsed >= max_days:
         result = resolve_challenger(conn, agent_id)
         result["resolved"] = True
-        result["challenger_decisions_count"] = challenger_decisions
+        result["challenger_labeled_decisions_count"] = challenger_labeled
         result["days_elapsed"] = round(days_elapsed, 1)
         return result
 
     return {
         "resolved": False,
         "reason": (
-            f"trial in progress: {challenger_decisions}/{min_decisions} decisions, "
-            f"{days_elapsed:.0f}/{max_days} days"
+            f"trial in progress: {challenger_labeled}/{min_decisions} labeled decisions, "
+            f"{days_elapsed:.1f}/{max_days} days"
         ),
     }
