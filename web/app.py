@@ -17,10 +17,14 @@ from market.heartbeat import (
     read_heartbeat,
     read_heartbeat_or_none,
 )
-from agents.reflection import compute_calibration_curve, run_reflection
+from agents.reflection import compute_calibration_curve
 from meta.controller import evaluate_agent
 from meta.evaluator import get_lifecycle_decision, get_null_metrics
-from meta.reflection_scheduler import check_agent_eligible, get_reflection_trigger
+from meta.reflection_scheduler import (
+    check_agent_eligible,
+    get_reflection_trigger,
+    run_reflection_cycle,
+)
 from store.performance import compute_metrics
 from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
@@ -819,7 +823,15 @@ async def exec_trigger_reflection(agent_id: str, reason: str = Query(...)):
     if llm_fn is None:
         return JSONResponse({"error": "LLM function not available"}, status_code=503)
 
-    run_reflection(conn, agent_id, config, llm_fn)
+    # Routed through run_reflection_cycle (the same function forge.py's
+    # scheduler uses) rather than calling agents.reflection.run_reflection
+    # directly -- that function creates the reflections row this cycle
+    # writes into, so any hypotheses it registers carry a non-null
+    # reflection_id and are findable by forge.py's hourly
+    # challenger-resolution job. Before this fix, hypotheses registered via
+    # this endpoint had reflection_id = NULL and a deployed challenger
+    # could never resolve (T8 review Finding 1).
+    run_reflection_cycle(conn, agent_id, config, llm_fn)
     _audit(conn, "trigger_reflection", agent_id, reason)
     return {"ok": True, "detail": f"Reflection triggered for {agent_id}"}
 
@@ -850,7 +862,11 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
             results.append({"agent_id": aid, "status": "skipped", "reason": ineligible_reason})
             continue
         try:
-            run_reflection(conn, aid, config, llm_fn)
+            # See exec_trigger_reflection above: run_reflection_cycle
+            # creates the reflections row so this cycle's hypotheses stay
+            # resolvable (T8 review Finding 1). trigger-all-reflections is
+            # a documented production control path, not a debug path.
+            run_reflection_cycle(conn, aid, config, llm_fn)
             _audit(conn, "trigger_reflection", aid, reason)
             results.append({"agent_id": aid, "status": "queued"})
         except Exception as exc:

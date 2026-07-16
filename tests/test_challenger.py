@@ -286,6 +286,113 @@ class TestResolveChallenger:
         assert specs[2] == "challenger"  # untouched -- not promoted or rejected
         assert specs[1] == "active"      # untouched
 
+    # -----------------------------------------------------------------
+    # T8 review Finding 2: force_close (window-expiry force-resolution)
+    # -----------------------------------------------------------------
+
+    def test_force_close_with_zero_evidence_closes_trial_terminally(self, conn):
+        """force_close=True + zero evidence on one side -> verdict
+        'expired_no_signal' and the challenger spec row is force-closed to
+        'inactive' with a rejection_reason, instead of being left at
+        'challenger' (which is what happens without force_close -- see
+        test_not_resolvable_without_labels above)."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+        _insert_decision(
+            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+            _challenger_details(2, 1),
+        )  # unlabeled -- zero evidence
+
+        result = resolve_challenger(conn, AGENT_ID, force_close=True)
+
+        assert result["verdict"] == "expired_no_signal"
+        assert result["challenger_mean_regret"] is None
+        assert result["incumbent_mean_regret"] is None
+
+        specs = {
+            r["spec_version"]: (r["status"], r["rejection_reason"])
+            for r in conn.execute(
+                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2][0] == "inactive"
+        assert specs[2][1] is not None
+        assert specs[1][0] == "active"  # incumbent untouched
+
+    def test_force_close_does_not_alter_promotion_verdict(self, conn):
+        """(c) force_close=True must have NO effect when both sides have
+        evidence -- the ordinary promoted/rejected paths are unchanged."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+        for i in range(2):
+            _insert_labeled_decision(
+                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
+                _challenger_details(2, 1), regret_pct=0.4,
+            )
+            _insert_labeled_decision(
+                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
+                _incumbent_enter_details(), regret_pct=1.8,
+            )
+
+        result = resolve_challenger(conn, AGENT_ID, force_close=True)
+
+        assert result["verdict"] == "promoted"  # NOT "expired_no_signal"
+        assert result["challenger_mean_regret"] == pytest.approx(0.4)
+        assert result["incumbent_mean_regret"] == pytest.approx(1.8)
+
+        specs = {
+            r["spec_version"]: r["status"]
+            for r in conn.execute(
+                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2] == "active"
+        assert specs[1] == "inactive"
+
+    def test_force_close_does_not_alter_rejection_verdict(self, conn):
+        """(c) force_close=True must have NO effect on a genuine rejection
+        (both sides labeled, challenger loses)."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+            _challenger_details(2, 1), regret_pct=2.5,
+        )
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+            _incumbent_enter_details(), regret_pct=0.6,
+        )
+
+        result = resolve_challenger(conn, AGENT_ID, force_close=True)
+
+        assert result["verdict"] == "rejected"  # NOT "expired_no_signal"
+        specs = {
+            r["spec_version"]: r["status"]
+            for r in conn.execute(
+                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2] == "inactive"
+        assert specs[1] == "active"
+
     def test_pre_trial_incumbent_decisions_do_not_influence_outcome(self, conn):
         """T6 review finding 3: resolve_challenger must scope BOTH sides of
         the comparison to the challenger's trial window. A pre-trial

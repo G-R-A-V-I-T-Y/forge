@@ -20,6 +20,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from agents.reflection import ReflectionResult
 from store.db import (
     insert_agent,
     insert_account_snapshot,
@@ -60,6 +61,29 @@ def _seed_agent(conn, agent_id=AGENT_ID, status="active") -> None:
 
 def _count_audit_log(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+
+
+def _stub_reflection_result(**overrides) -> ReflectionResult:
+    """A ReflectionResult stand-in for mocking agents.reflection.run_reflection.
+
+    The trigger endpoints now route through
+    meta.reflection_scheduler.run_reflection_cycle (T8 review Finding 1),
+    which post-processes the real return value (result.deployed,
+    result.gates_passed, etc.) -- a bare ``None``/MagicMock mock return no
+    longer works, so tests need a real ReflectionResult shape.
+    """
+    fields = dict(
+        triggered=False,
+        new_spec_yaml=None,
+        spec_version=None,
+        deployed=False,
+        rejection_reason=None,
+        blocked_by_gate=None,
+        adversarial_flaws=[],
+        gates_passed=[],
+    )
+    fields.update(overrides)
+    return ReflectionResult(**fields)
 
 
 def _iso(hours_ago: float = 0) -> str:
@@ -179,8 +203,8 @@ class TestTriggerReflection:
         _seed_agent(conn)
         client = _client(conn)
         app.state.llm_fn = MagicMock()
-        with patch("web.app.run_reflection") as mock_run:
-            mock_run.return_value = None
+        with patch("agents.reflection.run_reflection") as mock_run:
+            mock_run.return_value = _stub_reflection_result()
             r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
         assert r.status_code == 200
         data = r.json()
@@ -194,6 +218,67 @@ class TestTriggerReflection:
         assert row["action"] == "trigger_reflection"
         assert row["agent_id"] == AGENT_ID
         assert row["reason"] == "test"
+
+        # T8 review Finding 1: the endpoint must create its own reflections
+        # row (via run_reflection_cycle) so any hypotheses this cycle
+        # registers carry a non-null reflection_id.
+        refl_row = conn.execute(
+            "SELECT id FROM reflections WHERE agent_id = ?", (AGENT_ID,),
+        ).fetchone()
+        assert refl_row is not None
+
+    def test_web_triggered_challenger_deploy_yields_resolvable_hypotheses(self, conn):
+        """T8 review Finding 1 (IMPORTANT): before this fix, web/app.py's
+        trigger endpoints called agents.reflection.run_reflection directly
+        without ever inserting a reflections row, so hypotheses registered
+        during a web-triggered cycle got reflection_id=NULL. forge.py's
+        hourly challenger-resolution job filters
+        ``AND reflection_id IS NOT NULL`` (forge.py ~line 618), so a
+        challenger deployed via this endpoint could never resolve --
+        hypotheses stuck in 'challenger' forever.
+
+        This drives the real /api/exec/trigger-reflection/{agent_id}
+        endpoint (only the LLM pipeline internals are stubbed) and asserts
+        the SAME SQL SHAPE forge.py's job uses finds the hypotheses this
+        cycle registered."""
+        from agents.reflection import register_hypotheses
+
+        _seed_agent(conn)
+
+        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
+            # Mirrors what the real Stage-A/deploy pipeline does: register
+            # a hypothesis against the reflection_id the caller created,
+            # then move it to 'challenger' once the cycle's proposal
+            # deploys -- the exact state the forge.py hourly resolution
+            # job scans for.
+            hyp_ids = register_hypotheses(conn, agent_id, reflection_id, [
+                {"claim": "funding term improves entries", "predicted_effect": "regret decreases"},
+            ])
+            conn.execute(
+                "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
+            )
+            conn.commit()
+            return _stub_reflection_result(triggered=True, deployed=True, spec_version=2)
+
+        client = _client(conn)
+        app.state.llm_fn = MagicMock()
+
+        with patch("agents.reflection.run_reflection", side_effect=_fake_run_reflection):
+            r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
+        assert r.status_code == 200
+
+        # Same SQL shape as forge.py's _run_challenger_resolution_job.
+        rows = conn.execute(
+            """SELECT DISTINCT reflection_id FROM hypotheses
+               WHERE agent_id = ? AND status = 'challenger'
+                 AND reflection_id IS NOT NULL""",
+            (AGENT_ID,),
+        ).fetchall()
+        assert len(rows) == 1, (
+            "web-triggered challenger hypotheses must carry a non-null "
+            "reflection_id findable by the forge resolution job's query"
+        )
+        assert rows[0]["reflection_id"] is not None
 
     def test_missing_reason(self, conn):
         _seed_agent(conn)
@@ -334,19 +419,22 @@ class TestTriggerAllReflections:
 
         fake_llm = MagicMock(return_value="")
 
-        def _fake_run_reflection(conn, agent_id, config, llm_fn):
+        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
             # Mirrors the real run_reflection/llm_fn contract (Task 1): the
             # pipeline calls llm_fn(system_prompt, user_prompt) internally.
             # agents/reflection.py internals are out of scope for this task,
             # so this stands in for the real pipeline while still exercising
-            # the transport wiring end to end.
+            # the transport wiring end to end. Accepts reflection_id (now
+            # always supplied by run_reflection_cycle, T8 review Finding 1)
+            # and returns a real ReflectionResult since run_reflection_cycle
+            # post-processes the return value's fields.
             llm_fn("system prompt", "user prompt")
-            return None
+            return _stub_reflection_result(triggered=True)
 
         client = _client(conn)
         app.state.llm_fn = fake_llm
 
-        with patch("web.app.run_reflection", side_effect=_fake_run_reflection) as mock_run:
+        with patch("agents.reflection.run_reflection", side_effect=_fake_run_reflection) as mock_run:
             r = client.post("/api/exec/trigger-all-reflections?reason=test")
 
         assert r.status_code == 200
@@ -388,8 +476,8 @@ def test_reflect_endpoint_has_llm_fn(conn):
     from llm import reflection_client
     app.state.llm_fn = reflection_client.complete
 
-    with patch("web.app.run_reflection") as mock_run:
-        mock_run.return_value = None
+    with patch("agents.reflection.run_reflection") as mock_run:
+        mock_run.return_value = _stub_reflection_result()
         r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
 
     assert r.status_code == 200
@@ -698,7 +786,7 @@ class TestAuditLog:
         c = _client(conn)
         app.state.llm_fn = MagicMock()
 
-        with patch("web.app.run_reflection"):
+        with patch("agents.reflection.run_reflection", return_value=_stub_reflection_result()):
             c.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=reflect_now")
         c.post(f"/api/exec/trigger-evaluation/{AGENT_ID}?reason=eval_now")
         c.post(f"/api/exec/disable-entries/{AGENT_ID}?reason=stop_entries")

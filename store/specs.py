@@ -413,6 +413,7 @@ RESOLUTION_HORIZON = "4h"
 
 def resolve_challenger(
     conn: sqlite3.Connection, agent_id: str, horizon: str = RESOLUTION_HORIZON,
+    *, force_close: bool = False,
 ) -> dict:
     """Compare the challenger's shadow decisions against the incumbent and
     either **promote** or **reject** the challenger.
@@ -433,16 +434,35 @@ def resolve_challenger(
     row is touched, so a caller can retry once more labels land rather than
     promoting or rejecting on zero evidence.
 
+    Parameters
+    ----------
+    force_close:
+        T8 review Finding 2: when the caller has already determined the
+        trial's ``max_days`` window has elapsed (see
+        :func:`agents.reflection.check_challenger_resolution`), pass
+        ``True`` so a zero-evidence result terminally closes the trial
+        instead of leaving it live. Without this, a hypothesis flip to
+        terminal ``'inconclusive'`` on window expiry could desync from a
+        challenger spec row still sitting at ``status='challenger'`` — if
+        labels arrived later, nothing could ever correct the
+        already-terminal hypotheses. Has no effect when the trial resolves
+        normally (``challenger_count`` and ``incumbent_count`` both > 0).
+
     Returns
     -------
     dict
-        ``{"verdict": "promoted" | "rejected" | "not_resolvable" | "no_challenger",
+        ``{"verdict": "promoted" | "rejected" | "not_resolvable" |
+           "expired_no_signal" | "no_challenger",
            "challenger_version": int | None, "incumbent_version": int | None,
            "challenger_mean_regret": float | None,
            "incumbent_mean_regret": float | None,
            "challenger_labeled_decisions": int, "incumbent_labeled_decisions": int,
            "horizon": str}``. The ``"no_challenger"`` verdict returns just
         ``{"verdict": "no_challenger"}`` (no challenger deployed at all).
+        ``"expired_no_signal"`` is returned only when ``force_close=True``
+        and evidence was still zero on at least one side — the challenger
+        spec row is set to ``'inactive'`` (the same terminal status an
+        ordinary rejection uses) with ``rejection_reason`` explaining why.
     """
     challenger = get_challenger_spec(conn, agent_id)
     if challenger is None:
@@ -504,6 +524,40 @@ def resolve_challenger(
     incumbent_count = len(incumbent_regrets)
 
     if challenger_count == 0 or incumbent_count == 0:
+        if force_close:
+            # T8 review Finding 2: the trial's max_days window has already
+            # elapsed (caller-verified) with insufficient evidence to ever
+            # resolve normally -- close it terminally now, mirroring the
+            # ordinary reject path ('inactive'), rather than leaving the
+            # spec row at 'challenger' while its hypotheses get force-
+            # flipped to terminal 'inconclusive' by the caller.
+            conn.execute(
+                """UPDATE specs SET status = 'inactive',
+                       rejection_reason = ?
+                   WHERE agent_id = ? AND status = 'challenger'
+                   AND spec_version = ?""",
+                (
+                    "challenger trial expired without sufficient labeled "
+                    "evidence (max_days elapsed)",
+                    agent_id, challenger.spec_version,
+                ),
+            )
+            conn.commit()
+            logger.info(
+                "[%s] Challenger v%d force-closed (expired, no signal) — "
+                "%d challenger / %d incumbent labeled decisions in trial window",
+                agent_id, challenger.spec_version, challenger_count, incumbent_count,
+            )
+            return {
+                "verdict": "expired_no_signal",
+                "challenger_version": challenger.spec_version,
+                "incumbent_version": incumbent_version,
+                "challenger_mean_regret": None,
+                "incumbent_mean_regret": None,
+                "challenger_labeled_decisions": challenger_count,
+                "incumbent_labeled_decisions": incumbent_count,
+                "horizon": horizon,
+            }
         logger.info(
             "[%s] Challenger v%d not resolvable — %d challenger / %d incumbent"
             " labeled decisions in trial window (need >=1 each)",

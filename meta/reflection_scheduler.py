@@ -158,9 +158,18 @@ def run_reflection_cycle(
     import agents.reflection as _reflection_mod
 
     # Insert the log row at trigger time — this is the ONLY production
-    # writer of the reflections table.  check_agent_eligible reads
-    # triggered_at from it, so without this row an eligible agent re-fires
-    # a full reflection (two LLM calls) every scheduler pass forever.
+    # writer of the reflections table. Both the scheduled path (forge.py's
+    # periodic job, which calls this function directly) and the manual web
+    # trigger paths (web/app.py's /api/exec/trigger-reflection/{agent_id}
+    # and /api/exec/trigger-all-reflections) route through THIS function
+    # rather than calling agents.reflection.run_reflection directly, so
+    # there is exactly one INSERT site to keep in sync (T8 review Finding
+    # 1 — web-triggered cycles used to bypass this row entirely, leaving
+    # any hypotheses they registered with reflection_id=NULL, permanently
+    # unresolvable by forge.py's hourly challenger-resolution job).
+    # check_agent_eligible reads triggered_at from it, so without this row
+    # an eligible agent re-fires a full reflection (two LLM calls) every
+    # scheduler pass forever.
     cur = conn.execute(
         "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
         (agent_id, _now()),

@@ -287,6 +287,47 @@ class TestCheckChallengerResolution:
         assert result["resolved"] is False
         assert "1/2" in result["reason"]
 
+    def test_null_regret_pct_labeled_row_does_not_count(self, conn):
+        """T8 review Finding 3 (MINOR): the trigger's labeled-decision count
+        must agree with resolve_challenger's own regret-averaging loop,
+        which skips any decision_labels row with regret_pct IS NULL.
+        Before this fix the trigger counted such a row (only checking
+        horizon, not regret_pct), so it could claim enough evidence and
+        then immediately hit resolve_challenger's not_resolvable path on
+        the very next call."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+        base = _deployed_at_base(conn, AGENT_ID)
+
+        # Labeled at the canonical horizon, but regret_pct itself is NULL
+        # -- matches resolve_challenger's `if regret is None: continue`.
+        cur = conn.execute(
+            """INSERT INTO decisions
+                   (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+               VALUES (?, ?, 'enter', 'test', ?)""",
+            (
+                AGENT_ID, _iso(base + timedelta(minutes=1)),
+                json.dumps({"challenger_spec_version": 2, "incumbent_spec_version": 1}),
+            ),
+        )
+        decision_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO decision_labels
+                   (decision_id, horizon, fwd_return_pct, max_runup_pct,
+                    max_drawdown_pct, chosen_outcome_pct, best_action,
+                    best_outcome_pct, regret_pct, labeled_at)
+               VALUES (?, '4h', 0, 0, 0, 0, 'enter_long', 0, NULL, ?)""",
+            (decision_id, _iso(base + timedelta(minutes=1))),
+        )
+        conn.commit()
+
+        result = check_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is False
+        assert "0/1" in result["reason"]
+
     def test_resolves_once_min_labeled_decisions_met(self, conn):
         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
@@ -317,6 +358,136 @@ class TestCheckChallengerResolution:
             conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
         )
         assert result == {"resolved": False, "reason": "no active challenger"}
+
+
+# ---------------------------------------------------------------------------
+# T8 review Finding 2: window-expiry desync -- hypothesis status must never
+# go terminal while the trial is still live. Three pinned behaviors:
+#   (a) pre-expiry not_resolvable -> nothing changes anywhere
+#   (b) post-expiry (max_days elapsed) not_resolvable -> trial closed
+#       terminally + hypotheses inconclusive with effect_observed/resolved_at
+#   (c) existing promoted/rejected paths unchanged (see test_challenger.py)
+# ---------------------------------------------------------------------------
+
+
+class TestWindowExpiryDesync:
+    def test_pre_expiry_not_resolvable_leaves_everything_untouched(self, conn):
+        """(a) The min_decisions threshold can fire on the challenger side
+        alone while the incumbent side still has zero labeled decisions and
+        max_days hasn't elapsed. That is NOT a window expiry -- the trial
+        is genuinely still in progress, so check_challenger_resolution must
+        report unresolved and touch neither the spec row nor any
+        hypotheses."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+        base = _deployed_at_base(conn, AGENT_ID)
+
+        reflection_id = _insert_reflection(conn, AGENT_ID)
+        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
+            {"claim": "c1", "predicted_effect": "e1"},
+        ])
+        conn.execute(
+            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
+        )
+        conn.commit()
+
+        # Challenger side clears min_decisions=2; incumbent side has zero
+        # labeled decisions. deployed_at is "now" so days_elapsed ~ 0,
+        # nowhere near max_days=7.
+        for i in range(2):
+            _insert_labeled_decision(
+                conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
+                {"challenger_spec_version": 2, "incumbent_spec_version": 1}, regret_pct=0.5,
+            )
+
+        result = check_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 2, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is False
+
+        specs = {
+            r["spec_version"]: (r["status"], r["rejection_reason"])
+            for r in conn.execute(
+                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2] == ("challenger", None)  # untouched
+        assert specs[1][0] == "active"           # untouched
+
+        hyp = conn.execute(
+            "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
+            (hyp_ids[0],),
+        ).fetchone()
+        assert hyp["status"] == "challenger"     # untouched
+        assert hyp["effect_observed"] is None
+        assert hyp["resolved_at"] is None
+
+    def test_post_expiry_not_resolvable_closes_trial_and_hypotheses(self, conn):
+        """(b) max_days has elapsed with zero labeled decisions on the
+        incumbent side -- check_challenger_resolution must force-close the
+        trial (challenger spec row -> terminal 'inactive', with a
+        rejection_reason recorded) AND report resolved=True so the caller
+        (forge.py's hourly job) resolves the cycle's hypotheses to
+        'inconclusive' with effect_observed/resolved_at set -- never
+        leaving a terminal hypothesis desynced from a still-'challenger'
+        spec row."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+        # Backdate deployed_at well past max_days=7, with zero labeled
+        # decisions on either side (labeling job never caught up). Must
+        # stay timezone-aware ("Z" suffix) -- check_challenger_resolution
+        # silently treats a naive/unparseable deployed_at as
+        # days_elapsed=0.0 (caught ValueError/TypeError), which would
+        # defeat this test's whole premise.
+        base = _deployed_at_base(conn, AGENT_ID)
+        old_ts = _iso(base - timedelta(days=10))
+        conn.execute(
+            "UPDATE specs SET deployed_at = ? WHERE agent_id = ? AND status = 'challenger'",
+            (old_ts, AGENT_ID),
+        )
+        conn.commit()
+
+        reflection_id = _insert_reflection(conn, AGENT_ID)
+        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
+            {"claim": "c1", "predicted_effect": "e1"},
+        ])
+        conn.execute(
+            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
+        )
+        conn.commit()
+
+        result = check_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is True
+        assert result["verdict"] == "expired_no_signal"
+
+        specs = {
+            r["spec_version"]: (r["status"], r["rejection_reason"])
+            for r in conn.execute(
+                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2][0] == "inactive"          # trial closed terminally
+        assert specs[2][1] is not None            # reason recorded
+        assert specs[1][0] == "active"            # incumbent untouched
+
+        # Mirrors forge.py's hourly job: resolve the cycle's hypotheses
+        # using this result.
+        n = resolve_hypotheses(conn, reflection_id, result)
+        assert n == 1
+        hyp = conn.execute(
+            "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
+            (hyp_ids[0],),
+        ).fetchone()
+        assert hyp["status"] == "inconclusive"
+        assert hyp["effect_observed"] is None
+        assert hyp["resolved_at"] is not None
 
 
 # ---------------------------------------------------------------------------

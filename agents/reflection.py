@@ -1898,7 +1898,8 @@ def check_challenger_resolution(
                FROM decisions d
                JOIN decision_labels dl
                  ON dl.decision_id = d.id AND dl.horizon = ?
-               WHERE d.agent_id = ? AND d.timestamp >= ?""",
+               WHERE d.agent_id = ? AND d.timestamp >= ?
+                 AND dl.regret_pct IS NOT NULL""",
             (RESOLUTION_HORIZON, agent_id, deployed_at_str),
         ).fetchall()
         for row in rows:
@@ -1921,9 +1922,33 @@ def check_challenger_resolution(
         except (ValueError, TypeError):
             pass
 
-    # Resolve when EITHER threshold is met.
-    if challenger_labeled >= min_decisions or days_elapsed >= max_days:
-        result = resolve_challenger(conn, agent_id)
+    # Resolve when EITHER threshold is met. window_expired tracks whether
+    # the max_days threshold specifically is what's firing -- only in that
+    # case is it safe to force-close a zero-evidence trial (T8 review
+    # Finding 2). The min_decisions threshold alone (challenger side has
+    # enough labeled decisions) says nothing about the incumbent side, so a
+    # not_resolvable verdict reached via that path is still genuinely
+    # in-progress, not expired.
+    window_expired = days_elapsed >= max_days
+    if challenger_labeled >= min_decisions or window_expired:
+        result = resolve_challenger(conn, agent_id, force_close=window_expired)
+
+        if result.get("verdict") == "not_resolvable":
+            # This only happens when window_expired is False (force_close
+            # was False): the min_decisions threshold fired on the
+            # challenger side alone while the incumbent side still has zero
+            # labeled decisions in the trial window. That is NOT a window
+            # expiry -- the trial is still genuinely in progress, so leave
+            # both the spec row and the hypotheses untouched (T8 review
+            # Finding 2, invariant (a)) rather than reporting "resolved".
+            return {
+                "resolved": False,
+                "reason": (
+                    f"trial in progress: {challenger_labeled}/{min_decisions} labeled"
+                    f" decisions, {days_elapsed:.1f}/{max_days} days"
+                ),
+            }
+
         result["resolved"] = True
         result["challenger_labeled_decisions_count"] = challenger_labeled
         result["days_elapsed"] = round(days_elapsed, 1)
