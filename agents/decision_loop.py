@@ -233,6 +233,48 @@ async def run_decision(
                             ),
                             "incumbent_spec_version": active_spec.spec_version,
                         }
+                        # T8 review r2 Fix A: shadow rows must be labelable
+                        # by meta/labeling.py's extractors, which need an
+                        # "order" (enter) or "candidate" (wait) block with
+                        # asset/entry_price/SL/TP -- the challenger_* keys
+                        # alone were invisible to run_labeling_job, so no
+                        # decision_labels row was ever written for a shadow
+                        # decision and resolve_challenger's zero-evidence
+                        # guard fired on every live trial (never promoted).
+                        # The blocks mirror the incumbent's own shapes
+                        # exactly: "order" is a str() repr (like the enter
+                        # branch's str(response)), "candidate" is a plain
+                        # dict (like the compiled-wait branch above).
+                        # challenger_spec_version stays top-level -- it is
+                        # what resolve_challenger and the shadow-safety
+                        # test key on.
+                        ch_price = assets.get(ch_best_asset, {}).get("price", 0)
+                        if ch_price and ch_price > 0:
+                            ch_sl = (
+                                ch_price * (1 - challenger_spec.stop_loss_pct)
+                                if challenger_spec.direction == "long"
+                                else ch_price * (1 + challenger_spec.stop_loss_pct)
+                            )
+                            ch_tp = (
+                                ch_price * (1 + challenger_spec.take_profit_pct)
+                                if challenger_spec.direction == "long"
+                                else ch_price * (1 - challenger_spec.take_profit_pct)
+                            )
+                            shadow_ctx = {
+                                "asset": ch_best_asset,
+                                "direction": challenger_spec.direction,
+                                "entry_price": ch_price,
+                                "stop_loss_price": ch_sl,
+                                "take_profit_price": ch_tp,
+                                "confidence": ch_best_decision["confidence"],
+                                "max_hold_hours": getattr(
+                                    challenger_spec, "max_hold_hours", 48
+                                ),
+                            }
+                            if ch_best_decision["action"] == "enter":
+                                ch_details["order"] = str(shadow_ctx)
+                            else:
+                                ch_details["candidate"] = shadow_ctx
                         log_decision(
                             conn,
                             agent_id,

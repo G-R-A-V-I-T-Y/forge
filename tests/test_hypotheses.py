@@ -491,6 +491,133 @@ class TestWindowExpiryDesync:
 
 
 # ---------------------------------------------------------------------------
+# T8 review r2 Fix B: apply_challenger_resolution -- the per-agent body of
+# forge.py's hourly job, extracted so it is behaviorally testable (forge.py
+# itself imports apscheduler, unavailable in this env). Spec
+# (FORGE_PROPOSAL.md:1183): "Either way the outcome lands in reflections AND
+# resolves the cycle's hypotheses" -- TWO unconditional actions. Before this
+# fix the reflections.outcome UPDATE sat inside the hypotheses loop, so a
+# resolved trial whose cycle registered zero hypotheses (legacy path, or
+# Stage A parsed none) never got its outcome recorded -- PENDING forever on
+# the agent page.
+# ---------------------------------------------------------------------------
+
+
+class TestApplyChallengerResolution:
+    def _deploy_trial_with_evidence(self, conn, verdict: str = "rejected") -> None:
+        """Incumbent v1 + challenger v2 with enough labeled evidence that
+        check_challenger_resolution resolves immediately (min_decisions=1)."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+        base = _deployed_at_base(conn, AGENT_ID)
+
+        ch_regret, inc_regret = (3.0, 0.5) if verdict == "rejected" else (0.5, 3.0)
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
+            {"challenger_spec_version": 2, "incumbent_spec_version": 1},
+            regret_pct=ch_regret,
+        )
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
+            {"order": "stub", "fill": "stub"}, regret_pct=inc_regret,
+        )
+
+    def test_zero_hypotheses_cycle_still_records_outcome(self, conn):
+        """Fix B core: a resolved trial whose deploying cycle registered NO
+        hypotheses must still get reflections.outcome written (to the most
+        recent 'deployed' reflections row for the agent)."""
+        from agents.reflection import apply_challenger_resolution
+
+        self._deploy_trial_with_evidence(conn, verdict="rejected")
+
+        # The reflections row that deployed this challenger -- outcome
+        # 'deployed' as run_reflection_cycle writes it. NO hypotheses.
+        cur = conn.execute(
+            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
+            (AGENT_ID, "2026-01-02T00:00:00Z"),
+        )
+        reflection_id = cur.lastrowid
+        conn.commit()
+
+        result = apply_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is True
+        assert result["verdict"] == "rejected"
+
+        row = conn.execute(
+            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
+        ).fetchone()
+        assert row["outcome"] == "challenger_rejected", (
+            "resolved trial with zero hypotheses must still record its "
+            "outcome in the reflections row"
+        )
+
+    def test_with_hypotheses_resolves_both(self, conn):
+        """Parity with the pre-extraction forge.py behavior: hypotheses
+        resolved AND outcome written on the cycle that owns them."""
+        from agents.reflection import apply_challenger_resolution
+
+        self._deploy_trial_with_evidence(conn, verdict="promoted")
+
+        cur = conn.execute(
+            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
+            (AGENT_ID, "2026-01-02T00:00:00Z"),
+        )
+        reflection_id = cur.lastrowid
+        conn.commit()
+        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
+            {"claim": "c1", "predicted_effect": "e1"},
+        ])
+        conn.execute(
+            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
+        )
+        conn.commit()
+
+        result = apply_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is True
+        assert result["verdict"] == "promoted"
+
+        hyp = conn.execute(
+            "SELECT status, resolved_at FROM hypotheses WHERE id = ?", (hyp_ids[0],),
+        ).fetchone()
+        assert hyp["status"] == "validated"
+        assert hyp["resolved_at"] is not None
+
+        row = conn.execute(
+            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
+        ).fetchone()
+        assert row["outcome"] == "challenger_promoted"
+
+    def test_unresolved_trial_changes_nothing(self, conn):
+        """Trial still in progress -> resolved=False, no outcome writes."""
+        from agents.reflection import apply_challenger_resolution
+
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+        cur = conn.execute(
+            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
+            (AGENT_ID, "2026-01-02T00:00:00Z"),
+        )
+        reflection_id = cur.lastrowid
+        conn.commit()
+
+        result = apply_challenger_resolution(
+            conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
+        )
+        assert result["resolved"] is False
+
+        row = conn.execute(
+            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
+        ).fetchone()
+        assert row["outcome"] == "deployed"  # untouched
+
+
+# ---------------------------------------------------------------------------
 # get_hypothesis_digest — light coverage (wired for testability; no
 # production call site is added by T8, see t8-report.md).
 # ---------------------------------------------------------------------------

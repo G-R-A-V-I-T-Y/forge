@@ -582,20 +582,23 @@ async def main():
 
     # ------------------------------------------------------------------
     # M10: Challenger resolution (criterion 5+6) — for every agent with a
-    # deployed challenger, applies the desk.challenger_min_decisions /
-    # desk.challenger_max_days trigger (agents/reflection.py::
-    # check_challenger_resolution, which now counts LABELED decisions) and,
-    # once due, resolves the trial via store.specs.resolve_challenger (mean
-    # labeled regret over the trial window) and the cycle's hypotheses via
-    # agents/reflection.py::resolve_hypotheses, writing the outcome into the
-    # reflections row that produced them. config["desk"] is read directly
-    # (not .get) so a missing desk section fails loudly (logged) rather than
-    # silently defaulting. Cheap and idempotent when nothing is due, so an
-    # hourly cadence is plenty.
+    # deployed challenger, agents/reflection.py::apply_challenger_resolution
+    # applies the desk.challenger_min_decisions / desk.challenger_max_days
+    # trigger (check_challenger_resolution, which counts LABELED decisions)
+    # and, once due, resolves the trial via store.specs.resolve_challenger
+    # (mean labeled regret over the trial window), resolves the cycle's
+    # hypotheses via resolve_hypotheses, AND writes reflections.outcome
+    # unconditionally — including for cycles that registered zero
+    # hypotheses (T8 review r2 Fix B). The per-agent body lives in
+    # agents/reflection.py so it is testable without importing this module
+    # (apscheduler is not installed in the test env). config["desk"] is
+    # read directly (not .get) so a missing desk section fails loudly
+    # (logged) rather than silently defaulting. Cheap and idempotent when
+    # nothing is due, so an hourly cadence is plenty.
     # ------------------------------------------------------------------
     async def _run_challenger_resolution_job():
         try:
-            from agents.reflection import check_challenger_resolution, resolve_hypotheses
+            from agents.reflection import apply_challenger_resolution
 
             conn = get_connection(str(DB_PATH))
             try:
@@ -605,27 +608,12 @@ async def main():
                 ).fetchall()
                 for row in rows:
                     agent_id = row["agent_id"]
-                    result = check_challenger_resolution(conn, agent_id, desk_config)
-                    if not result.get("resolved"):
-                        continue
-                    logger.info(
-                        "Challenger resolution for %s: verdict=%s",
-                        agent_id, result.get("verdict"),
-                    )
-                    hyp_rows = conn.execute(
-                        """SELECT DISTINCT reflection_id FROM hypotheses
-                           WHERE agent_id = ? AND status = 'challenger'
-                             AND reflection_id IS NOT NULL""",
-                        (agent_id,),
-                    ).fetchall()
-                    for hr in hyp_rows:
-                        reflection_id = hr["reflection_id"]
-                        resolve_hypotheses(conn, reflection_id, result)
-                        conn.execute(
-                            "UPDATE reflections SET outcome = ? WHERE id = ?",
-                            (f"challenger_{result.get('verdict')}", reflection_id),
+                    result = apply_challenger_resolution(conn, agent_id, desk_config)
+                    if result.get("resolved"):
+                        logger.info(
+                            "Challenger resolution for %s: verdict=%s",
+                            agent_id, result.get("verdict"),
                         )
-                    conn.commit()
             finally:
                 conn.close()
         except Exception:

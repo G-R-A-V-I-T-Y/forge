@@ -627,6 +627,266 @@ async def test_challenger_logs_without_trading(conn, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# T8 review r2 Fix A: shadow decisions must be labelable by the REAL
+# production pipeline. Before this fix, decision_loop.py's shadow block
+# logged only challenger_* keys -- meta/labeling.py's extractors (enter
+# needs "order", wait needs "candidate") returned None, so NO
+# decision_labels row was ever written for a shadow decision and every
+# live challenger trial ended not_resolvable/expired_no_signal, never
+# promoted. These tests run the actual decision loop + the actual
+# run_labeling_job over a synthetic candle ledger -- no direct
+# decision_labels inserts anywhere.
+# ---------------------------------------------------------------------------
+
+
+async def _run_real_shadow_cycle(conn, tmp_path, challenger_spec: Spec) -> None:
+    """Deploy incumbent v1 (long, enters on the stub heartbeat) plus
+    *challenger_spec* as v2, then run the REAL decision loop once so it
+    logs a genuine shadow decision row (and the incumbent's own row)."""
+    from agents.decision_loop import run_decision
+    from execution.paper_bridge import PaperBridge
+    from market.heartbeat import write_heartbeat
+    from market.provider import MarketProvider
+    from store.db import insert_account_snapshot
+
+    insert_agent(
+        conn, DECISION_AGENT_ID, DECISION_AGENT_ID, "2026-07-14T00:00:00Z",
+        json.dumps({"compiled": True}),
+    )
+    insert_account_snapshot(conn, DECISION_AGENT_ID, "paper", 50000.0, 50000.0)
+
+    incumbent = Spec(
+        agent_id=DECISION_AGENT_ID, spec_version=1, thesis_version=1,
+        universe_include=["SOL-PERP"], regime_exclude=[], direction="long",
+        confidence_threshold=0.5, scale_threshold=0.3,
+        evidence=[
+            EvidenceTerm(
+                name="funding_term", feature="funding",
+                thresholds=[
+                    Threshold(op="<", weight=0.6, value=-0.001),
+                    Threshold(op="else", weight=0.0),
+                ],
+                missing="skip",
+            ),
+        ],
+        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
+        max_hold_hours=72, leverage=3, position_size_pct=0.10,
+    )
+    deploy_spec(conn, DECISION_AGENT_ID, incumbent)
+    deploy_as_challenger(conn, DECISION_AGENT_ID, challenger_spec)
+
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, _decision_loop_heartbeat_packet())
+    config = _decision_loop_config(heartbeat_path)
+
+    def sentinel_llm(sp, dp, **kw):
+        raise AssertionError("compiled agent must not call the LLM")
+
+    def bridge_factory(agent_id, conn_, provider_):
+        return PaperBridge(
+            agent_id=agent_id, conn=conn_, provider=provider_, config=config
+        )
+
+    provider = MarketProvider(config)
+    async with provider:
+        await run_decision(
+            agent_id=DECISION_AGENT_ID,
+            thesis_text="test thesis",
+            config=config,
+            conn=conn,
+            provider=provider,
+            llm_fn=sentinel_llm,
+            bridge_factory=bridge_factory,
+        )
+
+
+def _decision_loop_challenger_spec(
+    direction: str = "short",
+    confidence_threshold: float = 0.5,
+    scale_threshold: float = 0.3,
+) -> Spec:
+    return Spec(
+        agent_id=DECISION_AGENT_ID, spec_version=2, thesis_version=1,
+        universe_include=["SOL-PERP"], regime_exclude=[], direction=direction,
+        confidence_threshold=confidence_threshold, scale_threshold=scale_threshold,
+        evidence=[
+            EvidenceTerm(
+                name="funding_term_challenger", feature="funding",
+                thresholds=[
+                    Threshold(op="<", weight=0.9, value=-0.001),
+                    Threshold(op="else", weight=0.0),
+                ],
+                missing="skip",
+            ),
+        ],
+        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
+        max_hold_hours=72, leverage=3, position_size_pct=0.10,
+    )
+
+
+def _backdate_cycle_and_write_candles(conn, tmp_path, hours_back: int = 25) -> Path:
+    """Backdate this cycle's decision rows (and the challenger's
+    deployed_at) *hours_back* into the past, then write a synthetic
+    SOL-PERP 5m candle ledger from just before that point up to now --
+    so run_labeling_job's head-minus-24h cutoff makes the decisions
+    labelable at every horizon. Returns the ledger dir."""
+    from store.ledger import append_ledger_record
+
+    backdate = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    backdate_iso = _iso(backdate)
+    conn.execute(
+        "UPDATE decisions SET timestamp = ? WHERE agent_id = ?",
+        (backdate_iso, DECISION_AGENT_ID),
+    )
+    conn.execute(
+        """UPDATE specs SET deployed_at = ?
+           WHERE agent_id = ? AND status = 'challenger'""",
+        (_iso(backdate - timedelta(hours=1)), DECISION_AGENT_ID),
+    )
+    conn.commit()
+
+    ledger_dir = tmp_path / "ledger"
+    interval_ms = 5 * 60 * 1000
+    start = backdate - timedelta(minutes=30)
+    start_ms = int(start.timestamp() * 1000)
+    n_candles = (hours_back * 60 + 60) // 5  # covers backdate-30m .. ~now+30m
+    price = 145.20
+    for i in range(n_candles):
+        ts = start_ms + i * interval_ms
+        o = price
+        h = price * 1.002
+        l = price * 0.999
+        c = price * 1.0001
+        append_ledger_record(
+            "candles_5m",
+            {"ts": ts, "asset": "SOL-PERP", "o": o, "h": h, "l": l, "c": c, "v": 1000.0},
+            when=datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+            ledger_dir=str(ledger_dir),
+        )
+        price = c
+    return ledger_dir
+
+
+def _shadow_decision_id(conn) -> int:
+    row = conn.execute(
+        """SELECT id FROM decisions
+           WHERE agent_id = ? AND decision_details_json LIKE '%challenger_spec_version%'""",
+        (DECISION_AGENT_ID,),
+    ).fetchone()
+    assert row is not None, "shadow decision row not logged"
+    return row["id"]
+
+
+@pytest.mark.asyncio
+async def test_enter_shadow_labelable_by_production_pipeline(conn, tmp_path):
+    """MANDATORY closing-the-hole test (Fix A): an enter-action shadow
+    decision logged by the REAL decision loop is labeled by the REAL
+    run_labeling_job (non-null regret_pct), and resolve_challenger then
+    sees challenger evidence -- the trial is resolvable end-to-end on
+    production-pipeline output alone."""
+    from meta.labeling import run_labeling_job
+
+    # Challenger confidence 0.9 >= threshold 0.5 -> enter-action shadow.
+    await _run_real_shadow_cycle(
+        conn, tmp_path, _decision_loop_challenger_spec(),
+    )
+    shadow_id = _shadow_decision_id(conn)
+    ledger_dir = _backdate_cycle_and_write_candles(conn, tmp_path)
+
+    result = run_labeling_job(conn, ledger_dir)
+    assert result["errors"] == 0
+
+    # (1) The shadow decision got a real decision_labels row with
+    # non-null regret_pct at the canonical resolution horizon.
+    label = conn.execute(
+        """SELECT regret_pct FROM decision_labels
+           WHERE decision_id = ? AND horizon = '4h'""",
+        (shadow_id,),
+    ).fetchone()
+    assert label is not None, (
+        "production labeling pipeline wrote no decision_labels row for the "
+        "shadow decision -- challenger trials can never resolve on live data"
+    )
+    assert label["regret_pct"] is not None
+
+    # (2) resolve_challenger sees challenger evidence produced entirely by
+    # the production pipeline -- no direct decision_labels inserts.
+    resolution = resolve_challenger(conn, DECISION_AGENT_ID)
+    assert resolution["challenger_labeled_decisions"] > 0
+    assert resolution["verdict"] in ("promoted", "rejected")
+
+
+@pytest.mark.asyncio
+async def test_wait_shadow_labelable_by_production_pipeline(conn, tmp_path):
+    """Fix A, wait-action variant: a challenger whose confidence lands
+    below its scale_threshold logs a wait-action shadow -- that row must
+    also be labelable by the real pipeline."""
+    from meta.labeling import run_labeling_job
+
+    # Challenger confidence 0.9 < scale_threshold 0.95 -> wait-action shadow.
+    await _run_real_shadow_cycle(
+        conn, tmp_path,
+        _decision_loop_challenger_spec(
+            confidence_threshold=0.95, scale_threshold=0.95,
+        ),
+    )
+    shadow_id = _shadow_decision_id(conn)
+    shadow_action = conn.execute(
+        "SELECT decision_action FROM decisions WHERE id = ?", (shadow_id,),
+    ).fetchone()["decision_action"]
+    assert shadow_action == "wait", "test premise: shadow must be a wait"
+
+    ledger_dir = _backdate_cycle_and_write_candles(conn, tmp_path)
+    result = run_labeling_job(conn, ledger_dir)
+    assert result["errors"] == 0
+
+    label = conn.execute(
+        """SELECT regret_pct FROM decision_labels
+           WHERE decision_id = ? AND horizon = '4h'""",
+        (shadow_id,),
+    ).fetchone()
+    assert label is not None
+    assert label["regret_pct"] is not None
+
+    resolution = resolve_challenger(conn, DECISION_AGENT_ID)
+    assert resolution["challenger_labeled_decisions"] > 0
+
+
+def test_legacy_shadow_shape_skipped_not_crashed(conn, tmp_path):
+    """Backward tolerance: shadow rows logged BEFORE the Fix A enrichment
+    (challenger_* keys only, no "order"/"candidate") must be skipped by
+    run_labeling_job -- zero labels, zero errors -- never crash the job."""
+    from meta.labeling import run_labeling_job
+    from store.ledger import append_ledger_record
+
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+
+    backdate = datetime.now(timezone.utc) - timedelta(hours=25)
+    _insert_decision(
+        conn, AGENT_ID, _iso(backdate),
+        _challenger_details(2, 1),  # the exact pre-fix shadow shape
+    )
+
+    # Minimal candle ledger so the job has a head and the row is eligible.
+    interval_ms = 5 * 60 * 1000
+    start_ms = int((backdate - timedelta(minutes=30)).timestamp() * 1000)
+    for i in range(26 * 12):
+        ts = start_ms + i * interval_ms
+        append_ledger_record(
+            "candles_5m",
+            {"ts": ts, "asset": "SOL-PERP", "o": 145.2, "h": 145.5,
+             "l": 145.0, "c": 145.3, "v": 1000.0},
+            when=datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
+            ledger_dir=str(tmp_path / "ledger"),
+        )
+
+    result = run_labeling_job(conn, tmp_path / "ledger")
+    assert result["errors"] == 0
+    n_labels = conn.execute("SELECT COUNT(*) FROM decision_labels").fetchone()[0]
+    assert n_labels == 0
+
+
+# ---------------------------------------------------------------------------
 # T8 deliverable 7: named regression tests
 # ---------------------------------------------------------------------------
 
@@ -769,11 +1029,15 @@ class TestChallengerResolutionSchedulerWiring:
 
         segment = ast.get_source_segment(source, job_node)
         assert segment is not None
-        assert "check_challenger_resolution(" in segment, (
-            "expected the job to apply the min-decisions/max-days trigger"
-            " via agents.reflection.check_challenger_resolution"
-        )
-        assert "resolve_hypotheses(" in segment, (
-            "expected the job to resolve the cycle's hypotheses on"
-            " challenger resolution"
+        # T8 review r2 Fix B: the per-agent body (check trigger -> resolve
+        # hypotheses -> record reflections.outcome unconditionally) was
+        # extracted to agents/reflection.py::apply_challenger_resolution so
+        # it is behaviorally testable without importing forge.py (which
+        # needs apscheduler). The job must call that single entry point;
+        # the check/resolve/outcome behavior itself is covered by
+        # tests/test_hypotheses.py::TestApplyChallengerResolution.
+        assert "apply_challenger_resolution(" in segment, (
+            "expected the job to run the trigger + hypothesis resolution +"
+            " outcome recording via"
+            " agents.reflection.apply_challenger_resolution"
         )

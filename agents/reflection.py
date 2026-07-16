@@ -1961,3 +1961,81 @@ def check_challenger_resolution(
             f"{days_elapsed:.1f}/{max_days} days"
         ),
     }
+
+
+def apply_challenger_resolution(
+    conn,
+    agent_id: str,
+    desk_config: dict,
+) -> dict:
+    """Run one full challenger-resolution pass for *agent_id* -- the
+    per-agent body of forge.py's hourly ``challenger_resolution`` job,
+    extracted here so it is importable and behaviorally testable (forge.py
+    imports apscheduler at module load, unavailable in the test env).
+
+    When :func:`check_challenger_resolution` reports the trial resolved,
+    performs the spec's TWO unconditional actions (FORGE_PROPOSAL.md:1183 --
+    "Either way the outcome lands in reflections AND resolves the cycle's
+    hypotheses"):
+
+    1. Resolves every reflection cycle whose hypotheses are still
+       ``status='challenger'`` for this agent (via
+       :func:`resolve_hypotheses`).
+    2. Writes ``reflections.outcome = "challenger_{verdict}"``. T8 review
+       r2 Fix B: this write is NOT gated on the cycle having registered
+       hypotheses -- a cycle with zero hypotheses (legacy pipeline path, or
+       Stage A parsed none) previously never got its outcome recorded and
+       showed PENDING on the agent page forever. When no hypothesis rows
+       link a reflection cycle to this trial, the outcome lands on the most
+       recent ``outcome='deployed'`` reflections row for the agent -- the
+       cycle that deployed this challenger (run_reflection_cycle writes
+       ``'deployed'`` on every successful challenger deploy, scheduled and
+       web-triggered alike).
+
+    Returns
+    -------
+    dict
+        :func:`check_challenger_resolution`'s result, unchanged.
+    """
+    result = check_challenger_resolution(conn, agent_id, desk_config)
+    if not result.get("resolved"):
+        return result
+
+    hyp_rows = conn.execute(
+        """SELECT DISTINCT reflection_id FROM hypotheses
+           WHERE agent_id = ? AND status = 'challenger'
+             AND reflection_id IS NOT NULL""",
+        (agent_id,),
+    ).fetchall()
+    reflection_ids = [hr["reflection_id"] for hr in hyp_rows]
+
+    for reflection_id in reflection_ids:
+        resolve_hypotheses(conn, reflection_id, result)
+
+    if not reflection_ids:
+        # Zero-hypotheses cycle: fall back to the reflections row that
+        # deployed this challenger.
+        row = conn.execute(
+            """SELECT id FROM reflections
+               WHERE agent_id = ? AND outcome = 'deployed'
+               ORDER BY id DESC LIMIT 1""",
+            (agent_id,),
+        ).fetchone()
+        if row is not None:
+            reflection_ids = [row["id"]]
+        else:
+            logger.warning(
+                "[%s] Challenger resolved (verdict=%s) but no reflections row "
+                "found to record the outcome on (no challenger-status "
+                "hypotheses and no 'deployed' reflection)",
+                agent_id, result.get("verdict"),
+            )
+
+    outcome = f"challenger_{result.get('verdict')}"
+    for reflection_id in reflection_ids:
+        conn.execute(
+            "UPDATE reflections SET outcome = ? WHERE id = ?",
+            (outcome, reflection_id),
+        )
+    conn.commit()
+    return result
