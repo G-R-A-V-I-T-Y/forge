@@ -581,6 +581,65 @@ async def main():
     logger.info("Reflection scheduler job scheduled — runs every 30 min")
 
     # ------------------------------------------------------------------
+    # M10: Challenger resolution (criterion 5+6) — for every agent with a
+    # deployed challenger, applies the desk.challenger_min_decisions /
+    # desk.challenger_max_days trigger (agents/reflection.py::
+    # check_challenger_resolution, which now counts LABELED decisions) and,
+    # once due, resolves the trial via store.specs.resolve_challenger (mean
+    # labeled regret over the trial window) and the cycle's hypotheses via
+    # agents/reflection.py::resolve_hypotheses, writing the outcome into the
+    # reflections row that produced them. config["desk"] is read directly
+    # (not .get) so a missing desk section fails loudly (logged) rather than
+    # silently defaulting. Cheap and idempotent when nothing is due, so an
+    # hourly cadence is plenty.
+    # ------------------------------------------------------------------
+    async def _run_challenger_resolution_job():
+        try:
+            from agents.reflection import check_challenger_resolution, resolve_hypotheses
+
+            conn = get_connection(str(DB_PATH))
+            try:
+                desk_config = config["desk"]
+                rows = conn.execute(
+                    "SELECT DISTINCT agent_id FROM specs WHERE status = 'challenger'"
+                ).fetchall()
+                for row in rows:
+                    agent_id = row["agent_id"]
+                    result = check_challenger_resolution(conn, agent_id, desk_config)
+                    if not result.get("resolved"):
+                        continue
+                    logger.info(
+                        "Challenger resolution for %s: verdict=%s",
+                        agent_id, result.get("verdict"),
+                    )
+                    hyp_rows = conn.execute(
+                        """SELECT DISTINCT reflection_id FROM hypotheses
+                           WHERE agent_id = ? AND status = 'challenger'
+                             AND reflection_id IS NOT NULL""",
+                        (agent_id,),
+                    ).fetchall()
+                    for hr in hyp_rows:
+                        reflection_id = hr["reflection_id"]
+                        resolve_hypotheses(conn, reflection_id, result)
+                        conn.execute(
+                            "UPDATE reflections SET outcome = ? WHERE id = ?",
+                            (f"challenger_{result.get('verdict')}", reflection_id),
+                        )
+                    conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Challenger resolution job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_challenger_resolution_job,
+        trigger=IntervalTrigger(hours=1, timezone=timezone.utc),
+        id="challenger_resolution",
+        replace_existing=True,
+    )
+    logger.info("Challenger resolution job scheduled — runs hourly")
+
+    # ------------------------------------------------------------------
     # M9: Head of desk — daily briefing (crit 8). The old auto-spawner
     # this job once latched off (pre-run finding F8) was replaced by the
     # briefing/chat Head of Desk; population management now lives with
