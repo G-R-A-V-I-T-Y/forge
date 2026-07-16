@@ -1,4 +1,6 @@
 """Tests for the agent detail page's spec diff view and calibration report."""
+import json
+
 from fastapi.testclient import TestClient
 
 from store.db import insert_agent, insert_trade
@@ -110,3 +112,47 @@ def test_agent_detail_calibration_report_buckets_and_win_rate(conn):
     assert "50.0%" in r.text
     # bucket 0.8-0.9 has 1 trade, 1 win -> 100.0%
     assert "100.0%" in r.text
+
+
+def test_agent_detail_no_reflections_shows_graceful_state(conn):
+    _seed_agent(conn)
+    r = _client(conn).get(f"/agents/{AGENT_ID}")
+    assert r.status_code == 200
+    assert "No reflection cycles recorded yet" in r.text
+
+
+def test_agent_detail_reflection_cycle_shows_digest_diff_and_hypotheses(conn):
+    """M10 'Done when': the agent page shows the dossier digest, hypothesis
+    outcomes, and thesis/spec diffs for the cycle."""
+    _seed_agent(conn)
+    cur = conn.execute(
+        """INSERT INTO reflections
+               (agent_id, triggered_at, outcome, research_findings_json, proposed_changes)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            AGENT_ID, "2026-07-10T00:00:00Z", "deployed",
+            json.dumps({"closed_trades": 25, "regimes": ["trending"]}),
+            json.dumps({"spec_diff_summary": {"from_version": 1, "to_version": 2}}),
+        ),
+    )
+    reflection_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO hypotheses
+               (agent_id, reflection_id, claim, predicted_effect, status,
+                effect_observed, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            AGENT_ID, reflection_id, "funding term improves entries",
+            "regret decreases", "validated", 1.5,
+            "2026-07-10T00:00:00Z", "2026-07-12T00:00:00Z",
+        ),
+    )
+    conn.commit()
+
+    r = _client(conn).get(f"/agents/{AGENT_ID}")
+    assert r.status_code == 200
+    assert "Reflection Cycles" in r.text
+    assert "funding term improves entries" in r.text
+    assert "VALIDATED" in r.text
+    assert "closed_trades" in r.text  # dossier digest JSON rendered
+    assert "spec_diff_summary" in r.text  # thesis/spec diff JSON rendered

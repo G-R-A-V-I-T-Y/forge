@@ -164,15 +164,25 @@ class Dossier:
                 )
             sections.append(_section("FEATURE STATS", "\n".join(lines)))
 
-        # 8. Hypothesis history
+        # 8. Hypothesis history — this agent's own registry track record
+        # (M10 crit 6): claim + resolution status + observed effect, so a
+        # reflection cycle sees its own falsified ideas and cannot
+        # re-propose them without addressing the falsification.
         if self.hypothesis_history:
             lines = []
             for h in self.hypothesis_history:
+                effect = h.get("effect_observed")
+                effect_note = f" effect_observed={effect:.2f}" if effect is not None else ""
                 lines.append(
-                    f"  [{h.get('timestamp', '?')[:16]}] "
-                    f"result={h.get('result', '?')}  "
-                    f"hypothesis={_trunc(h.get('hypothesis', ''), 100)}"
+                    f"  [{(h.get('created_at') or '?')[:16]}] "
+                    f"status={(h.get('status') or '?').upper()}{effect_note}  "
+                    f"claim={_trunc(h.get('claim', ''), 100)}"
                 )
+                if h.get("falsification_condition"):
+                    lines.append(
+                        f"      falsification_condition="
+                        f"{_trunc(h['falsification_condition'], 100)}"
+                    )
             sections.append(_section("HYPOTHESIS TRACK RECORD", "\n".join(lines)))
 
         # 9. Desk digest
@@ -773,38 +783,32 @@ def _feature_stats_from_trades(conn, agent_id: str) -> list[dict]:
 
 
 def _get_hypothesis_history(conn, agent_id: str) -> list[dict]:
-    """Read hypothesis track record from trade records.
+    """Read the agent's own hypothesis REGISTRY track record (M10 crit 6),
+    not the free-text ``trades.hypothesis`` column (a separate, unrelated
+    per-trade note field).
 
-    Each trade with a non-null ``hypothesis`` field is a hypothesis event.
-    Returns newest-first, capped at 20 entries.
+    This is the evidence that lets the dossier show the LLM its own
+    falsified ideas so a reflection cycle "cannot re-propose its own
+    falsified ideas without addressing the falsification" -- the whole
+    point of criterion 6. Sourced from
+    ``agents.reflection.get_agent_hypothesis_history`` (agent_id,
+    reflection_id, claim, feature, direction, regime_context,
+    predicted_effect, falsification_condition, status, effect_observed,
+    created_at, resolved_at), newest first, capped at 20 entries.
+
+    Lazy-imported (matches ``_safe_calibration``'s pattern just above) to
+    avoid a module-load cycle: agents/reflection.py imports
+    ``build_dossier`` from this module at top level.
     """
     try:
-        rows = conn.execute(
-            """SELECT entry_timestamp, hypothesis, result, pnl_pct, asset, regime
-               FROM trades
-               WHERE agent_id = ?
-                 AND status = 'closed'
-                 AND voided = 0
-                 AND hypothesis IS NOT NULL
-                 AND hypothesis != ''
-               ORDER BY entry_timestamp DESC
-               LIMIT 20""",
-            (agent_id,),
-        ).fetchall()
-    except Exception:
+        from agents.reflection import get_agent_hypothesis_history  # noqa: PLC0415
+
+        rows = get_agent_hypothesis_history(conn, agent_id)
+    except Exception as exc:
+        logger.warning("Hypothesis registry history failed for %s: %s", agent_id, exc)
         return []
 
-    return [
-        {
-            "timestamp": r["entry_timestamp"],
-            "hypothesis": r["hypothesis"],
-            "result": r["result"],
-            "pnl_pct": r["pnl_pct"],
-            "asset": r["asset"],
-            "regime": r["regime"],
-        }
-        for r in rows
-    ]
+    return rows[:20]
 
 
 # ---------------------------------------------------------------------------

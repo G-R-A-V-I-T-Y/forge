@@ -97,6 +97,7 @@
   <button class="tab" data-tab="thesis">Thesis v{{ thesis_version }}</button>
   <button class="tab" data-tab="spec">Spec History</button>
   <button class="tab" data-tab="cal">Calibration</button>
+  <button class="tab" data-tab="reflect">Reflection Cycles</button>
 </div>
 
 <!-- ── Performance Tab ── -->
@@ -226,6 +227,64 @@
   </table>
   {% else %}
   <div class="neutral help-text">Not enough closed trades with recorded confidence yet to compute a calibration report.</div>
+  {% endif %}
+</div>
+
+<!-- ── Reflection Cycles Tab ── -->
+<div class="tab-content" id="tab-reflect">
+  {% if reflection_cycles %}
+  {% for cycle in reflection_cycles %}
+  <div class="panel" style="margin-bottom:var(--space-lg);">
+    <div class="panel-header">
+      Cycle #{{ cycle.id }} — {{ cycle.triggered_at[:19] if cycle.triggered_at else '—' }}
+      <span class="badge badge-{{ cycle.outcome or 'pending' }}">{{ (cycle.outcome or 'PENDING').upper() }}</span>
+    </div>
+
+    {% if cycle.rejection_reason %}
+    <div class="neutral help-text">Rejection: {{ cycle.rejection_reason }}</div>
+    {% endif %}
+
+    <h4 class="section-header">Dossier Digest</h4>
+    {% if cycle.research_findings %}
+    <pre class="code-block">{{ cycle.research_findings | tojson(indent=2) }}</pre>
+    {% else %}
+    <div class="neutral help-text">No dossier digest recorded for this cycle.</div>
+    {% endif %}
+
+    <h4 class="section-header">Thesis / Spec Diff</h4>
+    {% if cycle.proposed_changes_parsed %}
+    <pre class="code-block">{{ cycle.proposed_changes_parsed | tojson(indent=2) }}</pre>
+    {% else %}
+    <div class="neutral help-text">No proposed changes recorded for this cycle.</div>
+    {% endif %}
+
+    <h4 class="section-header">Hypothesis Outcomes</h4>
+    {% if cycle.hypotheses %}
+    <table class="data-table">
+      <tr>
+        <th>Claim</th>
+        <th>Predicted Effect</th>
+        <th>Status</th>
+        <th>Effect Observed</th>
+        <th>Resolved</th>
+      </tr>
+      {% for h in cycle.hypotheses %}
+      <tr>
+        <td>{{ h.claim }}</td>
+        <td class="help-text">{{ h.predicted_effect or '—' }}</td>
+        <td><span class="badge badge-{{ h.status }}">{{ h.status.upper() }}</span></td>
+        <td>{{ "%.2f"|format(h.effect_observed) if h.effect_observed is not none else '—' }}</td>
+        <td class="help-text">{{ h.resolved_at[:19] if h.resolved_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="neutral help-text">No hypotheses registered for this cycle.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="neutral help-text">No reflection cycles recorded yet for this agent.</div>
   {% endif %}
 </div>
 

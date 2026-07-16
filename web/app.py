@@ -651,6 +651,7 @@ async def agent_detail(request: Request, name: str):
     spec_history = get_spec_history(conn, aid)
     spec_diff = _spec_diff(spec_history)
     calibration = compute_calibration_curve(conn, aid)
+    reflection_cycles = _get_reflection_cycles(conn, aid)
 
     return templates.TemplateResponse(
         "agent_detail.html",
@@ -669,8 +670,60 @@ async def agent_detail(request: Request, name: str):
             "spec_history": spec_history,
             "spec_diff": spec_diff,
             "calibration": calibration,
+            "reflection_cycles": reflection_cycles,
         },
     )
+
+
+def _get_reflection_cycles(conn, agent_id: str, limit: int = 10) -> list[dict]:
+    """Recent reflection cycles for the agent-detail page (M10 "Done when":
+    the agent page must show the dossier digest, hypothesis outcomes, and
+    thesis/spec diffs for the cycle) -- the dossier digest is
+    reflections.research_findings_json, the thesis/spec diff is
+    reflections.proposed_changes (hypotheses + diff summaries written by
+    agents/reflection.py::run_reflection), and hypothesis outcomes are the
+    hypotheses table rows linked back to each reflection_id."""
+    rows = conn.execute(
+        """SELECT id, triggered_at, outcome, rejection_reason, evidence_summary,
+                  research_findings_json, proposed_changes, adversarial_critique,
+                  holdout_result
+           FROM reflections
+           WHERE agent_id = ?
+           ORDER BY id DESC LIMIT ?""",
+        (agent_id, limit),
+    ).fetchall()
+
+    cycles: list[dict] = []
+    for r in rows:
+        cycle = dict(r)
+        try:
+            cycle["research_findings"] = (
+                _json.loads(cycle["research_findings_json"])
+                if cycle["research_findings_json"] else None
+            )
+        except (ValueError, TypeError):
+            cycle["research_findings"] = None
+        try:
+            cycle["proposed_changes_parsed"] = (
+                _json.loads(cycle["proposed_changes"])
+                if cycle["proposed_changes"] else None
+            )
+        except (ValueError, TypeError):
+            cycle["proposed_changes_parsed"] = None
+
+        hyp_rows = conn.execute(
+            """SELECT id, claim, feature, direction, predicted_effect,
+                      falsification_condition, status, effect_observed,
+                      created_at, resolved_at
+               FROM hypotheses
+               WHERE reflection_id = ?
+               ORDER BY id""",
+            (cycle["id"],),
+        ).fetchall()
+        cycle["hypotheses"] = [dict(h) for h in hyp_rows]
+        cycles.append(cycle)
+
+    return cycles
 
 
 @app.get("/api/agents/{name}")
