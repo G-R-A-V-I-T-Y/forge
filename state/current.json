@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-16T08:41:51Z",
+  "generated_at": "2026-07-16T08:46:52Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -95,7 +95,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "MiMo V2.5 Free",
+      "last_model_used": "DeepSeek V4 Flash Free",
       "paper_balance": 50016.69110173036,
       "paper_peak": 50417.94976138105,
       "live_balance": null
@@ -106,7 +106,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "MiMo V2.5 Free",
+      "last_model_used": "Big Pickle",
       "paper_balance": 50304.47319315246,
       "paper_peak": 50304.47319315246,
       "live_balance": null
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.0034337440976838552,
+      "current_pnl_pct": 0.0014827529946785593,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 3614.48452985326,
       "true_notional": 7228.96905970652,
       "opened_at": "2026-07-14T15:32:26.343247Z",
-      "current_pnl_pct": -0.007839736964223593,
+      "current_pnl_pct": -0.011713123694344484,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260714_153226_BTC_532e"
@@ -195,7 +195,7 @@
       "notional_usd": 2817.0504988165376,
       "true_notional": 5634.100997633075,
       "opened_at": "2026-07-14T16:18:07.104919Z",
-      "current_pnl_pct": 0.012643162479841649,
+      "current_pnl_pct": 0.016507209838529154,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260714_161807_BTC_edce"
@@ -213,7 +213,7 @@
       "notional_usd": 2314.0057668850136,
       "true_notional": 4628.011533770027,
       "opened_at": "2026-07-15T00:47:48.342067Z",
-      "current_pnl_pct": -0.01598568125252282,
+      "current_pnl_pct": -0.019843229702412923,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260715_004748_BTC_ec83"
