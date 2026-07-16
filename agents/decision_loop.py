@@ -197,6 +197,54 @@ async def run_decision(
                     if decision["action"] == "enter" and decision["confidence"] >= active_spec.confidence_threshold:
                         break
 
+                # --- M10: Shadow-challenger evaluation ------------------
+                from store.specs import get_challenger_spec
+
+                challenger_spec = get_challenger_spec(conn, agent_id)
+                if challenger_spec is not None:
+                    ch_best_asset = None
+                    ch_best_decision = None
+                    ch_best_confidence = 0.0
+
+                    for asset_name, asset_fields in assets.items():
+                        ch_row = dict(asset_fields)
+                        ch_decision = evaluate(challenger_spec, ch_row)
+
+                        if ch_decision["confidence"] > ch_best_confidence:
+                            ch_best_confidence = ch_decision["confidence"]
+                            ch_best_asset = asset_name
+                            ch_best_decision = ch_decision
+
+                        if (
+                            ch_decision["action"] == "enter"
+                            and ch_decision["confidence"]
+                            >= challenger_spec.confidence_threshold
+                        ):
+                            break
+
+                    if ch_best_decision is not None:
+                        ch_details: dict = {
+                            "challenger_spec_version": challenger_spec.spec_version,
+                            "challenger_confidence": ch_best_decision["confidence"],
+                            "challenger_action": ch_best_decision["action"],
+                            "challenger_asset": ch_best_asset,
+                            "challenger_evidence_strength": ch_best_decision.get(
+                                "evidence_strength",
+                            ),
+                            "incumbent_spec_version": active_spec.spec_version,
+                        }
+                        log_decision(
+                            conn,
+                            agent_id,
+                            ch_best_decision["action"],
+                            f"challenger/v{challenger_spec.spec_version}"
+                            f" shadow on {ch_best_asset}",
+                            ch_details,
+                            confidence=ch_best_decision["confidence"],
+                            evidence_strength=ch_best_decision.get("evidence_strength"),
+                            model_used=f"compiled/v{challenger_spec.spec_version}",
+                        )
+
                 if best_decision:
                     if has_open_position_for_asset(conn, agent_id, best_asset):
                         update_last_model_used(
