@@ -74,14 +74,60 @@ def _spec(agent_id: str, spec_version: int, direction: str = "long") -> Spec:
     )
 
 
-def _insert_decision(conn, agent_id: str, ts_iso: str, details: dict) -> None:
-    conn.execute(
+def _insert_decision(conn, agent_id: str, ts_iso: str, details: dict) -> int:
+    cur = conn.execute(
         """INSERT INTO decisions
            (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
            VALUES (?, ?, ?, ?, ?)""",
         (agent_id, ts_iso, "enter", "test", json.dumps(details)),
     )
     conn.commit()
+    return cur.lastrowid
+
+
+def _insert_labeled_decision(
+    conn,
+    agent_id: str,
+    ts_iso: str,
+    details: dict,
+    regret_pct: float,
+    horizon: str = "4h",
+) -> int:
+    """Insert a decision AND its decision_labels row -- the production shape
+    resolve_challenger's regret rewrite reads from (T8: mean labeled regret,
+    not confidence parsed out of decision_details_json)."""
+    decision_id = _insert_decision(conn, agent_id, ts_iso, details)
+    conn.execute(
+        """INSERT INTO decision_labels
+               (decision_id, horizon, fwd_return_pct, max_runup_pct,
+                max_drawdown_pct, chosen_outcome_pct, best_action,
+                best_outcome_pct, regret_pct, labeled_at)
+           VALUES (?, ?, 0, 0, 0, 0, 'enter_long', 0, ?, ?)""",
+        (decision_id, horizon, regret_pct, ts_iso),
+    )
+    conn.commit()
+    return decision_id
+
+
+def _challenger_details(spec_version: int, incumbent_version: int) -> dict:
+    """Production shape logged by agents/decision_loop.py's shadow-challenger
+    block (ch_details in run_decision)."""
+    return {
+        "challenger_spec_version": spec_version,
+        "challenger_confidence": 0.8,
+        "challenger_action": "enter",
+        "challenger_asset": "SOL-PERP",
+        "challenger_evidence_strength": {"funding_term_challenger": 0.9},
+        "incumbent_spec_version": incumbent_version,
+    }
+
+
+def _incumbent_enter_details() -> dict:
+    """Production shape logged by agents/decision_loop.py's enter branch:
+    {"order": str(response), "fill": str(fill)} -- NO confidence key. This
+    is the exact shape that made the pre-T8 confidence-based
+    resolve_challenger always read 0.0 for the incumbent on live data."""
+    return {"order": "stub_order_repr", "fill": "stub_fill_repr"}
 
 
 def _challenger_deployed_at(conn, agent_id: str, spec_version: int) -> str:
@@ -101,10 +147,17 @@ def _challenger_deployed_at(conn, agent_id: str, spec_version: int) -> str:
 
 
 class TestResolveChallenger:
+    """T8 rewrite: resolve_challenger compares mean LABELED regret (joined
+    from decision_labels at the canonical 4h horizon), not confidence
+    parsed out of decision_details_json -- see resolve_challenger's
+    docstring for the horizon-policy rationale. Fixtures use the real
+    production row shapes (see _challenger_details / _incumbent_enter_details
+    above), not the old {"confidence": ...} shape production never writes."""
+
     def test_promotion_path(self, conn):
-        """Challenger's average confidence exceeds the incumbent's over the
-        trial window → promoted, active_spec_version flips, incumbent goes
-        inactive."""
+        """Challenger's mean labeled regret is LOWER than the incumbent's
+        over the trial window → promoted, active_spec_version flips,
+        incumbent goes inactive."""
         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
@@ -113,13 +166,13 @@ class TestResolveChallenger:
         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
 
         for i in range(2):
-            _insert_decision(
+            _insert_labeled_decision(
                 conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
-                {"challenger_spec_version": 2, "challenger_confidence": 0.9},
+                _challenger_details(2, 1), regret_pct=0.4,
             )
-            _insert_decision(
+            _insert_labeled_decision(
                 conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
-                {"confidence": 0.3},
+                _incumbent_enter_details(), regret_pct=1.8,
             )
 
         result = resolve_challenger(conn, AGENT_ID)
@@ -127,10 +180,10 @@ class TestResolveChallenger:
         assert result["verdict"] == "promoted"
         assert result["challenger_version"] == 2
         assert result["incumbent_version"] == 1
-        assert result["challenger_avg_confidence"] == pytest.approx(0.9)
-        assert result["incumbent_avg_confidence"] == pytest.approx(0.3)
-        assert result["challenger_decisions"] == 2
-        assert result["incumbent_decisions"] == 2
+        assert result["challenger_mean_regret"] == pytest.approx(0.4)
+        assert result["incumbent_mean_regret"] == pytest.approx(1.8)
+        assert result["challenger_labeled_decisions"] == 2
+        assert result["incumbent_labeled_decisions"] == 2
 
         specs = {
             r["spec_version"]: r["status"]
@@ -148,8 +201,9 @@ class TestResolveChallenger:
         assert agent["active_spec_version"] == 2
 
     def test_rejection_path(self, conn):
-        """Challenger's average confidence does NOT exceed the incumbent's
-        → rejected, incumbent stays active, challenger goes inactive."""
+        """Challenger's mean labeled regret is NOT lower than the
+        incumbent's → rejected, incumbent stays active, challenger goes
+        inactive."""
         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
@@ -157,20 +211,20 @@ class TestResolveChallenger:
         deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
 
-        _insert_decision(
+        _insert_labeled_decision(
             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
-            {"challenger_spec_version": 2, "challenger_confidence": 0.2},
+            _challenger_details(2, 1), regret_pct=2.5,
         )
-        _insert_decision(
+        _insert_labeled_decision(
             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
-            {"confidence": 0.5},
+            _incumbent_enter_details(), regret_pct=0.6,
         )
 
         result = resolve_challenger(conn, AGENT_ID)
 
         assert result["verdict"] == "rejected"
-        assert result["challenger_avg_confidence"] == pytest.approx(0.2)
-        assert result["incumbent_avg_confidence"] == pytest.approx(0.5)
+        assert result["challenger_mean_regret"] == pytest.approx(2.5)
+        assert result["incumbent_mean_regret"] == pytest.approx(0.6)
 
         specs = {
             r["spec_version"]: r["status"]
@@ -194,6 +248,44 @@ class TestResolveChallenger:
         result = resolve_challenger(conn, AGENT_ID)
         assert result == {"verdict": "no_challenger"}
 
+    def test_not_resolvable_without_labels(self, conn):
+        """T8 deliverable 1: zero labeled decisions on either side must
+        never be promoted or rejected on zero evidence -- the spec rows are
+        left completely untouched so the trial can keep running until the
+        nightly labeling job catches up."""
+        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+        # Decisions logged but never labeled (labeling job hasn't run yet).
+        _insert_decision(
+            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+            _challenger_details(2, 1),
+        )
+        _insert_decision(
+            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+            _incumbent_enter_details(),
+        )
+
+        result = resolve_challenger(conn, AGENT_ID)
+
+        assert result["verdict"] == "not_resolvable"
+        assert result["challenger_mean_regret"] is None
+        assert result["incumbent_mean_regret"] is None
+
+        specs = {
+            r["spec_version"]: r["status"]
+            for r in conn.execute(
+                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+                (AGENT_ID,),
+            ).fetchall()
+        }
+        assert specs[2] == "challenger"  # untouched -- not promoted or rejected
+        assert specs[1] == "active"      # untouched
+
     def test_pre_trial_incumbent_decisions_do_not_influence_outcome(self, conn):
         """T6 review finding 3: resolve_challenger must scope BOTH sides of
         the comparison to the challenger's trial window. A pre-trial
@@ -201,8 +293,8 @@ class TestResolveChallenger:
         challenger was even deployed) must not be averaged in.
 
         Rigged so the two possible answers disagree: including the
-        pre-trial 0.99-confidence row would push the incumbent average
-        above the challenger's and flip the verdict to "rejected"; properly
+        pre-trial near-zero-regret row would pull the incumbent average
+        below the challenger's and flip the verdict to "rejected"; properly
         excluding it correctly promotes the challenger.
         """
         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
@@ -210,8 +302,9 @@ class TestResolveChallenger:
 
         # Pre-trial incumbent decision, logged long before the challenger
         # trial started.
-        _insert_decision(
-            conn, AGENT_ID, "2020-01-01T00:00:00Z", {"confidence": 0.99},
+        _insert_labeled_decision(
+            conn, AGENT_ID, "2020-01-01T00:00:00Z",
+            _incumbent_enter_details(), regret_pct=0.01,
         )
 
         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
@@ -219,21 +312,21 @@ class TestResolveChallenger:
         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
 
         # In-trial-window decisions.
-        _insert_decision(
+        _insert_labeled_decision(
             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
-            {"challenger_spec_version": 2, "challenger_confidence": 0.5},
+            _challenger_details(2, 1), regret_pct=1.0,
         )
-        _insert_decision(
+        _insert_labeled_decision(
             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
-            {"confidence": 0.1},
+            _incumbent_enter_details(), regret_pct=1.5,
         )
 
         result = resolve_challenger(conn, AGENT_ID)
 
-        # Only the in-window incumbent decision (0.1) counted -- the
-        # pre-trial 0.99 row was excluded.
-        assert result["incumbent_decisions"] == 1
-        assert result["incumbent_avg_confidence"] == pytest.approx(0.1)
+        # Only the in-window incumbent decision (1.5) counted -- the
+        # pre-trial 0.01-regret row was excluded.
+        assert result["incumbent_labeled_decisions"] == 1
+        assert result["incumbent_mean_regret"] == pytest.approx(1.5)
         assert result["verdict"] == "promoted"
 
 
@@ -424,3 +517,156 @@ async def test_challenger_logs_without_trading(conn, tmp_path, monkeypatch):
     assert gate_calls == [DECISION_AGENT_ID]
     assert validate_calls == [1]
     assert bridge_calls == [DECISION_AGENT_ID]
+
+
+# ---------------------------------------------------------------------------
+# T8 deliverable 7: named regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_challenger_promotion_on_lower_regret(conn):
+    """A challenger with lower mean labeled regret over the trial window
+    becomes active; the incumbent is demoted to inactive."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+    deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+    deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+
+    deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+    base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+    for i in range(3):
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
+            _challenger_details(2, 1), regret_pct=0.5,
+        )
+        _insert_labeled_decision(
+            conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
+            _incumbent_enter_details(), regret_pct=2.0,
+        )
+
+    result = resolve_challenger(conn, AGENT_ID)
+
+    assert result["verdict"] == "promoted"
+    assert result["challenger_mean_regret"] == pytest.approx(0.5)
+    assert result["incumbent_mean_regret"] == pytest.approx(2.0)
+
+    specs = {
+        r["spec_version"]: r["status"]
+        for r in conn.execute(
+            "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+            (AGENT_ID,),
+        ).fetchall()
+    }
+    assert specs[2] == "active"
+    assert specs[1] == "inactive"
+
+    agent = conn.execute(
+        "SELECT active_spec_version FROM agents WHERE id = ?", (AGENT_ID,)
+    ).fetchone()
+    assert agent["active_spec_version"] == 2
+
+
+def test_challenger_rejection_resolves_hypotheses(conn):
+    """T8 deliverable 4: a losing challenger trial marks the cycle's
+    hypotheses falsified, with effect_observed recorded (not left null)."""
+    from agents.reflection import register_hypotheses, resolve_hypotheses
+
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+    deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+
+    cur = conn.execute(
+        "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
+        (AGENT_ID, "2026-01-02T00:00:00Z"),
+    )
+    reflection_id = cur.lastrowid
+    conn.commit()
+
+    hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
+        {
+            "claim": "funding term improves entries",
+            "predicted_effect": "regret decreases",
+            "falsification_condition": "challenger trial shows no improvement",
+        },
+    ])
+    conn.execute(
+        "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
+    )
+    conn.commit()
+
+    deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+    deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+    base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+
+    _insert_labeled_decision(
+        conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
+        _challenger_details(2, 1), regret_pct=3.0,
+    )
+    _insert_labeled_decision(
+        conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
+        _incumbent_enter_details(), regret_pct=0.5,
+    )
+
+    challenger_result = resolve_challenger(conn, AGENT_ID)
+    assert challenger_result["verdict"] == "rejected"
+
+    n = resolve_hypotheses(conn, reflection_id, challenger_result)
+    assert n == 1
+
+    row = conn.execute(
+        "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
+        (hyp_ids[0],),
+    ).fetchone()
+    assert row["status"] == "falsified"
+    assert row["effect_observed"] == pytest.approx(0.5 - 3.0)
+    assert row["resolved_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# T8 deliverable 2: scheduler-job wiring (ast-based, matches
+# tests/test_labeling.py::TestForgeSchedulerAbsorption's convention of
+# reading forge.py's source directly rather than importing the module).
+# ---------------------------------------------------------------------------
+
+
+class TestChallengerResolutionSchedulerWiring:
+    def _forge_source(self) -> str:
+        import pathlib
+
+        forge_py = pathlib.Path(__file__).resolve().parents[1] / "forge.py"
+        return forge_py.read_text(encoding="utf-8")
+
+    def test_challenger_resolution_job_registered(self):
+        source = self._forge_source()
+        assert 'id="challenger_resolution"' in source, (
+            "the M10 challenger-resolution scheduler job must be registered"
+            " in forge.py"
+        )
+
+    def test_challenger_resolution_job_invokes_check_and_resolve(self):
+        import ast
+
+        source = self._forge_source()
+        tree = ast.parse(source, filename="forge.py")
+
+        job_node = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_run_challenger_resolution_job"
+            ):
+                job_node = node
+                break
+        assert job_node is not None, (
+            "_run_challenger_resolution_job not found in forge.py"
+        )
+
+        segment = ast.get_source_segment(source, job_node)
+        assert segment is not None
+        assert "check_challenger_resolution(" in segment, (
+            "expected the job to apply the min-decisions/max-days trigger"
+            " via agents.reflection.check_challenger_resolution"
+        )
+        assert "resolve_hypotheses(" in segment, (
+            "expected the job to resolve the cycle's hypotheses on"
+            " challenger resolution"
+        )

@@ -399,25 +399,50 @@ def get_challenger_spec(conn: sqlite3.Connection, agent_id: str) -> Spec | None:
     return get_spec_by_status(conn, agent_id, "challenger")
 
 
-def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
+#: Horizon policy (T8): both sides of the regret comparison are scored on a
+#: single canonical horizon rather than averaged across whichever of
+#: 1h/4h/24h happen to be labeled for a given decision. A per-decision
+#: average across available horizons would let older decisions (more
+#: horizons labeled) implicitly outweigh newer ones and would conflate
+#: short-term noise (1h) with slow-to-resolve signal (24h) into one number.
+#: 4h is the simplest defensible pick: long enough to smooth 5m-candle
+#: noise, short enough that a 20-decision trial resolves in a reasonable
+#: number of days. See meta/labeling.py::HORIZONS_HOURS.
+RESOLUTION_HORIZON = "4h"
+
+
+def resolve_challenger(
+    conn: sqlite3.Connection, agent_id: str, horizon: str = RESOLUTION_HORIZON,
+) -> dict:
     """Compare the challenger's shadow decisions against the incumbent and
     either **promote** or **reject** the challenger.
 
-    The comparison uses *regret* — the difference between the challenger's
-    average logged confidence and the incumbent's average logged confidence
-    over the trial period.  When the challenger's average confidence exceeds
-    the incumbent's, the challenger is promoted (status → ``active``,
+    The comparison uses *regret* — ``decision_labels.regret_pct`` (best-
+    available outcome minus chosen outcome, computed nightly by
+    ``meta/labeling.py::run_labeling_job``) at the canonical
+    :data:`RESOLUTION_HORIZON`, averaged over the challenger's shadow
+    decisions and the incumbent's executed decisions across the trial
+    window. LOWER mean regret wins: the challenger is promoted when its
+    mean regret is strictly lower than the incumbent's (status → ``active``,
     ``active_spec_version`` updated, incumbent demoted to ``inactive``).
     Otherwise the challenger is rejected (status → ``inactive``).
+
+    When either side has **zero labeled decisions** in the trial window
+    (the nightly labeling job hasn't caught up yet, or the incumbent simply
+    hasn't traded), the trial is **not resolvable** — neither side's specs
+    row is touched, so a caller can retry once more labels land rather than
+    promoting or rejecting on zero evidence.
 
     Returns
     -------
     dict
-        ``{"verdict": "promoted" | "rejected" | "no_challenger",
+        ``{"verdict": "promoted" | "rejected" | "not_resolvable" | "no_challenger",
            "challenger_version": int | None, "incumbent_version": int | None,
-           "challenger_avg_confidence": float | None,
-           "incumbent_avg_confidence": float | None,
-           "challenger_decisions": int, "incumbent_decisions": int}``.
+           "challenger_mean_regret": float | None,
+           "incumbent_mean_regret": float | None,
+           "challenger_labeled_decisions": int, "incumbent_labeled_decisions": int,
+           "horizon": str}``. The ``"no_challenger"`` verdict returns just
+        ``{"verdict": "no_challenger"}`` (no challenger deployed at all).
     """
     challenger = get_challenger_spec(conn, agent_id)
     if challenger is None:
@@ -428,7 +453,7 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
 
     # Trial window = the challenger's deployed_at forward. Both sides of the
     # comparison must be scoped to this window: an unbounded incumbent query
-    # would average confidence over the agent's ENTIRE decision history,
+    # would average regret over the agent's ENTIRE decision history,
     # including decisions logged under prior spec versions that predate this
     # challenger trial entirely (T6 review finding 3).
     trial_row = conn.execute(
@@ -439,56 +464,67 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
     ).fetchone()
     trial_start = trial_row["deployed_at"] if trial_row else None
 
-    # Gather challenger trial decisions (logged via decision_loop with
-    # challenger_spec_version in decision_details_json), scoped to the
-    # trial window on both sides of the comparison.
+    challenger_regrets: list[float] = []
+    incumbent_regrets: list[float] = []
+
     if trial_start is not None:
-        challenger_rows = conn.execute(
-            """SELECT decision_details_json FROM decisions
-               WHERE agent_id = ? AND decision_details_json IS NOT NULL
-                 AND timestamp >= ?
-               ORDER BY timestamp ASC""",
-            (agent_id, trial_start),
+        # Join to decision_labels at the canonical horizon -- only LABELED
+        # decisions ever enter the comparison. Production incumbent rows
+        # (enter: {"order","fill"}; wait: {"candidate": {...}} or NULL;
+        # close: {"position_id","fill"}) never carry "challenger_spec_version",
+        # so the presence/absence of that key alone distinguishes the two
+        # sides -- no confidence field required (the bug T8 replaces).
+        rows = conn.execute(
+            """SELECT d.decision_details_json, dl.regret_pct
+               FROM decisions d
+               JOIN decision_labels dl
+                 ON dl.decision_id = d.id AND dl.horizon = ?
+               WHERE d.agent_id = ? AND d.timestamp >= ?""",
+            (horizon, agent_id, trial_start),
         ).fetchall()
-    else:
-        # No deployed_at on record for this challenger (shouldn't happen in
-        # practice) — fail toward the safer empty-window rather than
-        # silently falling back to the unbounded, unscoped query.
-        challenger_rows = []
 
-    challenger_conf_sum = 0.0
-    challenger_count = 0
-    incumbent_conf_sum = 0.0
-    incumbent_count = 0
+        for row in rows:
+            regret = row["regret_pct"]
+            if regret is None:
+                continue
+            raw_details = row["decision_details_json"]
+            try:
+                details = json.loads(raw_details) if raw_details else {}
+            except (json.JSONDecodeError, TypeError):
+                details = {}
 
-    for row in challenger_rows:
-        try:
-            details = json.loads(row["decision_details_json"])
-        except (json.JSONDecodeError, TypeError):
-            continue
+            if details.get("challenger_spec_version") == challenger.spec_version:
+                challenger_regrets.append(regret)
+            elif "challenger_spec_version" not in details:
+                incumbent_regrets.append(regret)
+            # Decisions carrying a *different* challenger's spec_version
+            # (a prior, already-resolved trial) belong to neither side.
 
-        # Challenger-logged decisions carry "challenger_spec_version".
-        if details.get("challenger_spec_version") == challenger.spec_version:
-            conf = details.get("challenger_confidence")
-            if isinstance(conf, (int, float)):
-                challenger_conf_sum += conf
-                challenger_count += 1
+    challenger_count = len(challenger_regrets)
+    incumbent_count = len(incumbent_regrets)
 
-        # Incumbent decisions on the same period (for baseline comparison).
-        if details.get("challenger_spec_version") is None:
-            conf = details.get("confidence") or details.get("challenger_confidence")
-            if isinstance(conf, (int, float)):
-                incumbent_conf_sum += conf
-                incumbent_count += 1
+    if challenger_count == 0 or incumbent_count == 0:
+        logger.info(
+            "[%s] Challenger v%d not resolvable — %d challenger / %d incumbent"
+            " labeled decisions in trial window (need >=1 each)",
+            agent_id, challenger.spec_version, challenger_count, incumbent_count,
+        )
+        return {
+            "verdict": "not_resolvable",
+            "challenger_version": challenger.spec_version,
+            "incumbent_version": incumbent_version,
+            "challenger_mean_regret": None,
+            "incumbent_mean_regret": None,
+            "challenger_labeled_decisions": challenger_count,
+            "incumbent_labeled_decisions": incumbent_count,
+            "horizon": horizon,
+        }
 
-    challenger_avg = challenger_conf_sum / challenger_count if challenger_count else 0.0
-    incumbent_avg = incumbent_conf_sum / incumbent_count if incumbent_count else 0.0
+    challenger_mean = sum(challenger_regrets) / challenger_count
+    incumbent_mean = sum(incumbent_regrets) / incumbent_count
 
-    # Decision: promote when challenger has *strictly* higher average
-    # confidence AND at least one logged decision.
-    verdict = "rejected"
-    if challenger_count > 0 and challenger_avg > incumbent_avg:
-        verdict = "promoted"
+    # Decision: promote when challenger has *strictly lower* mean regret.
+    verdict = "promoted" if challenger_mean < incumbent_mean else "rejected"
 
     if verdict == "promoted":
         # Demote the current incumbent.
@@ -513,8 +549,8 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
             (challenger.spec_version, agent_id),
         )
         logger.info(
-            "[%s] Challenger v%d promoted (avg_conf %.3f > incumbent %.3f)",
-            agent_id, challenger.spec_version, challenger_avg, incumbent_avg,
+            "[%s] Challenger v%d promoted (mean regret %.4f < incumbent %.4f)",
+            agent_id, challenger.spec_version, challenger_mean, incumbent_mean,
         )
     else:
         # Reject the challenger.
@@ -525,8 +561,8 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
             (agent_id, challenger.spec_version),
         )
         logger.info(
-            "[%s] Challenger v%d rejected (avg_conf %.3f <= incumbent %.3f)",
-            agent_id, challenger.spec_version, challenger_avg, incumbent_avg,
+            "[%s] Challenger v%d rejected (mean regret %.4f >= incumbent %.4f)",
+            agent_id, challenger.spec_version, challenger_mean, incumbent_mean,
         )
 
     conn.commit()
@@ -535,8 +571,9 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
         "verdict": verdict,
         "challenger_version": challenger.spec_version,
         "incumbent_version": incumbent_version,
-        "challenger_avg_confidence": round(challenger_avg, 4),
-        "incumbent_avg_confidence": round(incumbent_avg, 4),
-        "challenger_decisions": challenger_count,
-        "incumbent_decisions": incumbent_count,
+        "challenger_mean_regret": round(challenger_mean, 4),
+        "incumbent_mean_regret": round(incumbent_mean, 4),
+        "challenger_labeled_decisions": challenger_count,
+        "incumbent_labeled_decisions": incumbent_count,
+        "horizon": horizon,
     }
