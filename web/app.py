@@ -424,11 +424,13 @@ async def trades_page(
 async def decisions_page(request: Request):
     conn = app.state.conn
 
-    # Counterfactual coverage
-    coverage = get_counterfactual_coverage(conn)
-
-    # M10: Forward-labeling coverage (meta/labeling.py's nightly job).
-    labeling_coverage = get_labeling_coverage(conn)
+    # T7 (M10 gap closure): one generalized coverage surface. The headline
+    # is forward-labeling coverage (meta/labeling.py's nightly job, which
+    # now also absorbs the M6 wait-only counterfactual filler); the legacy
+    # wait-counterfactual fill stats are folded in as secondary stats
+    # inside the same dict rather than rendered as a second panel.
+    coverage = get_labeling_coverage(conn)
+    coverage["counterfactual"] = get_counterfactual_coverage(conn)
 
     # All decisions grouped by agent
     agents = conn.execute("SELECT id FROM agents ORDER BY id").fetchall()
@@ -466,7 +468,6 @@ async def decisions_page(request: Request):
             "request": request,
             "active_page": "decisions",
             "coverage": coverage,
-            "labeling_coverage": labeling_coverage,
             "decisions_by_agent": decisions_by_agent,
             "hypotheses": hypotheses,
             "agents": [r["id"] for r in agents],

@@ -2,16 +2,18 @@
 {% block title %}Forge &mdash; Decisions{% endblock %}
 {% block content %}
 
-<!-- Counterfactual Coverage Summary -->
-<h3 class="section-header">Counterfactual Coverage</h3>
+<!-- Decision Coverage (M10: forward-labeling headline; T7 folds the M6
+     wait-counterfactual fill stats in as secondary stats within this one
+     section instead of a second panel). -->
+<h3 class="section-header">Decision Coverage</h3>
 <div class="stat-row">
   <div class="stat-card">
-    <div class="stat-label">Eligible Waits (&ge;24h)</div>
-    <div class="stat-value">{{ coverage.get('eligible_waits', 0) }}</div>
+    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
+    <div class="stat-value">{{ coverage.get('eligible_decisions', 0) }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Filled</div>
-    <div class="stat-value win">{{ coverage.get('filled', 0) }}</div>
+    <div class="stat-label">Labeled</div>
+    <div class="stat-value win">{{ coverage.get('labeled', 0) }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Coverage %</div>
@@ -21,21 +23,21 @@
   </div>
 </div>
 
-<!-- Forward Labeling Coverage -->
-<h3 class="section-header">Forward Labeling Coverage</h3>
+{% set cf = coverage.get('counterfactual', {}) %}
+<div class="stat-label" style="margin-top: 0.75rem; margin-bottom: 0.25rem;">Wait-Counterfactual Fill (compatibility)</div>
 <div class="stat-row">
   <div class="stat-card">
-    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
-    <div class="stat-value">{{ labeling_coverage.get('eligible_decisions', 0) }}</div>
+    <div class="stat-label">Eligible Waits (&ge;24h)</div>
+    <div class="stat-value">{{ cf.get('eligible_waits', 0) }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Labeled</div>
-    <div class="stat-value win">{{ labeling_coverage.get('labeled', 0) }}</div>
+    <div class="stat-label">Filled</div>
+    <div class="stat-value win">{{ cf.get('filled', 0) }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Coverage %</div>
-    <div class="stat-value {{ 'win' if labeling_coverage.get('coverage_pct', 0) >= 80 else ('loss' if labeling_coverage.get('coverage_pct', 0) < 50 else '') }}">
-      {{ "{:.1f}%".format(labeling_coverage.get('coverage_pct', 0)) }}
+    <div class="stat-value {{ 'win' if cf.get('coverage_pct', 0) >= 80 else ('loss' if cf.get('coverage_pct', 0) < 50 else '') }}">
+      {{ "{:.1f}%".format(cf.get('coverage_pct', 0)) }}
     </div>
   </div>
 </div>

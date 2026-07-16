@@ -1,6 +1,7 @@
 """tests/test_labeling.py — Tests for meta/labeling.py forward-labeling engine."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sqlite3
@@ -857,3 +858,129 @@ class TestForwardReturnStaleness:
         }
         assert horizons == {"4h", "24h"}
         assert "1h" not in horizons
+
+
+# ── T7 Gap 1: absorb the M6 wait-only counterfactual filler ───────────────
+
+
+class TestCounterfactualAbsorption:
+    """run_labeling_job must absorb the M6 wait-only counterfactual filler:
+    the standalone nightly scheduler job in forge.py is removed, but the
+    legacy counterfactual_result / counterfactual_was_better columns must
+    still be populated -- with identical semantics -- by run_labeling_job
+    itself, via the existing unmodified store/counterfactuals.py replay
+    engine."""
+
+    def test_labeling_job_also_fills_counterfactual_columns(self):
+        """A fixture with an unfilled wait decision: after run_labeling_job,
+        both decision_labels rows (forward-labeling side) AND the
+        counterfactual_* columns (absorbed M6 filler side) are populated."""
+        from meta.labeling import LONGEST_HOURS, run_labeling_job
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        now = datetime.now(timezone.utc)
+        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
+        entry_price = 100.0
+        tp = entry_price * 1.05  # matches _insert_wait_decision's TP calc
+
+        start_ms = int(dec_ts.timestamp() * 1000)
+        candles = _make_candles(start_ms, 360, base_price=entry_price, drift=0.0)
+        # Wick candle 5 through TP so the counterfactual replay resolves
+        # deterministically (take_profit) instead of depending on 48h of
+        # forward data for a max_hold_timeout outcome.
+        ts5 = candles[5][0]
+        candles[5] = [ts5, entry_price, tp + 1.0, entry_price - 0.5, tp + 0.5, 1000.0]
+        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        decision_id = _insert_wait_decision(
+            conn, "test_agent", dec_ts, "BTC-PERP", "long", entry_price,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
+            run_labeling_job(conn, td)
+
+        # decision_labels rows produced (forward-labeling side, unaffected).
+        labeled = conn.execute(
+            "SELECT COUNT(*) FROM decision_labels WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()[0]
+        assert labeled == 3
+
+        # counterfactual_* columns populated (absorbed M6 filler side).
+        row = conn.execute(
+            """SELECT counterfactual_result, counterfactual_was_better
+               FROM decisions WHERE id = ?""",
+            (decision_id,),
+        ).fetchone()
+        assert row["counterfactual_result"] is not None
+        outcome = json.loads(row["counterfactual_result"])
+        assert outcome["reason"] == "take_profit"
+        assert outcome["profitable"] is True
+        assert row["counterfactual_was_better"] == 1
+
+    def test_run_labeling_job_return_dict_includes_counterfactual_summary(self):
+        """The returned summary surfaces the absorbed counterfactual run's
+        own counts (total_queued/processed/filled/errors) so callers (the
+        forge.py scheduler log line) see both halves of the absorbed job."""
+        from meta.labeling import run_labeling_job
+
+        conn = sqlite3.connect(":memory:")
+        _init_db(conn)
+
+        with tempfile.TemporaryDirectory() as td:
+            result = run_labeling_job(conn, td)
+
+        assert "counterfactual" in result
+        assert result["counterfactual"] == {
+            "total_queued": 0, "processed": 0, "filled": 0, "errors": 0,
+        }
+
+
+class TestForgeSchedulerAbsorption:
+    """The standalone 'counterfactual' scheduler job must be gone from
+    forge.py -- absorbed into 'labeling'. Reads forge.py's source directly
+    (ast) instead of importing the module, matching the established
+    convention in tests/test_reflection_client.py and
+    tests/test_web_actions.py for forge.py source-level assertions."""
+
+    def _forge_source(self) -> str:
+        import pathlib
+
+        forge_py = pathlib.Path(__file__).resolve().parents[1] / "forge.py"
+        return forge_py.read_text(encoding="utf-8")
+
+    def test_no_standalone_counterfactual_job_registered(self):
+        source = self._forge_source()
+        assert 'id="counterfactual"' not in source, (
+            "the standalone nightly counterfactual job must be removed -- "
+            "run_labeling_job now absorbs it (T7 Gap 1)"
+        )
+        assert 'id="labeling"' in source, (
+            "the labeling job must still be registered"
+        )
+
+    def test_labeling_job_invocation_threads_config(self):
+        """_run_labeling_job must pass config through to run_labeling_job so
+        the absorbed counterfactual replay receives desk config."""
+        source = self._forge_source()
+        tree = ast.parse(source, filename="forge.py")
+
+        job_node = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_run_labeling_job"
+            ):
+                job_node = node
+                break
+        assert job_node is not None, "_run_labeling_job not found in forge.py"
+
+        segment = ast.get_source_segment(source, job_node)
+        assert segment is not None
+        assert "run_labeling_job(conn, ledger_dir, config)" in segment, (
+            "expected run_labeling_job to be called with (conn, ledger_dir, "
+            "config) so the absorbed counterfactual replay gets desk config"
+        )

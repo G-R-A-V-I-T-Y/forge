@@ -341,48 +341,22 @@ async def main():
     logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
 
     # ------------------------------------------------------------------
-    # Counterfactual analysis — runs nightly at 02:00 UTC.
-    # Deterministic replay of unfilled wait decisions through recorded
-    # 5m candles — no LLM calls.
-    # ------------------------------------------------------------------
-    async def _run_counterfactual_job():
-        """Run deterministic counterfactual replay for all unfilled waits."""
-        try:
-            from store.counterfactuals import run_counterfactual_replay
-
-            ledger_dir = config.get("ledger_dir", "ledger")
-            summary = run_counterfactual_replay(conn, config, ledger_dir)
-            logger.info(
-                "Counterfactual replay complete: %s",
-                summary,
-            )
-        except Exception as exc:
-            logger.error("Counterfactual analysis failed: %s", exc, exc_info=True)
-
-    scheduler.add_job(
-        _run_counterfactual_job,
-        trigger="cron",
-        hour=2,
-        minute=0,
-        id="counterfactual",
-        replace_existing=True,
-    )
-    logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
-
-    # ------------------------------------------------------------------
-    # M10: Forward labeling -- runs nightly at 02:30 UTC, after the 02:00
-    # counterfactual filler above (which keeps running independently).
+    # M10: Forward labeling -- runs nightly at 02:30 UTC.
     # meta/labeling.py::run_labeling_job forward-labels every decision at
     # least LONGEST_HOURS old against recorded 5m candles (return, MFE/MAE,
     # best action, regret at 1h/4h/24h) -- feeds agents/dossier.py's
-    # top-regret evidence and the /decisions coverage tiles.
+    # top-regret evidence and the /decisions coverage tiles. T7: it also
+    # absorbs the M6 wait-only counterfactual filler (deterministic replay
+    # of unfilled wait decisions via store/counterfactuals.py), writing the
+    # legacy counterfactual_* columns for compatibility -- there is no
+    # longer a separate nightly counterfactual job.
     # ------------------------------------------------------------------
     async def _run_labeling_job():
         try:
             from meta.labeling import run_labeling_job
 
             ledger_dir = config.get("ledger_dir", "ledger")
-            summary = run_labeling_job(conn, ledger_dir)
+            summary = run_labeling_job(conn, ledger_dir, config)
             logger.info("Forward labeling complete: %s", summary)
         except Exception as exc:
             logger.error("Forward labeling job failed: %s", exc, exc_info=True)
@@ -395,7 +369,10 @@ async def main():
         id="labeling",
         replace_existing=True,
     )
-    logger.info("Forward labeling job scheduled — runs nightly at 02:30 UTC")
+    logger.info(
+        "Forward labeling job scheduled — runs nightly at 02:30 UTC "
+        "(absorbs the M6 counterfactual filler)"
+    )
 
     # ------------------------------------------------------------------
     # M10: Training dataset refresh -- runs nightly at 03:30 UTC.

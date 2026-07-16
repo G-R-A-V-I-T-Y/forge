@@ -10,14 +10,21 @@ ledger head, compute from ``ledger/candles_5m/``:
   - Best-available action (enter_long, enter_short, wait) and regret
 
 The function is designed for nightly APScheduler invocation (cron-compatible
-signature ``run_labeling_job(conn, ledger_dir)``) but is also immediately
-callable from tests.
+signature ``run_labeling_job(conn, ledger_dir, config)``) but is also
+immediately callable from tests.
+
+T7 (M10 gap closure): this job also absorbs the M6 wait-only counterfactual
+filler (``store/counterfactuals.py::run_counterfactual_replay``), so the
+legacy ``counterfactual_result`` / ``counterfactual_was_better`` columns on
+``decisions`` keep being written for compatibility. forge.py schedules only
+this one nightly job now.
 
 Public API
 ----------
-run_labeling_job(conn, ledger_dir) -> dict
-    Idempotently label all eligible unlabeled decisions.
-    Returns ``{total_processed, total_labeled, errors}``.
+run_labeling_job(conn, ledger_dir, config=None) -> dict
+    Idempotently label all eligible unlabeled decisions, then run the
+    absorbed counterfactual replay.
+    Returns ``{total_processed, total_labeled, errors, counterfactual}``.
 
 get_labeling_coverage(conn) -> dict
     Percentage of labelable decisions that have been labeled.
@@ -66,6 +73,7 @@ STALENESS_THRESHOLD_MS: int = CANDLE_INTERVAL_MS * 2
 def run_labeling_job(
     conn,
     ledger_dir: str | Path | None = None,
+    config: dict | None = None,
 ) -> dict:
     """Forward-label all eligible unlabeled decisions.  Idempotent.
 
@@ -74,17 +82,31 @@ def run_labeling_job(
     labelable decision that does not yet have rows in ``decision_labels``
     is processed; decisions that already have labels are skipped.
 
+    T7 (M10 gap closure): this job also absorbs the M6 wait-only
+    counterfactual filler.  After forward-labeling, it invokes the
+    existing, unmodified ``store.counterfactuals.run_counterfactual_replay``
+    so the legacy ``counterfactual_result`` / ``counterfactual_was_better``
+    columns keep being written -- with exactly their current semantics --
+    for compatibility.  There is no longer a separate scheduled job for
+    this (see forge.py); this is now the only nightly entry point.
+
     Parameters
     ----------
     conn : sqlite3.Connection
         Database with ``decisions`` and ``decision_labels`` tables.
     ledger_dir : str | Path | None
         Ledger root.  Defaults to ``store.ledger.LEDGER_DIR``.
+    config : dict | None
+        Desk config, forwarded to ``run_counterfactual_replay`` (currently
+        unused by that function but kept for signature compatibility and
+        future default SL/TP wiring).  Defaults to ``{}``.
 
     Returns
     -------
     dict
-        ``{total_processed, total_labeled, errors}``.
+        ``{total_processed, total_labeled, errors, counterfactual}`` where
+        ``counterfactual`` is ``run_counterfactual_replay``'s own summary
+        dict (``{total_queued, processed, filled, errors}``).
     """
     if ledger_dir is None:
         from store.ledger import LEDGER_DIR
@@ -95,49 +117,59 @@ def run_labeling_job(
     head = _find_ledger_head(ledger_dir)
     if head is None:
         logger.warning("No candle data in ledger — nothing to label")
-        return {"total_processed": 0, "total_labeled": 0, "errors": 0}
+        result = {"total_processed": 0, "total_labeled": 0, "errors": 0}
+    else:
+        # 2. Cutoff = head − longest_horizon.
+        cutoff = head - timedelta(hours=LONGEST_HOURS)
+        cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
 
-    # 2. Cutoff = head − longest_horizon.
-    cutoff = head - timedelta(hours=LONGEST_HOURS)
-    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+        # 3. Select all decisions ≤ cutoff that have NO label rows yet.
+        #    LEFT JOIN + IS NULL is the idempotent gate.
+        rows = conn.execute(
+            """SELECT d.id, d.agent_id, d.timestamp, d.decision_action,
+                      d.decision_reason, d.decision_details_json
+               FROM decisions d
+               LEFT JOIN decision_labels dl ON dl.decision_id = d.id
+               WHERE d.timestamp <= ?
+                 AND dl.id IS NULL
+               ORDER BY d.timestamp ASC""",
+            (cutoff_iso,),
+        ).fetchall()
 
-    # 3. Select all decisions ≤ cutoff that have NO label rows yet.
-    #    LEFT JOIN + IS NULL is the idempotent gate.
-    rows = conn.execute(
-        """SELECT d.id, d.agent_id, d.timestamp, d.decision_action,
-                  d.decision_reason, d.decision_details_json
-           FROM decisions d
-           LEFT JOIN decision_labels dl ON dl.decision_id = d.id
-           WHERE d.timestamp <= ?
-             AND dl.id IS NULL
-           ORDER BY d.timestamp ASC""",
-        (cutoff_iso,),
-    ).fetchall()
+        total_processed = 0
+        total_labeled = 0
+        errors = 0
 
-    total_processed = 0
-    total_labeled = 0
-    errors = 0
+        for row in rows:
+            decision = dict(row)
+            try:
+                n = _label_one(conn, decision, ledger_dir, head)
+                total_labeled += n
+                total_processed += 1
+            except Exception as exc:
+                logger.warning(
+                    "Labeling error for decision %s: %s",
+                    decision["id"],
+                    exc,
+                    exc_info=True,
+                )
+                errors += 1
 
-    for row in rows:
-        decision = dict(row)
-        try:
-            n = _label_one(conn, decision, ledger_dir, head)
-            total_labeled += n
-            total_processed += 1
-        except Exception as exc:
-            logger.warning(
-                "Labeling error for decision %s: %s",
-                decision["id"],
-                exc,
-                exc_info=True,
-            )
-            errors += 1
+        result = {
+            "total_processed": total_processed,
+            "total_labeled": total_labeled,
+            "errors": errors,
+        }
 
-    return {
-        "total_processed": total_processed,
-        "total_labeled": total_labeled,
-        "errors": errors,
-    }
+    # 4. Absorbed M6 counterfactual filler — same code path, same
+    #    semantics as store/counterfactuals.py always had.
+    from store.counterfactuals import run_counterfactual_replay
+
+    result["counterfactual"] = run_counterfactual_replay(
+        conn, config or {}, ledger_dir,
+    )
+
+    return result
 
 
 def get_labeling_coverage(conn) -> dict:
