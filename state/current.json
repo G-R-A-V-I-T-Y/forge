@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-17T16:31:54Z",
+  "generated_at": "2026-07-17T16:36:53Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -106,7 +106,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "Nemotron 3 Ultra Free",
+      "last_model_used": "North Mini Code Free",
       "paper_balance": 50265.26850035483,
       "paper_peak": 50341.13321335586,
       "live_balance": null
