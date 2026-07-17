@@ -18,7 +18,10 @@ from store.db import init_schema, insert_agent, insert_account_snapshot, insert_
 from meta.risk_officer import (
     RiskOfficer,
     RiskActionRejected,
+    RiskOfficerOutput,
     validate_risk_actions,
+    validate_risk_officer_output,
+    run_risk_officer_job,
 )
 
 
@@ -408,3 +411,203 @@ def test_agent_is_killed_reflects_status(conn):
     officer = RiskOfficer(conn, _config())
     assert officer.agent_is_killed("agent_a") is True
     assert officer.agent_is_killed("agent_b") is False
+
+
+# ---------------------------------------------------------------------------
+# RiskOfficerOutput frozen dataclass
+# ---------------------------------------------------------------------------
+
+def test_risk_officer_output_is_frozen():
+    output = RiskOfficerOutput(entry_disabled_agents=["a"], reason="test", regime="crisis")
+    assert output.entry_disabled_agents == ["a"]
+    assert output.reason == "test"
+    assert output.regime == "crisis"
+    with pytest.raises(AttributeError):
+        output.reason = "changed"
+
+
+def test_risk_officer_output_defaults():
+    output = RiskOfficerOutput()
+    assert output.entry_disabled_agents == []
+    assert output.reason == ""
+    assert output.regime == ""
+
+
+# ---------------------------------------------------------------------------
+# run_risk_officer_job
+# ---------------------------------------------------------------------------
+
+def test_run_risk_officer_job_clear_desk(conn):
+    _seed_agent_with_position(conn, "agent_a", balance=10000, notional=1000)
+    config = _config()
+    output = run_risk_officer_job(conn, config)
+    assert isinstance(output, RiskOfficerOutput)
+    assert output.reason == "all clear"
+    assert output.entry_disabled_agents == []
+
+
+def test_run_risk_officer_job_throttle_disables(conn):
+    _seed_agent_with_position(conn, "agent_a", balance=1000, notional=15000)
+    _seed_agent_with_position(conn, "agent_b", balance=1000, notional=10000)
+    output = run_risk_officer_job(conn, _config())
+    assert "agent_a" in output.entry_disabled_agents
+    assert "agent_b" in output.entry_disabled_agents
+    assert "throttle" in output.reason.lower() or "exposure" in output.reason.lower()
+
+
+def test_run_risk_officer_job_event_blackout_disables_all(conn):
+    from datetime import timedelta
+
+    _seed_agent_with_position(conn, "agent_a", balance=10000, notional=1000)
+    _seed_agent_with_position(conn, "agent_b", balance=10000, notional=1000)
+    event_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    config = _config(event_calendar=[
+        {"name": "FOMC", "at": event_at.isoformat().replace("+00:00", "Z")}
+    ])
+    output = run_risk_officer_job(conn, config)
+    assert "agent_a" in output.entry_disabled_agents
+    assert "agent_b" in output.entry_disabled_agents
+    assert "blackout" in output.reason.lower()
+
+
+def test_run_risk_officer_job_regime_populated(conn, tmp_path):
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    write_heartbeat(heartbeat_path, {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "assets": {},
+        "cross_asset": {},
+        "regime": {"regime_tag": "trending_bull", "average_volatility": 0.42},
+        "events": {},
+    })
+    config = _config()
+    config["desk"]["heartbeat_path"] = heartbeat_path
+    config["desk"]["heartbeat_interval_seconds"] = 300
+
+    output = run_risk_officer_job(conn, config)
+    assert output.regime == "trending_bull"
+
+
+# ---------------------------------------------------------------------------
+# validate_risk_officer_output
+# ---------------------------------------------------------------------------
+
+def test_validate_risk_officer_output_allows_same_state():
+    prev = RiskOfficerOutput(entry_disabled_agents=["a", "b"], reason="x", regime="crisis")
+    new = RiskOfficerOutput(entry_disabled_agents=["a", "b"], reason="y", regime="crisis")
+    validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_allows_adding_disables():
+    prev = RiskOfficerOutput(entry_disabled_agents=["a"], reason="x", regime="crisis")
+    new = RiskOfficerOutput(entry_disabled_agents=["a", "b"], reason="y", regime="crisis")
+    validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_allows_same_regime():
+    prev = RiskOfficerOutput(entry_disabled_agents=[], reason="x", regime="range_low_vol")
+    new = RiskOfficerOutput(entry_disabled_agents=[], reason="y", regime="range_low_vol")
+    validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_catches_un_disable():
+    from risk.gate import RiskViolation
+
+    prev = RiskOfficerOutput(entry_disabled_agents=["a", "b"], reason="x", regime="crisis")
+    new = RiskOfficerOutput(entry_disabled_agents=["a"], reason="y", regime="crisis")
+    with pytest.raises(RiskViolation, match="reduce-only"):
+        validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_catches_regime_loosening():
+    from risk.gate import RiskViolation
+
+    prev = RiskOfficerOutput(entry_disabled_agents=[], reason="x", regime="crisis")
+    new = RiskOfficerOutput(entry_disabled_agents=[], reason="y", regime="trending_bull")
+    with pytest.raises(RiskViolation, match="regime loosened"):
+        validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_allows_stricter_regime():
+    prev = RiskOfficerOutput(entry_disabled_agents=[], reason="x", regime="range_low_vol")
+    new = RiskOfficerOutput(entry_disabled_agents=[], reason="y", regime="crisis")
+    validate_risk_officer_output(prev, new)
+
+
+def test_validate_risk_officer_output_allows_empty_to_disabled():
+    prev = RiskOfficerOutput()
+    new = RiskOfficerOutput(entry_disabled_agents=["a"], reason="kill switch", regime="crisis")
+    validate_risk_officer_output(prev, new)
+
+
+# ---------------------------------------------------------------------------
+# risk/gate.py integration with risk_officer_output
+# ---------------------------------------------------------------------------
+
+def test_risk_gate_blocks_disabled_agent():
+    from risk.gate import validate_order, RiskViolation
+
+    VALID_ORDER = {
+        "asset": "BTC-PERP",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop_loss_price": 95.0,
+        "take_profit_price": 110.0,
+        "leverage": 5,
+        "position_size_pct": 0.10,
+    }
+    output = RiskOfficerOutput(entry_disabled_agents=["agent_a"], reason="throttle")
+    with pytest.raises(RiskViolation, match="risk officer disabled"):
+        validate_order(VALID_ORDER, 10000, {"max_leverage": 20, "max_position_size_pct": 0.25,
+                      "max_concurrent_positions": 5}, open_position_count=0,
+                      agent_id="agent_a", risk_officer_output=output)
+
+
+def test_risk_gate_allows_non_disabled_agent():
+    from risk.gate import validate_order
+
+    VALID_ORDER = {
+        "asset": "BTC-PERP",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop_loss_price": 95.0,
+        "take_profit_price": 110.0,
+        "leverage": 5,
+        "position_size_pct": 0.10,
+    }
+    output = RiskOfficerOutput(entry_disabled_agents=["agent_b"], reason="throttle")
+    validate_order(VALID_ORDER, 10000, {"max_leverage": 20, "max_position_size_pct": 0.25,
+                  "max_concurrent_positions": 5}, open_position_count=0,
+                  agent_id="agent_a", risk_officer_output=output)
+
+
+def test_risk_gate_ignores_output_when_none():
+    from risk.gate import validate_order
+
+    VALID_ORDER = {
+        "asset": "BTC-PERP",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop_loss_price": 95.0,
+        "take_profit_price": 110.0,
+        "leverage": 5,
+        "position_size_pct": 0.10,
+    }
+    validate_order(VALID_ORDER, 10000, {"max_leverage": 20, "max_position_size_pct": 0.25,
+                  "max_concurrent_positions": 5}, open_position_count=0,
+                  agent_id="agent_a", risk_officer_output=None)
+
+
+def test_risk_gate_backwards_compatible_without_new_params():
+    from risk.gate import validate_order
+
+    VALID_ORDER = {
+        "asset": "BTC-PERP",
+        "direction": "long",
+        "entry_price": 100.0,
+        "stop_loss_price": 95.0,
+        "take_profit_price": 110.0,
+        "leverage": 5,
+        "position_size_pct": 0.10,
+    }
+    validate_order(VALID_ORDER, 10000, {"max_leverage": 20, "max_position_size_pct": 0.25,
+                  "max_concurrent_positions": 5}, open_position_count=0)

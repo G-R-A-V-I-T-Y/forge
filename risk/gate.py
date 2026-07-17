@@ -4,6 +4,15 @@ risk/gate.py — stateless order validation.
 Raises RiskViolation on any rule breach; returns None on pass.
 No DB calls, no I/O, no imports from other forge modules.
 """
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from meta.risk_officer import RiskOfficerOutput
+
+logger = logging.getLogger(__name__)
 
 # Minimum stop-loss distance from entry (0.3%)
 MIN_SL_DISTANCE_PCT = 0.003
@@ -40,6 +49,9 @@ def validate_order(
     config: dict,
     open_position_count: int,
     heartbeat_price: float | None = None,
+    *,
+    agent_id: str | None = None,
+    risk_officer_output: RiskOfficerOutput | None = None,
 ) -> None:
     """Validate an order against hard risk rules.
 
@@ -66,6 +78,17 @@ def validate_order(
         On any rule breach; the `.reason` attribute describes which rule
         failed and why.
     """
+
+    if risk_officer_output is not None and agent_id is not None:
+        if agent_id in risk_officer_output.entry_disabled_agents:
+            logger.warning(
+                "Risk gate blocked entry for %s: %s",
+                agent_id, risk_officer_output.reason,
+            )
+            raise RiskViolation(
+                f"risk officer disabled entries for {agent_id}: "
+                f"{risk_officer_output.reason}"
+            )
 
     # ------------------------------------------------------------------
     # Rule 1: stop_loss_price must be present and non-None

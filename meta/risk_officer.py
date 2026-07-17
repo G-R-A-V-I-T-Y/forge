@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import yaml
+
+from risk.gate import RiskViolation
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,120 @@ def _load_config(config_path: str = "config.yaml") -> dict[str, Any]:
             return yaml.safe_load(f) or {}
     except (FileNotFoundError, yaml.YAMLError):
         return {}
+
+
+# ===========================================================================
+# RiskOfficerOutput — frozen snapshot returned by run_risk_officer_job
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class RiskOfficerOutput:
+    """Immutable snapshot of a single risk-officer cycle's decisions.
+
+    Returned by ``run_risk_officer_job`` and consumed by the risk gate
+    (risk/gate.py) to block entries for disabled agents.  The reduce-only
+    validator (``validate_risk_officer_output``) compares two consecutive
+    snapshots to ensure the risk officer never increases risk.
+    """
+
+    entry_disabled_agents: list[str] = field(default_factory=list)
+    reason: str = ""
+    regime: str = ""
+
+
+def run_risk_officer_job(conn, config: dict | None = None) -> RiskOfficerOutput:
+    """Execute one risk-officer cycle and return a frozen RiskOfficerOutput.
+
+    This is the primary entry point for the 30-min APScheduler job.  It
+    runs the full ``RiskOfficer.run_cycle()`` logic and packages the
+    results into a ``RiskOfficerOutput`` snapshot that can be passed to
+    the risk gate and validated against the previous cycle's output.
+    """
+    officer = RiskOfficer(conn, config)
+    report = officer.run_cycle()
+
+    disabled_rows = conn.execute(
+        """SELECT DISTINCT agent_id FROM entry_disables
+           WHERE enabled_at IS NULL AND disabled_by = 'risk_officer'"""
+    ).fetchall()
+    entry_disabled_agents = sorted(row["agent_id"] for row in disabled_rows)
+
+    desk_kill = report.get("desk_kill_switch", False)
+    blackout = report.get("event_blackout")
+    if desk_kill or blackout is not None:
+        all_agent_rows = conn.execute(
+            """SELECT id FROM agents
+               WHERE status IN ('rookie', 'active')"""
+        ).fetchall()
+        all_agent_ids = {row["id"] for row in all_agent_rows}
+        entry_disabled_agents = sorted(all_agent_ids | set(entry_disabled_agents))
+
+    reasons = []
+    if desk_kill:
+        reasons.append("desk kill switch active")
+    if blackout is not None:
+        reasons.append(f"event blackout ({blackout.get('name', 'unknown')})")
+    if report.get("desk_daily_loss_exceeded"):
+        reasons.append("desk daily loss exceeded")
+    throttled = report.get("gross_exposure_throttled_agents", [])
+    if throttled:
+        reasons.append(f"gross exposure throttle: {', '.join(throttled)}")
+    reason = "; ".join(reasons) if reasons else "all clear"
+
+    memo = report.get("regime_memo") or {}
+    regime = memo.get("regime_tag", "")
+
+    return RiskOfficerOutput(
+        entry_disabled_agents=entry_disabled_agents,
+        reason=reason,
+        regime=regime,
+    )
+
+
+def validate_risk_officer_output(
+    prev: RiskOfficerOutput, new: RiskOfficerOutput
+) -> None:
+    """Reduce-only validator for consecutive RiskOfficerOutput snapshots.
+
+    Asserts that ``new`` CANNOT increase risk compared to ``prev``:
+      - ``new`` cannot un-disable agents that ``prev`` had disabled
+        (adding entries = increasing risk).
+      - ``new`` cannot loosen the regime (e.g. crisis → trending_bull)
+        because a looser regime could cause downstream agents to take
+        larger positions.
+
+    Raises ``RiskViolation`` if the new output violates the reduce-only
+    invariant.
+    """
+    prev_disabled = set(prev.entry_disabled_agents)
+    new_disabled = set(new.entry_disabled_agents)
+
+    removed = prev_disabled - new_disabled
+    if removed:
+        raise RiskViolation(
+            f"risk officer output removed disabled agents {sorted(removed)} "
+            f"(prev had {len(prev_disabled)} disabled, new has "
+            f"{len(new_disabled)}) — reduce-only invariant violated: "
+            f"entries cannot be re-enabled across snapshots"
+        )
+
+    regime_strictness = {
+        "": 0,
+        "range_low_vol": 1,
+        "range_high_vol": 2,
+        "trending_bull": 3,
+        "trending_bear": 3,
+        "crisis": 4,
+    }
+    prev_strict = regime_strictness.get(prev.regime, 0)
+    new_strict = regime_strictness.get(new.regime, 0)
+    if new_strict < prev_strict:
+        raise RiskViolation(
+            f"risk officer regime loosened from {prev.regime!r} to "
+            f"{new.regime!r} — reduce-only invariant violated: regime "
+            f"cannot become less restrictive"
+        )
 
 
 # ===========================================================================

@@ -51,7 +51,7 @@ from meta.reflection_scheduler import (
     check_agent_eligible,
     get_reflection_trigger,
 )
-from meta.risk_officer import risk_check_cycle
+from meta.risk_officer import risk_check_cycle, run_risk_officer_job, RiskOfficerOutput
 
 logging.basicConfig(
     level=logging.INFO,
@@ -282,6 +282,7 @@ async def main():
     web_app.state.provider = provider
     web_app.state.config = config
     web_app.state.llama_server = llama_server
+    web_app.state.risk_officer_output = RiskOfficerOutput()
 
     # Expose the reflection transport so manual trigger endpoints
     # (trigger-reflection, trigger-all-reflections) can invoke it from the
@@ -498,24 +499,10 @@ async def main():
         try:
             conn = get_connection(str(DB_PATH))
             try:
-                report = risk_check_cycle(conn, config)
-                if report.get("desk_kill_switch"):
-                    logger.warning("Risk officer: DESK KILL SWITCH ACTIVE — all entries blocked")
-                if report.get("concentration_violators"):
-                    logger.warning(
-                        "Risk officer: concentration violators: %s",
-                        ", ".join(report["concentration_violators"]),
-                    )
-                if report.get("gross_exposure_throttled_agents"):
-                    logger.warning(
-                        "Risk officer: gross exposure throttle disabled entries for: %s",
-                        ", ".join(report["gross_exposure_throttled_agents"]),
-                    )
-                if report.get("event_blackout"):
-                    logger.warning(
-                        "Risk officer: event blackout active (%s) — all entries blocked",
-                        report["event_blackout"].get("name"),
-                    )
+                risk_output = run_risk_officer_job(conn, config)
+                web_app.state.risk_officer_output = risk_output
+                if risk_output.reason != "all clear":
+                    logger.warning("Risk officer: %s", risk_output.reason)
             finally:
                 conn.close()
         except Exception:
