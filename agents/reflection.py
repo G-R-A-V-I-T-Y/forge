@@ -536,7 +536,7 @@ def run_reflection(
     # carrying more evidence terms than the incumbent, must beat the
     # incumbent's walk-forward deflated Sharpe. With no incumbent, only the
     # absolute cap applies (nothing to beat).
-    max_evidence_terms = config.get("desk", {}).get(
+    max_evidence_terms = config["desk"].get(
         "max_evidence_terms", DEFAULT_MAX_EVIDENCE_TERMS,
     )
     proposed_terms = len(revised_spec.evidence) + len(revised_spec.secondary_evidence)
@@ -642,7 +642,7 @@ def run_reflection(
             next_thesis_version,
             change_summary_text,
             adversarial_critique_text,
-            config.get("desk"),
+            config["desk"],
         )
     except DeployValidationError as exc:
         logger.warning("[%s] revision rejected by desk validation: %s", agent_id, exc)
