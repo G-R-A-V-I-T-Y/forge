@@ -842,7 +842,11 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
     check_agent_eligible clears (M9 criterion 3). Runs each eligible agent's
     reflection inline via app.state.llm_fn -- the same execution style as
     the single-agent /api/exec/trigger-reflection/{agent_id} endpoint above,
-    which is also a direct synchronous call, not a background task."""
+    which is also a direct synchronous call, not a background task.
+
+    Returns:
+        {"queued": [agent_ids], "skipped": [{agent_id, reason}]}
+    """
     conn = app.state.conn
     config = getattr(app.state, "config", None) or {}
     llm_fn = getattr(app.state, "llm_fn", None)
@@ -854,12 +858,13 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
         "SELECT id FROM agents WHERE status IN ('active','rookie','shadow') ORDER BY name"
     ).fetchall()
 
-    results = []
+    queued: list[str] = []
+    skipped: list[dict[str, str]] = []
     for row in agents:
         aid = row["id"]
         eligible, ineligible_reason = check_agent_eligible(conn, aid, trigger)
         if not eligible:
-            results.append({"agent_id": aid, "status": "skipped", "reason": ineligible_reason})
+            skipped.append({"agent_id": aid, "reason": ineligible_reason})
             continue
         try:
             # See exec_trigger_reflection above: run_reflection_cycle
@@ -868,12 +873,12 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
             # a documented production control path, not a debug path.
             run_reflection_cycle(conn, aid, config, llm_fn)
             _audit(conn, "trigger_reflection", aid, reason)
-            results.append({"agent_id": aid, "status": "queued"})
+            queued.append(aid)
         except Exception as exc:
             logger.warning("Reflection failed for %s: %s", aid, exc)
-            results.append({"agent_id": aid, "status": "skipped", "reason": str(exc)})
+            skipped.append({"agent_id": aid, "reason": str(exc)})
 
-    return {"ok": True, "results": results}
+    return {"queued": queued, "skipped": skipped}
 
 
 @app.post("/api/exec/trigger-evaluation/{agent_id}")
@@ -908,24 +913,27 @@ async def exec_trigger_all_evaluations(reason: str = Query(...)):
     """Force an evaluation cycle for every active/rookie agent (M9 criterion
     3), via the single meta/controller.py::evaluate_agent code path -- same
     metrics/null-comparison/lifecycle-decision/harvest logic as the
-    scheduled cycle, just with the interval-due gate bypassed."""
+    scheduled cycle, just with the interval-due gate bypassed.
+
+    Returns:
+        {"triggered": [list of agent_ids], "audit_rows": count}
+    """
     conn = app.state.conn
     agents = conn.execute(
         "SELECT id FROM agents WHERE status IN ('active','rookie') AND id NOT LIKE 'benchmark_%' ORDER BY name"
     ).fetchall()
 
-    results = []
+    triggered: list[str] = []
     for row in agents:
         aid = row["id"]
         try:
-            result = evaluate_agent(conn, aid, force=True)
+            evaluate_agent(conn, aid, force=True)
             _audit(conn, "trigger_evaluation", aid, reason)
-            results.append(result)
+            triggered.append(aid)
         except Exception as exc:
             logger.warning("Evaluation failed for %s: %s", aid, exc)
-            results.append({"agent_id": aid, "error": str(exc)})
 
-    return {"ok": True, "results": results, "count": len(results)}
+    return {"triggered": triggered, "audit_rows": len(triggered)}
 
 
 @app.post("/api/exec/disable-entries/{agent_id}")
