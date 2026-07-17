@@ -345,7 +345,10 @@ class TestTriggerAllEvaluations:
     def test_trigger_all_evaluations(self, conn):
         """POST evaluates every active/rookie agent via meta/controller.py::
         evaluate_agent(force=True) -- force-bypassing the interval-due check
-        -- and writes one evaluations row per agent that wasn't already due."""
+        -- and writes one evaluations row per agent that wasn't already due.
+
+        Response format: {"triggered": [agent_ids], "audit_rows": count}
+        """
         _seed_agent(conn, agent_id="alpha_agent", status="active")
         _seed_agent(conn, agent_id="beta_agent", status="rookie")
         _seed_agent(conn, agent_id="gamma_agent", status="suspended")  # excluded
@@ -363,7 +366,11 @@ class TestTriggerAllEvaluations:
 
         r = _client(conn).post("/api/exec/trigger-all-evaluations?reason=test")
         assert r.status_code == 200
-        assert r.json()["ok"] is True
+        data = r.json()
+        assert isinstance(data["triggered"], list)
+        assert isinstance(data["audit_rows"], int)
+        assert set(data["triggered"]) == {"alpha_agent", "beta_agent"}
+        assert data["audit_rows"] == 2
 
         # alpha_agent: 1 pre-seeded row + 1 new row from the force-bypassed call
         alpha_evals = conn.execute(
@@ -394,8 +401,8 @@ class TestTriggerAllEvaluations:
         r = _client(conn).post("/api/exec/trigger-all-evaluations?reason=test")
         assert r.status_code == 200
         data = r.json()
-        assert data["ok"] is True
-        assert data["count"] == 0
+        assert data["triggered"] == []
+        assert data["audit_rows"] == 0
 
 
 class TestTriggerAllReflections:
@@ -410,24 +417,12 @@ class TestTriggerAllReflections:
         _seed_agent(conn, agent_id="ineligible_agent", status="active")
         _seed_agent(conn, agent_id="benchmark_random_walk", status="active")
 
-        # eligible_agent clears the default trade_count trigger (interval 20)
         _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1)
-        # benchmark_random_walk also clears the trigger by trade count alone,
-        # but must still be skipped -- benchmarks never reflect.
         _seed_closed_trades(conn, "benchmark_random_walk", n=20, hours_ago=1)
-        # ineligible_agent has zero closed trades -> trades_since=0 < 20
 
         fake_llm = MagicMock(return_value="")
 
         def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
-            # Mirrors the real run_reflection/llm_fn contract (Task 1): the
-            # pipeline calls llm_fn(system_prompt, user_prompt) internally.
-            # agents/reflection.py internals are out of scope for this task,
-            # so this stands in for the real pipeline while still exercising
-            # the transport wiring end to end. Accepts reflection_id (now
-            # always supplied by run_reflection_cycle, T8 review Finding 1)
-            # and returns a real ReflectionResult since run_reflection_cycle
-            # post-processes the return value's fields.
             llm_fn("system prompt", "user prompt")
             return _stub_reflection_result(triggered=True)
 
@@ -439,20 +434,20 @@ class TestTriggerAllReflections:
 
         assert r.status_code == 200
         data = r.json()
-        results = {row["agent_id"]: row for row in data["results"]}
+        assert isinstance(data["queued"], list)
+        assert isinstance(data["skipped"], list)
+        assert "eligible_agent" in data["queued"]
+        assert "ineligible_agent" not in data["queued"]
+        assert "benchmark_random_walk" not in data["queued"]
 
-        assert results["eligible_agent"]["status"] == "queued"
-        assert results["ineligible_agent"]["status"] == "skipped"
-        assert "20" in results["ineligible_agent"]["reason"]
-        assert results["benchmark_random_walk"]["status"] == "skipped"
-        assert "benchmark" in results["benchmark_random_walk"]["reason"].lower()
+        skipped_map = {s["agent_id"]: s["reason"] for s in data["skipped"]}
+        assert "20" in skipped_map["ineligible_agent"]
+        assert "benchmark" in skipped_map["benchmark_random_walk"].lower()
 
-        # The transport (fake llm_fn) was exercised only for the eligible agent.
         assert fake_llm.call_count == 1
         assert mock_run.call_count == 1
         assert mock_run.call_args[0][1] == "eligible_agent"
 
-        # Audit trail: only the queued agent gets an audit_log row.
         rows = conn.execute(
             "SELECT agent_id FROM audit_log WHERE action = 'trigger_reflection'"
         ).fetchall()

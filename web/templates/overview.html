@@ -267,17 +267,21 @@ function openModal(title, body, endpoint, method) {
   document.getElementById('modal-body').textContent = body;
   document.getElementById('confirm-modal').classList.add('open');
   var confirmBtn = document.getElementById('modal-confirm-btn');
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = 'Confirm';
   confirmBtn.onclick = function() {
     var reason = document.getElementById('modal-reason').value.trim();
     if (!reason) { alert('Reason is required'); return; }
     var url = endpoint + '?reason=' + encodeURIComponent(reason);
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Loading\u2026';
     fetch(url, { method: method || 'POST' })
       .then(function(r) { return r.json(); })
       .then(function(d) {
         if (d.ok || d.ok === undefined) { location.reload(); }
-        else { alert(d.error || 'Action failed'); }
+        else { alert(d.error || 'Action failed'); confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm'; }
       })
-      .catch(function(e) { alert(e.message); });
+      .catch(function(e) { alert(e.message); confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm'; });
   };
 }
 
