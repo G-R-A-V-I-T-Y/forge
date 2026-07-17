@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import statistics
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,9 @@ from typing import Any
 from store.performance import compute_metrics
 
 logger = logging.getLogger(__name__)
+
+BOOTSTRAP_RESAMPLES = 1000
+NULL_MIN_TRADES = 30
 
 
 def _now() -> str:
@@ -31,11 +35,39 @@ def get_null_metrics(conn) -> dict[str, Any] | None:
     return compute_metrics(conn, "benchmark_random_walk")
 
 
+def _get_null_per_trade_returns(conn) -> list[float]:
+    """Load per-trade returns from the benchmark_random_walk agent."""
+    rows = conn.execute(
+        """SELECT pnl_pct FROM trades
+           WHERE agent_id = 'benchmark_random_walk'
+             AND status = 'closed' AND voided = 0
+             AND pnl_pct IS NOT NULL
+           ORDER BY entry_timestamp ASC"""
+    ).fetchall()
+    return [r["pnl_pct"] for r in rows]
+
+
+def _compute_sharpe(returns: list[float]) -> float:
+    if len(returns) < 2:
+        return 0.0
+    avg = statistics.mean(returns)
+    std = statistics.stdev(returns)
+    return avg / std if std > 0 else 0.0
+
+
 def significance_test(
     agent_metrics: dict[str, Any],
     null_metrics: dict[str, Any] | None,
+    conn=None,
 ) -> dict[str, Any]:
     """Compare agent performance against the null distribution.
+
+    Uses bootstrap resampling (1,000 resamples) of the benchmark_random_walk
+    per-trade returns to build a null Sharpe distribution.  The agent's
+    empirical Sharpe percentile is the p-value.
+
+    Preserves R12 latch: if null has fewer than NULL_MIN_TRADES trades,
+    returns None-significance (insufficient_data).
 
     Returns a dict with:
       - beats_null: bool
@@ -67,10 +99,28 @@ def significance_test(
     null_wr = null_metrics.get("win_rate", 0.0)
     wr_diff = agent_wr - null_wr
 
-    # Simplified p-value estimate based on Sharpe ratio separation
-    # Under the null, Sharpe ~ N(0, 1/sqrt(N)) for uncorrelated trades.
-    # A Sharpe > 2/sqrt(N) above null is approximately p < 0.05 (one-sided).
-    if agent_trades >= 30:
+    p_est = ">0.10"
+    if agent_trades >= 30 and conn is not None:
+        null_returns = _get_null_per_trade_returns(conn)
+        null_trades = null_metrics.get("closed_trades", 0)
+        if null_trades < NULL_MIN_TRADES:
+            p_est = "insufficient_data"
+        elif len(null_returns) >= 2:
+            rng = random.Random(42)
+            null_sharpes: list[float] = []
+            for _ in range(BOOTSTRAP_RESAMPLES):
+                sample = rng.choices(null_returns, k=agent_trades)
+                null_sharpes.append(_compute_sharpe(sample))
+            null_sharpes.sort()
+            count_above = sum(1 for s in null_sharpes if s >= agent_sharpe)
+            percentile = count_above / len(null_sharpes)
+            if percentile < 0.05:
+                p_est = "<0.05"
+            elif percentile < 0.10:
+                p_est = "<0.10"
+            else:
+                p_est = ">0.10"
+    elif agent_trades >= 30:
         se = 1.0 / (agent_trades ** 0.5)
         t_stat = sharpe_diff / se if se > 0 else 0.0
         if t_stat > 1.96:
@@ -82,8 +132,6 @@ def significance_test(
     else:
         p_est = "insufficient_data"
 
-    # An agent beats the null if it has positive Sharpe above null and
-    # at least a modest sample.
     beats = (
         agent_trades >= 30
         and sharpe_diff > 0
@@ -208,7 +256,7 @@ def get_lifecycle_decision(
     )
 
     # Probation: borderline agent (p between 0.05-0.15 or PF 0.8-1.0)
-    sig = significance_test(metrics, null_metrics)
+    sig = significance_test(metrics, null_metrics, conn=conn)
     if total_trades >= 50:
         p_est = sig.get("p_value_estimate", ">0.10")
         beats = sig.get("beats_null", False)
