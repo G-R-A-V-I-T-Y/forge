@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-16T23:01:53Z",
+  "generated_at": "2026-07-17T00:21:53Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -106,8 +106,8 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "North Mini Code Free",
-      "paper_balance": 50341.13321335586,
+      "last_model_used": "Big Pickle",
+      "paper_balance": 50265.26850035483,
       "paper_peak": 50341.13321335586,
       "live_balance": null
     },
@@ -159,28 +159,10 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": -0.0013422821224731095,
+      "current_pnl_pct": -0.004510691673753711,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
-    },
-    {
-      "id": "pos_crimson_fox_20260715_004748_BTC_ec83",
-      "agent_id": "crimson_fox",
-      "asset": "BTC-PERP",
-      "direction": "long",
-      "entry_price": 64808.00001543008,
-      "stop_loss_price": 63791.0,
-      "take_profit_price": 65633.8,
-      "leverage": 2,
-      "position_size_pct": 0.046000000000000006,
-      "notional_usd": 2314.0057668850136,
-      "true_notional": 4628.011533770027,
-      "opened_at": "2026-07-15T00:47:48.342067Z",
-      "current_pnl_pct": -0.02542895985785379,
-      "max_hold_hours": 48.0,
-      "mode": "paper",
-      "trade_id": "crimson_fox_20260715_004748_BTC_ec83"
     }
   ]
 }
