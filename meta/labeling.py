@@ -131,7 +131,7 @@ def run_labeling_job(
                FROM decisions d
                LEFT JOIN decision_labels dl ON dl.decision_id = d.id
                WHERE d.timestamp <= ?
-                 AND dl.id IS NULL
+                 AND dl.decision_id IS NULL
                ORDER BY d.timestamp ASC""",
             (cutoff_iso,),
         ).fetchall()
@@ -178,13 +178,13 @@ def get_labeling_coverage(conn) -> dict:
     Returns
     -------
     dict
-        ``{eligible_decisions, labeled, coverage_pct}``.
+        ``{total_decisions, labeled, coverage_pct}``.
     """
     cutoff = (
         datetime.now(timezone.utc) - timedelta(hours=LONGEST_HOURS)
     ).isoformat().replace("+00:00", "Z")
 
-    eligible = conn.execute(
+    total_decisions = conn.execute(
         "SELECT COUNT(*) FROM decisions WHERE timestamp <= ?",
         (cutoff,),
     ).fetchone()[0]
@@ -193,10 +193,10 @@ def get_labeling_coverage(conn) -> dict:
         "SELECT COUNT(DISTINCT decision_id) FROM decision_labels",
     ).fetchone()[0]
 
-    coverage_pct = round(labeled / eligible * 100, 2) if eligible > 0 else 0.0
+    coverage_pct = round(labeled / total_decisions * 100, 2) if total_decisions > 0 else 0.0
 
     return {
-        "eligible_decisions": eligible,
+        "total_decisions": total_decisions,
         "labeled": labeled,
         "coverage_pct": coverage_pct,
     }

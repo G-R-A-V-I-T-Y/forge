@@ -8,17 +8,9 @@
 <h3 class="section-header">Decision Coverage</h3>
 <div class="stat-row">
   <div class="stat-card">
-    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
-    <div class="stat-value">{{ coverage.get('eligible_decisions', 0) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Labeled</div>
-    <div class="stat-value win">{{ coverage.get('labeled', 0) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="stat-label">Coverage %</div>
+    <div class="stat-label">Coverage</div>
     <div class="stat-value {{ 'win' if coverage.get('coverage_pct', 0) >= 80 else ('loss' if coverage.get('coverage_pct', 0) < 50 else '') }}">
-      {{ "{:.1f}%".format(coverage.get('coverage_pct', 0)) }}
+      {{ coverage.get('labeled', 0) }}/{{ coverage.get('total_decisions', 0) }} ({{ "{:.1f}%".format(coverage.get('coverage_pct', 0)) }}) decisions labeled
     </div>
   </div>
 </div>
