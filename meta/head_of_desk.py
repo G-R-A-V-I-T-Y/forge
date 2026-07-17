@@ -251,6 +251,12 @@ def generate_morning_brief(conn, config: dict | None = None) -> dict[str, Any]:
     }
 
 
+def daily_briefing(conn, config: dict | None = None) -> str:
+    """M9.11 API: return the briefing text as a plain string."""
+    brief = generate_morning_brief(conn, config)
+    return brief.get("briefing_text", "")
+
+
 def store_briefing(conn, briefing: dict[str, Any]) -> None:
     """Persist a briefing dict into the briefings table.
 
