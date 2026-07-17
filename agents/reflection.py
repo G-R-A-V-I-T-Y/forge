@@ -1781,6 +1781,28 @@ def get_agent_hypothesis_history(conn, agent_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_hypothesis_track_record(conn, agent_id: str) -> list[dict]:
+    """Return the agent's hypothesis track record for dossier injection.
+
+    Delegates to :func:`get_agent_hypothesis_history` — the public API
+    name expected by the dossier builder and the web UI summary panels.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection.
+    agent_id:
+        Agent identifier.
+
+    Returns
+    -------
+    list[dict]
+        Hypothesis rows as dicts (newest first), suitable for display in
+        the dossier or the agent page hypothesis panel.
+    """
+    return get_agent_hypothesis_history(conn, agent_id)
+
+
 def get_hypothesis_digest(conn, limit: int = 10) -> str:
     """Return a formatted summary of the most recent hypotheses across agents.
 

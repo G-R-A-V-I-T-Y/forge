@@ -17,6 +17,7 @@ from agents.reflection import (
     check_challenger_resolution,
     get_agent_hypothesis_history,
     get_hypothesis_digest,
+    get_hypothesis_track_record,
     register_hypotheses,
     resolve_hypotheses,
 )
@@ -637,3 +638,34 @@ def test_get_hypothesis_digest_lists_recent_claims(conn):
     digest = get_hypothesis_digest(conn)
     assert "funding drives reversion" in digest
     assert "PROPOSED" in digest
+
+
+def test_get_hypothesis_track_record_returns_dossier_shape(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+    reflection_id = _insert_reflection(conn, AGENT_ID)
+    ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
+        {
+            "claim": "funding drives reversion",
+            "predicted_effect": "regret decreases",
+            "feature": "funding",
+            "direction": "down",
+            "falsification_condition": "no improvement in challenger trial",
+        },
+    ])
+    conn.execute(
+        "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (ids[0],),
+    )
+    conn.commit()
+
+    track = get_hypothesis_track_record(conn, AGENT_ID)
+    assert len(track) == 1
+    row = track[0]
+    assert row["claim"] == "funding drives reversion"
+    assert row["status"] == "challenger"
+    assert row["feature"] == "funding"
+    assert row["direction"] == "down"
+    assert row["reflection_id"] == reflection_id
+    assert row["resolved_at"] is None
+    assert row["effect_observed"] is None
+
+    assert get_hypothesis_track_record(conn, "nonexistent_agent") == []
