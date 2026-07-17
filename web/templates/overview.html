@@ -35,6 +35,10 @@
     <div class="stat-label">Total Trades</div>
     <div class="stat-value">{{ total_trades }}</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-label">Backtest Trials</div>
+    <div class="stat-value">{{ trial_count }}</div>
+  </div>
 </div>
 
 <!-- Morning Brief (Head of Desk, M9 crit 8) -->
@@ -42,6 +46,14 @@
 <h3 class="section-header">Morning Brief{% if latest_briefing_date %} — {{ latest_briefing_date }}{% endif %}</h3>
 <div class="card" style="overflow-x:auto;">
   <pre style="margin:0; font-size:12px; line-height:1.5; white-space:pre;">{{ latest_briefing_text }}</pre>
+</div>
+{% endif %}
+
+<!-- Desk Knowledge (M11.1) -->
+{% if desk_digest %}
+<h3 class="section-header">Desk Knowledge</h3>
+<div class="card" style="overflow-x:auto;">
+  <pre style="margin:0; font-size:11px; line-height:1.4; white-space:pre;">{{ desk_digest }}</pre>
 </div>
 {% endif %}
 

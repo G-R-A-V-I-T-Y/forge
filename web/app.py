@@ -20,6 +20,7 @@ from market.heartbeat import (
 from agents.reflection import compute_calibration_curve
 from meta.controller import evaluate_agent
 from meta.evaluator import get_lifecycle_decision, get_null_metrics
+from meta.desk_memory import get_desk_digest
 from meta.reflection_scheduler import (
     check_agent_eligible,
     get_reflection_trigger,
@@ -260,6 +261,18 @@ async def overview(request: Request):
     except Exception:
         pass
 
+    desk_digest = None
+    try:
+        desk_digest = get_desk_digest(conn)
+    except Exception:
+        pass
+
+    trial_count = 0
+    try:
+        trial_count = conn.execute("SELECT COUNT(*) FROM backtest_trials").fetchone()[0]
+    except Exception:
+        pass
+
     return templates.TemplateResponse(
         "overview.html",
         {
@@ -276,6 +289,8 @@ async def overview(request: Request):
             "evaluation_summaries": _get_evaluation_summaries(conn),
             "latest_briefing_text": latest_briefing_text,
             "latest_briefing_date": latest_briefing_date,
+            "desk_digest": desk_digest,
+            "trial_count": trial_count,
         },
     )
 
@@ -600,6 +615,19 @@ async def api_desk():
             }
         )
     return agents
+
+
+@app.get("/api/desk-memory")
+async def api_desk_memory():
+    """Structured text digest of validated and falsified hypotheses (M11.1)."""
+    conn = app.state.conn
+    digest = get_desk_digest(conn)
+    trial_count = 0
+    try:
+        trial_count = conn.execute("SELECT COUNT(*) FROM backtest_trials").fetchone()[0]
+    except Exception:
+        pass
+    return {"digest": digest, "trial_count": trial_count}
 
 
 @app.get("/agents/{name}", response_class=HTMLResponse)

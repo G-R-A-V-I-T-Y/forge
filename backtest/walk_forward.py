@@ -10,6 +10,7 @@ section 3.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,9 +69,44 @@ def _deflated_sharpe(sharpe: float, n_trials: int, n_returns: int) -> float:
     return sharpe - trial_penalty
 
 
-def run_walk_forward(spec: Spec, ledger_dir: Path, taker_fee: float) -> WalkForwardReport:
+def _spec_hash(spec: Spec) -> str:
+    """Deterministic SHA-256 of the spec's effective parameters for trial dedup."""
+    import dataclasses as _dc
+    fields_to_hash = [
+        spec.agent_id, spec.direction,
+        spec.confidence_threshold, spec.scale_threshold,
+        spec.stop_loss_pct, spec.take_profit_pct,
+        spec.max_hold_hours, spec.leverage, spec.position_size_pct,
+        tuple(spec.universe_include),
+        tuple(spec.regime_exclude),
+    ]
+    raw = "|".join(str(f) for f in fields_to_hash)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def record_trial(conn, spec: Spec, data_window_start: datetime, data_window_end: datetime,
+                 deflated_sharpe: float, outcome: str | None = None) -> None:
+    """Insert a row into backtest_trials after a walk-forward run."""
+    conn.execute(
+        """INSERT INTO backtest_trials
+               (spec_hash, agent_id, data_window_start, data_window_end,
+                deflated_sharpe, outcome)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            _spec_hash(spec),
+            spec.agent_id,
+            data_window_start.isoformat(),
+            data_window_end.isoformat(),
+            deflated_sharpe,
+            outcome,
+        ),
+    )
+    conn.commit()
+
+
+def run_walk_forward(spec: Spec, ledger_dir: Path, taker_fee: float,
+                     conn=None) -> WalkForwardReport:
     full_start, full_end = _ledger_date_range(ledger_dir, spec)
-    total_seconds = (full_end - full_start).total_seconds()
 
     train_end = full_start + (full_end - full_start) * TRAIN_FRACTION
     validate_end = train_end + (full_end - full_start) * VALIDATE_FRACTION
@@ -88,6 +124,11 @@ def run_walk_forward(spec: Spec, ledger_dir: Path, taker_fee: float) -> WalkForw
         sensitivity[field_name] = perturbed_result.sharpe - test_result.sharpe
 
     deflated = _deflated_sharpe(test_result.sharpe, n_trials=len(perturbable) + 1, n_returns=len(test_result.trades))
+
+    outcome = "pass" if deflated > 0 else "fail"
+
+    if conn is not None:
+        record_trial(conn, spec, full_start, full_end, deflated, outcome)
 
     return WalkForwardReport(
         train=train_result, validate=validate_result, test=test_result,

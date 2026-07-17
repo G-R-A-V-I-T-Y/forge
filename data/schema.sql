@@ -268,3 +268,17 @@ CREATE INDEX IF NOT EXISTS idx_decision_labels_decision ON decision_labels(decis
 CREATE INDEX IF NOT EXISTS idx_decision_labels_horizon ON decision_labels(horizon);
 CREATE INDEX IF NOT EXISTS idx_hypotheses_agent ON hypotheses(agent_id);
 CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);
+
+-- M11.4: Trial accounting for walk-forward backtests
+CREATE TABLE IF NOT EXISTS backtest_trials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_hash TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    ran_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    data_window_start TEXT NOT NULL,
+    data_window_end TEXT NOT NULL,
+    deflated_sharpe REAL NOT NULL,
+    outcome TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_trials_agent ON backtest_trials(agent_id);
