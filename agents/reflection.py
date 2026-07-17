@@ -278,7 +278,11 @@ def run_reflection(
     hypothesis_ids: list[int] = []
     try:
         dossier_ledger_dir = config.get("ledger_dir", "ledger")
-        dossier = build_dossier(conn, agent_id, dossier_ledger_dir)
+        dossier_train_path = config.get(
+            "training_dataset_path",
+            "data/historical_data/training_dataset.parquet",
+        )
+        dossier = build_dossier(conn, agent_id, dossier_ledger_dir, dossier_train_path)
     except Exception as exc:
         logger.warning("Dossier build failed for %s: %s — falling back to legacy path", agent_id, exc)
 
@@ -722,10 +726,10 @@ def _dossier_digest(dossier: Any) -> dict:
     return {
         "closed_trades": len(dossier.closed_trades),
         "calibration_buckets": len(dossier.calibration_curve),
-        "top_regret_decisions": len(dossier.top_regret_decisions),
-        "regimes": [r.get("regime") for r in dossier.regime_breakdown],
-        "features_tracked": [f.get("feature") for f in dossier.feature_stats],
-        "hypothesis_history_count": len(dossier.hypothesis_history),
+        "high_regret_decisions": len(dossier.high_regret_decisions),
+        "regimes": list(dossier.win_rate_by_regime.keys()),
+        "features_tracked": list(dossier.feature_stats.keys()),
+        "hypothesis_track_record_count": len(dossier.hypothesis_track_record),
     }
 
 
@@ -1581,41 +1585,20 @@ def compute_calibration_curve(
     in every bucket.
 
     Returns a list of dicts: ``{"bucket": str, "count": int, "win_rate": float}``.
+
+    Delegates to :func:`store.performance.compute_calibration_curve`.
     """
-    rows = conn.execute(
-        """SELECT confidence, result FROM trades
-           WHERE agent_id = ? AND status = 'closed' AND voided = 0
-           AND confidence IS NOT NULL""",
-        (agent_id,),
-    ).fetchall()
+    from store.performance import compute_calibration_curve as _inner
 
-    if not rows:
-        return []
-
-    buckets: dict[str, dict[str, float]] = {}
-    for r in rows:
-        conf = r["confidence"]
-        # Bucket into deciles: 0.0-0.1, 0.1-0.2, ...
-        bucket_idx = min(int(conf * 10), 9)
-        bucket_label = f"{bucket_idx / 10:.1f}-{(bucket_idx + 1) / 10:.1f}"
-        if bucket_label not in buckets:
-            buckets[bucket_label] = {"count": 0, "wins": 0}
-        buckets[bucket_label]["count"] += 1
-        if r["result"] == "win":
-            buckets[bucket_label]["wins"] += 1
-
+    curve_dict = _inner(conn, agent_id)
     results = []
-    for bucket_label in sorted(buckets.keys()):
-        data = buckets[bucket_label]
-        results.append(
-            {
-                "bucket": bucket_label,
-                "count": int(data["count"]),
-                "win_rate": (
-                    data["wins"] / data["count"] if data["count"] > 0 else 0.0
-                ),
-            },
-        )
+    for bucket_label in sorted(curve_dict):
+        entry = curve_dict[bucket_label]
+        results.append({
+            "bucket": bucket_label,
+            "count": entry["sample_count"],
+            "win_rate": entry["realized_wr"],
+        })
     return results
 
 

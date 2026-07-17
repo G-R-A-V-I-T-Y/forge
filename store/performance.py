@@ -178,6 +178,56 @@ def _parse_ts(ts: str | None) -> datetime | None:
         return None
 
 
+def compute_calibration_curve(
+    conn, agent_id: str,
+) -> dict[str, dict]:
+    """Compute confidence vs. realized win-rate calibration buckets.
+
+    Groups closed trades by confidence decile (0.0–0.1, 0.1–0.2, …,
+    0.9–1.0) and returns the observed win rate for each bucket.  A
+    well-calibrated agent has confidence ≈ win rate in every bucket.
+
+    Returns a ``dict[str, dict]`` keyed by bucket label (e.g.
+    ``"0.7-0.8"``) with each value containing:
+
+    - ``confidence_mid``: midpoint of the bucket (float)
+    - ``realized_wr``: realized win rate in this bucket (float)
+    - ``sample_count``: number of trades in this bucket (int)
+    """
+    rows = conn.execute(
+        """SELECT confidence, result FROM trades
+           WHERE agent_id = ? AND status = 'closed' AND voided = 0
+           AND confidence IS NOT NULL""",
+        (agent_id,),
+    ).fetchall()
+
+    if not rows:
+        return {}
+
+    buckets: dict[str, dict[str, float]] = {}
+    for r in rows:
+        conf = r["confidence"]
+        # Bucket into deciles: 0.0-0.1, 0.1-0.2, ...
+        bucket_idx = min(int(conf * 10), 9)
+        bucket_label = f"{bucket_idx / 10:.1f}-{(bucket_idx + 1) / 10:.1f}"
+        if bucket_label not in buckets:
+            buckets[bucket_label] = {"wins": 0, "total": 0}
+        buckets[bucket_label]["total"] += 1
+        if r["result"] == "win":
+            buckets[bucket_label]["wins"] += 1
+
+    result: dict[str, dict] = {}
+    for bucket_label in sorted(buckets.keys()):
+        data = buckets[bucket_label]
+        total = data["total"]
+        result[bucket_label] = {
+            "confidence_mid": (float(bucket_label.split("-")[0]) + float(bucket_label.split("-")[1])) / 2,
+            "realized_wr": data["wins"] / total if total > 0 else 0.0,
+            "sample_count": total,
+        }
+    return result
+
+
 def format_performance_summary(metrics: dict, agent_name: str) -> str:
     """Format metrics into a human-readable performance block for the prompt."""
     lines = [
