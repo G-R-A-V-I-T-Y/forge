@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from meta.desk_memory import get_desk_digest
 from store.query import query_trades
 from store.specs import get_active_spec
 
@@ -164,7 +165,7 @@ def build_dossier(
     wr_by_regime, pf_by_regime = _compute_regime_metrics(closed_trades)
     feature_stats = _compute_feature_stats(conn, agent_id, training_dataset_path)
     hypothesis_track_record = _get_hypothesis_history(conn, agent_id)
-    desk_memory_digest = ""
+    desk_memory_digest = _get_desk_memory_digest(conn)
 
     return Dossier(
         agent_id=agent_id,
@@ -184,6 +185,16 @@ def build_dossier(
 # ---------------------------------------------------------------------------
 # Internal data sources — all best-effort, never raise
 # ---------------------------------------------------------------------------
+
+
+def _get_desk_memory_digest(conn) -> str:
+    """Fetch the cross-agent desk memory digest for inclusion in the dossier."""
+    try:
+        return get_desk_digest(conn)
+    except Exception as exc:
+        logger.warning("Failed to fetch desk memory digest: %s", exc)
+        return ""
+
 
 _THESES_DIR = Path(__file__).resolve().parent / "theses"
 

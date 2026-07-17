@@ -417,7 +417,60 @@ def check_against_graveyard(
 
     if max_similarity > threshold:
         return (False, reason)
+
+    # M11.3 — Hypothesis graveyard: reject if the thesis targets a
+    # (feature, direction) space already falsified by a prior agent.
+    graveyard_reject = _check_hypothesis_graveyard(conn, new_tokens, config)
+    if graveyard_reject is not None:
+        return graveyard_reject
+
     return (True, "")
+
+
+def _check_hypothesis_graveyard(
+    conn, new_tokens: list[str], config: dict
+) -> tuple[bool, str] | None:
+    """Reject spawn if the thesis targets a falsified (feature, direction) space.
+
+    Queries the hypotheses table for falsified entries and checks if the new
+    thesis token set overlaps with any falsified claim's tokens AND mentions
+    the same feature keyword.  Returns ``(False, reason)`` on rejection or
+    ``None`` if no graveyard collision is found.
+    """
+    if not new_tokens:
+        return None
+
+    new_set = set(new_tokens)
+    min_overlap = int(config.get("graveyard_claim_min_overlap", 2))
+
+    falsified = conn.execute(
+        """SELECT agent_id, claim, feature, direction, regime_context,
+                  effect_observed
+           FROM hypotheses
+           WHERE status = 'falsified'"""
+    ).fetchall()
+
+    if not falsified:
+        return None
+
+    for row in falsified:
+        claim_tokens = set(_tokenize(row["claim"] or ""))
+        feature_token = (row["feature"] or "").lower()
+
+        claim_overlap = len(claim_tokens & new_set)
+        feature_in_thesis = feature_token and feature_token in new_set
+
+        if claim_overlap >= min_overlap and feature_in_thesis:
+            reason = (
+                f"hypothesis graveyard: falsified by [{row['agent_id']}] "
+                f"feature={row['feature']} dir={row['direction']} "
+                f"regime={row['regime_context']} "
+                f"(effect={row['effect_observed']:+.4f}): "
+                f"{row['claim']}"
+            )
+            return (False, reason)
+
+    return None
 
 
 def _serialise_config(overrides: dict) -> str:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -84,6 +84,29 @@ def _spec_hash(spec: Spec) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def _count_overlapping_trials(
+    conn, spec: Spec, window_start: datetime, window_end: datetime,
+    lookback_days: int = 90,
+) -> int:
+    """Count prior backtest_trials for the same agent with overlapping data windows.
+
+    Windows overlap when: existing.start < new.end AND existing.end > new.start.
+    Only trials within the trailing *lookback_days* are counted, preventing
+    ancient history from permanently inflating the deflation penalty.
+    """
+    cutoff = window_end - timedelta(days=lookback_days)
+    row = conn.execute(
+        """SELECT COUNT(*) FROM backtest_trials
+           WHERE agent_id = ?
+             AND data_window_end >= ?
+             AND data_window_start <= ?
+             AND data_window_end > ?""",
+        (spec.agent_id, cutoff.isoformat(), window_end.isoformat(),
+         window_start.isoformat()),
+    ).fetchone()
+    return row[0] if row else 0
+
+
 def record_trial(conn, spec: Spec, data_window_start: datetime, data_window_end: datetime,
                  deflated_sharpe: float, outcome: str | None = None) -> None:
     """Insert a row into backtest_trials after a walk-forward run."""
@@ -123,7 +146,14 @@ def run_walk_forward(spec: Spec, ledger_dir: Path, taker_fee: float,
         perturbed_result = run_backtest(perturbed_spec, ledger_dir, validate_end, full_end, taker_fee)
         sensitivity[field_name] = perturbed_result.sharpe - test_result.sharpe
 
-    deflated = _deflated_sharpe(test_result.sharpe, n_trials=len(perturbable) + 1, n_returns=len(test_result.trades))
+    base_trials = len(perturbable) + 1
+    if conn is not None:
+        overlapping = _count_overlapping_trials(conn, spec, full_start, full_end)
+        total_trials = base_trials + overlapping
+    else:
+        total_trials = base_trials
+
+    deflated = _deflated_sharpe(test_result.sharpe, n_trials=total_trials, n_returns=len(test_result.trades))
 
     outcome = "pass" if deflated > 0 else "fail"
 
