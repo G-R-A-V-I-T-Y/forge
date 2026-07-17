@@ -73,27 +73,24 @@ def _seed_trades(conn, agent_id, n, n_win, win_pnl_pct, loss_pnl_pct, hours_ago=
 
 
 def test_evaluation_runs_on_schedule(conn):
-    """The meta-controller job fires once an agent has crossed the
-    configured trade interval (default 30, meta/controller.py::
-    get_evaluation_interval) and writes an `evaluations` row.
+    """The meta-controller job fires when completed_trades is a multiple of
+    the configured trade interval (default 30).
 
-    35 closed trades with no prior evaluation row: evaluate_agent()'s
-    "is evaluation due" gate computes trades_since = closed_trades (no
-    last_eval to diff against), which is >= the default interval of 30, so
-    the cycle is NOT skipped even without force=True.
+    30 closed trades with no prior evaluation row: evaluate_agent()'s
+    cadence gate computes closed_trades % 30 == 0, so evaluation proceeds.
     """
     _seed_agent(conn, "sched_agent")
-    _seed_trades(conn, "sched_agent", n=35, n_win=21, win_pnl_pct=0.02, loss_pnl_pct=-0.015)
+    _seed_trades(conn, "sched_agent", n=30, n_win=18, win_pnl_pct=0.02, loss_pnl_pct=-0.015)
 
     result = evaluate_agent(conn, "sched_agent")
 
     assert not result.get("skipped"), result
-    assert result["closed_trades"] == 35
+    assert result["closed_trades"] == 30
     rows = conn.execute(
         "SELECT * FROM evaluations WHERE agent_id = 'sched_agent'"
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["trades_evaluated"] == 35
+    assert rows[0]["trades_evaluated"] == 30
 
 
 def test_cull_below_null(conn):
@@ -247,3 +244,142 @@ def test_zero_trade_review(conn):
         "SELECT status FROM agents WHERE id = 'stale_agent'"
     ).fetchone()["status"]
     assert status == "active"  # review does not change agent status
+
+
+def test_review_required_flag_set(conn):
+    """When zero_trades_5d fires, the evaluations row has review_required=1."""
+    _seed_agent(conn, "review_flag_agent")
+    _seed_trades(
+        conn, "review_flag_agent", n=10, n_win=6,
+        win_pnl_pct=0.02, loss_pnl_pct=-0.015, hours_ago=6 * 24,
+    )
+
+    result = evaluate_agent(conn, "review_flag_agent", force=True)
+    assert result["decision"] == "review"
+
+    row = conn.execute(
+        "SELECT review_required FROM evaluations"
+        " WHERE agent_id = 'review_flag_agent'"
+    ).fetchone()
+    assert row is not None
+    assert row["review_required"] == 1
+
+
+def test_review_required_not_set_for_active(conn):
+    """An active agent's evaluation has review_required=0."""
+    _seed_agent(conn, "active_flag_agent")
+    _seed_trades(
+        conn, "active_flag_agent", n=30, n_win=18,
+        win_pnl_pct=0.02, loss_pnl_pct=-0.015,
+    )
+
+    result = evaluate_agent(conn, "active_flag_agent", force=True)
+    assert result["decision"] == "active"
+
+    row = conn.execute(
+        "SELECT review_required FROM evaluations"
+        " WHERE agent_id = 'active_flag_agent'"
+    ).fetchone()
+    assert row is not None
+    assert row["review_required"] == 0
+
+
+def test_evaluation_skipped_off_cadence(conn):
+    """Evaluation is skipped when completed_trades is not a multiple of the
+    interval (e.g. 35 trades with default interval 30)."""
+    _seed_agent(conn, "off_cadence_agent")
+    _seed_trades(
+        conn, "off_cadence_agent", n=35, n_win=21,
+        win_pnl_pct=0.02, loss_pnl_pct=-0.015,
+    )
+
+    result = evaluate_agent(conn, "off_cadence_agent")
+    assert result.get("skipped")
+    assert "cadence" in result["reason"]
+
+
+def test_pf_below_08_two_consecutive(conn):
+    """PF < 0.8 in two consecutive evaluations triggers SUSPENDED.
+
+    Three evaluations are needed: the third sees two prior evaluations both
+    with PF < 0.8, firing the pf_below_08_2eval trigger.
+    """
+    _seed_agent(conn, "pf_agent")
+    # Eval 1: PF ~0.53, 30 trades
+    _seed_trades(
+        conn, "pf_agent", n=30, n_win=12,
+        win_pnl_pct=0.02, loss_pnl_pct=-0.025,
+    )
+    result1 = evaluate_agent(conn, "pf_agent", force=True)
+    assert result1["decision"] == "active"
+
+    # Eval 2: 60 trades, same profile, PF still < 0.8
+    for i in range(30, 60):
+        is_win = (i - 30) < 12
+        pnl_pct = 0.02 if is_win else -0.025
+        result = "win" if is_win else "loss"
+        conn.execute(
+            """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+               leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp)
+               VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+               'closed', ?, ?, ?, ?, ?)""",
+            (f"pf_agent_{i}", "pf_agent", pnl_pct, pnl_pct * 10000, result,
+             _iso(0.5), _iso(0.5)),
+        )
+    conn.commit()
+    result2 = evaluate_agent(conn, "pf_agent", force=True)
+    assert result2["decision"] == "active"
+
+    # Eval 3: 90 trades, PF still < 0.8 — now 2 prior evals exist
+    for i in range(60, 90):
+        is_win = (i - 60) < 12
+        pnl_pct = 0.02 if is_win else -0.025
+        result = "win" if is_win else "loss"
+        conn.execute(
+            """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+               leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp)
+               VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+               'closed', ?, ?, ?, ?, ?)""",
+            (f"pf_agent_{i}", "pf_agent", pnl_pct, pnl_pct * 10000, result,
+             _iso(0.5), _iso(0.5)),
+        )
+    conn.commit()
+    result3 = evaluate_agent(conn, "pf_agent", force=True)
+    assert result3["decision"] == "suspend"
+    assert result3["trigger"] == "pf_below_08_2eval"
+
+
+def test_harvest_inserts_key_conditions_met(conn):
+    """Seeds table receives key_conditions_met from the trade row."""
+    _seed_agent(conn, "kc_agent")
+    ts = _iso(1)
+    conn.execute(
+        """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+           leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp,
+           key_conditions_met, hypothesis)
+           VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+           'closed', 0.05, 500.0, 'win', ?, ?, ?, ?)""",
+        ("kc_trade_1", "kc_agent", ts, ts, "volume_spike;funding_flip", "breakout thesis"),
+    )
+    conn.execute(
+        """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
+           leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp,
+           hypothesis)
+           VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
+           'closed', 0.03, 300.0, 'win', ?, ?, ?)""",
+        ("kc_trade_2", "kc_agent", ts, ts, "breakout thesis v2"),
+    )
+    conn.commit()
+
+    from meta.evaluator import harvest_best_trades
+    harvest_best_trades(conn, "kc_agent", count=2)
+
+    rows = conn.execute(
+        "SELECT trade_id, key_conditions_met FROM seeds WHERE agent_id = 'kc_agent' ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    # Trade with key_conditions_met should be first (cleanest execution)
+    assert rows[0]["trade_id"] == "kc_trade_1"
+    assert rows[0]["key_conditions_met"] == "volume_spike;funding_flip"
+    assert rows[1]["trade_id"] == "kc_trade_2"
+    assert rows[1]["key_conditions_met"] is None

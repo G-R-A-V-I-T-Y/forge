@@ -90,28 +90,18 @@ def evaluate_agent(
     metrics = compute_metrics(conn, agent_id)
     closed_trades = metrics.get("closed_trades", 0)
 
-    # Check if evaluation is due
+    # Check if evaluation is due — fires exactly at cadence multiples
+    # (e.g. 30, 60, 90 … for the default interval of 30).
     if not force:
         interval = get_evaluation_interval(conn)
-        last_eval = conn.execute(
-            """SELECT evaluated_at FROM evaluations
-               WHERE agent_id = ? ORDER BY id DESC LIMIT 1""",
-            (agent_id,),
-        ).fetchone()
-
-        if last_eval:
-            trades_at_last = conn.execute(
-                """SELECT COUNT(*) FROM trades
-                   WHERE agent_id = ? AND status = 'closed' AND voided = 0
-                   AND entry_timestamp < ?""",
-                (agent_id, last_eval["evaluated_at"]),
-            ).fetchone()[0]
-            trades_since = closed_trades - trades_at_last
-        else:
-            trades_since = closed_trades
-
-        if trades_since < interval and closed_trades > 0:
-            return {"skipped": True, "reason": f"only {trades_since} trades since last eval (need {interval})"}
+        if closed_trades > 0 and closed_trades % interval != 0:
+            return {
+                "skipped": True,
+                "reason": (
+                    f"completed_trades ({closed_trades}) not at cadence "
+                    f"multiple of {interval}"
+                ),
+            }
 
     # Get null metrics for significance testing
     null_metrics = get_null_metrics(conn)
@@ -144,11 +134,14 @@ def evaluate_agent(
     })
 
     now = _now()
+    review_flag = 1 if decision == "review" else 0
     conn.execute(
         """INSERT INTO evaluations
-               (agent_id, evaluated_at, trades_evaluated, metrics_json, decision, reason)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (agent_id, now, closed_trades, metrics_json, decision, reason),
+               (agent_id, evaluated_at, trades_evaluated, metrics_json,
+                decision, reason, review_required)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (agent_id, now, closed_trades, metrics_json, decision, reason,
+         review_flag),
     )
     conn.commit()
 
@@ -165,10 +158,10 @@ def evaluate_agent(
             agent_id, old_status, new_status, trigger, reason,
         )
 
-    # If terminated, harvest best trades
+    # If terminated, harvest best trades for seeding successors
     harvested = []
     if decision == "terminate":
-        harvested = harvest_best_trades(conn, agent_id, count=5)
+        harvested = terminate_agent(conn, agent_id)
         logger.info(
             "Agent %s terminated — harvested %d best trades",
             agent_id, len(harvested),
@@ -205,3 +198,16 @@ def run_evaluation_cycle(conn) -> list[dict[str, Any]]:
             results.append({"agent_id": row["id"], "error": str(exc)})
 
     return results
+
+
+def terminate_agent(conn, agent_id: str) -> list[dict[str, Any]]:
+    """Terminate an agent: set status to 'terminated' and harvest its best trades.
+
+    Returns the list of harvested seed records.
+    """
+    conn.execute(
+        "UPDATE agents SET status = 'terminated' WHERE id = ?",
+        (agent_id,),
+    )
+    conn.commit()
+    return harvest_best_trades(conn, agent_id, count=5)

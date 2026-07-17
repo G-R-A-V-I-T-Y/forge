@@ -240,7 +240,7 @@ class TestEvaluator:
         assert len(seeds) == 3
         # Verify seeds were inserted into the seeds table
         rows = conn.execute(
-            "SELECT * FROM seeds WHERE source_agent_id = 'alpha_trader'"
+            "SELECT * FROM seeds WHERE agent_id = 'alpha_trader'"
         ).fetchall()
         assert len(rows) == 3
         # Should be sorted by pnl_pct descending
