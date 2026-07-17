@@ -1,0 +1,674 @@
+## Commits (9b6d0e8..aa9cd2d, code only)
+aa9cd2d m10: absorb counterfactual filler into labeling job, unify /decisions coverage
+
+## Stat
+ forge.py                     |  45 ++++-----------
+ meta/labeling.py             | 130 +++++++++++++++++++++++++++----------------
+ tests/test_labeling.py       | 127 ++++++++++++++++++++++++++++++++++++++++++
+ tests/test_web_decisions.py  |  43 ++++++++++++--
+ web/app.py                   |  13 +++--
+ web/templates/decisions.html |  30 +++++-----
+ 6 files changed, 281 insertions(+), 107 deletions(-)
+
+## Full diff (-U10)
+diff --git a/forge.py b/forge.py
+index 1fd964d..93b56ec 100644
+--- a/forge.py
++++ b/forge.py
+@@ -334,75 +334,52 @@ async def main():
+         run_heartbeat_cycle,
+         trigger=IntervalTrigger(seconds=heartbeat_interval, timezone=timezone.utc),
+         args=[provider, config],
+         id="heartbeat",
+         replace_existing=True,
+     )
+     scheduler.start()
+     logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
+ 
+     # ------------------------------------------------------------------
+-    # Counterfactual analysis — runs nightly at 02:00 UTC.
+-    # Deterministic replay of unfilled wait decisions through recorded
+-    # 5m candles — no LLM calls.
+-    # ------------------------------------------------------------------
+-    async def _run_counterfactual_job():
+-        """Run deterministic counterfactual replay for all unfilled waits."""
+-        try:
+-            from store.counterfactuals import run_counterfactual_replay
+-
+-            ledger_dir = config.get("ledger_dir", "ledger")
+-            summary = run_counterfactual_replay(conn, config, ledger_dir)
+-            logger.info(
+-                "Counterfactual replay complete: %s",
+-                summary,
+-            )
+-        except Exception as exc:
+-            logger.error("Counterfactual analysis failed: %s", exc, exc_info=True)
+-
+-    scheduler.add_job(
+-        _run_counterfactual_job,
+-        trigger="cron",
+-        hour=2,
+-        minute=0,
+-        id="counterfactual",
+-        replace_existing=True,
+-    )
+-    logger.info("Counterfactual analysis job scheduled — runs nightly at 02:00 UTC")
+-
+-    # ------------------------------------------------------------------
+-    # M10: Forward labeling -- runs nightly at 02:30 UTC, after the 02:00
+-    # counterfactual filler above (which keeps running independently).
++    # M10: Forward labeling -- runs nightly at 02:30 UTC.
+     # meta/labeling.py::run_labeling_job forward-labels every decision at
+     # least LONGEST_HOURS old against recorded 5m candles (return, MFE/MAE,
+     # best action, regret at 1h/4h/24h) -- feeds agents/dossier.py's
+-    # top-regret evidence and the /decisions coverage tiles.
++    # top-regret evidence and the /decisions coverage tiles. T7: it also
++    # absorbs the M6 wait-only counterfactual filler (deterministic replay
++    # of unfilled wait decisions via store/counterfactuals.py), writing the
++    # legacy counterfactual_* columns for compatibility -- there is no
++    # longer a separate nightly counterfactual job.
+     # ------------------------------------------------------------------
+     async def _run_labeling_job():
+         try:
+             from meta.labeling import run_labeling_job
+ 
+             ledger_dir = config.get("ledger_dir", "ledger")
+-            summary = run_labeling_job(conn, ledger_dir)
++            summary = run_labeling_job(conn, ledger_dir, config)
+             logger.info("Forward labeling complete: %s", summary)
+         except Exception as exc:
+             logger.error("Forward labeling job failed: %s", exc, exc_info=True)
+ 
+     scheduler.add_job(
+         _run_labeling_job,
+         trigger="cron",
+         hour=2,
+         minute=30,
+         id="labeling",
+         replace_existing=True,
+     )
+-    logger.info("Forward labeling job scheduled — runs nightly at 02:30 UTC")
++    logger.info(
++        "Forward labeling job scheduled — runs nightly at 02:30 UTC "
++        "(absorbs the M6 counterfactual filler)"
++    )
+ 
+     # ------------------------------------------------------------------
+     # M10: Training dataset refresh -- runs nightly at 03:30 UTC.
+     # scripts/build_training_dataset.py is an offline, read-only batch job
+     # that flattens ledger history into
+     # data/historical_data/training_dataset.parquet for feature-conditioned
+     # stats (agents/dossier.py) and future model training. Never wired into
+     # the live decision loop -- log-and-continue on failure so a bad or
+     # stale ledger partition can never break the fleet cycle.
+     # ------------------------------------------------------------------
+diff --git a/meta/labeling.py b/meta/labeling.py
+index 22e12c9..70ec096 100644
+--- a/meta/labeling.py
++++ b/meta/labeling.py
+@@ -3,28 +3,35 @@
+ For every ``decisions`` row (enter, wait, close — all agents including
+ benchmarks) whose timestamp sits at least the longest horizon behind the
+ ledger head, compute from ``ledger/candles_5m/``:
+ 
+   - Forward return at 1 h / 4 h / 24 h
+   - Max run-up (MFE) and max drawdown (MAE) per horizon
+   - Outcome of the chosen action
+   - Best-available action (enter_long, enter_short, wait) and regret
+ 
+ The function is designed for nightly APScheduler invocation (cron-compatible
+-signature ``run_labeling_job(conn, ledger_dir)``) but is also immediately
+-callable from tests.
++signature ``run_labeling_job(conn, ledger_dir, config)``) but is also
++immediately callable from tests.
++
++T7 (M10 gap closure): this job also absorbs the M6 wait-only counterfactual
++filler (``store/counterfactuals.py::run_counterfactual_replay``), so the
++legacy ``counterfactual_result`` / ``counterfactual_was_better`` columns on
++``decisions`` keep being written for compatibility. forge.py schedules only
++this one nightly job now.
+ 
+ Public API
+ ----------
+-run_labeling_job(conn, ledger_dir) -> dict
+-    Idempotently label all eligible unlabeled decisions.
+-    Returns ``{total_processed, total_labeled, errors}``.
++run_labeling_job(conn, ledger_dir, config=None) -> dict
++    Idempotently label all eligible unlabeled decisions, then run the
++    absorbed counterfactual replay.
++    Returns ``{total_processed, total_labeled, errors, counterfactual}``.
+ 
+ get_labeling_coverage(conn) -> dict
+     Percentage of labelable decisions that have been labeled.
+ """
+ from __future__ import annotations
+ 
+ import ast
+ import json
+ import logging
+ from datetime import datetime, timedelta, timezone
+@@ -59,92 +66,117 @@ STALENESS_THRESHOLD_MS: int = CANDLE_INTERVAL_MS * 2
+ 
+ 
+ # ═════════════════════════════════════════════════════════════════════════
+ #  Public API
+ # ═════════════════════════════════════════════════════════════════════════
+ 
+ 
+ def run_labeling_job(
+     conn,
+     ledger_dir: str | Path | None = None,
++    config: dict | None = None,
+ ) -> dict:
+     """Forward-label all eligible unlabeled decisions.  Idempotent.
+ 
+     A decision is *labelable* when its timestamp is at least
+     ``LONGEST_HOURS`` behind the ledger head (the latest candle).  Each
+     labelable decision that does not yet have rows in ``decision_labels``
+     is processed; decisions that already have labels are skipped.
+ 
++    T7 (M10 gap closure): this job also absorbs the M6 wait-only
++    counterfactual filler.  After forward-labeling, it invokes the
++    existing, unmodified ``store.counterfactuals.run_counterfactual_replay``
++    so the legacy ``counterfactual_result`` / ``counterfactual_was_better``
++    columns keep being written -- with exactly their current semantics --
++    for compatibility.  There is no longer a separate scheduled job for
++    this (see forge.py); this is now the only nightly entry point.
++
+     Parameters
+     ----------
+     conn : sqlite3.Connection
+         Database with ``decisions`` and ``decision_labels`` tables.
+     ledger_dir : str | Path | None
+         Ledger root.  Defaults to ``store.ledger.LEDGER_DIR``.
++    config : dict | None
++        Desk config, forwarded to ``run_counterfactual_replay`` (currently
++        unused by that function but kept for signature compatibility and
++        future default SL/TP wiring).  Defaults to ``{}``.
+ 
+     Returns
+     -------
+     dict
+-        ``{total_processed, total_labeled, errors}``.
++        ``{total_processed, total_labeled, errors, counterfactual}`` where
++        ``counterfactual`` is ``run_counterfactual_replay``'s own summary
++        dict (``{total_queued, processed, filled, errors}``).
+     """
+     if ledger_dir is None:
+         from store.ledger import LEDGER_DIR
+ 
+         ledger_dir = LEDGER_DIR
+ 
+     # 1. Find ledger head (latest candle timestamp across all assets).
+     head = _find_ledger_head(ledger_dir)
+     if head is None:
+         logger.warning("No candle data in ledger — nothing to label")
+-        return {"total_processed": 0, "total_labeled": 0, "errors": 0}
+-
+-    # 2. Cutoff = head − longest_horizon.
+-    cutoff = head - timedelta(hours=LONGEST_HOURS)
+-    cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
+-
+-    # 3. Select all decisions ≤ cutoff that have NO label rows yet.
+-    #    LEFT JOIN + IS NULL is the idempotent gate.
+-    rows = conn.execute(
+-        """SELECT d.id, d.agent_id, d.timestamp, d.decision_action,
+-                  d.decision_reason, d.decision_details_json
+-           FROM decisions d
+-           LEFT JOIN decision_labels dl ON dl.decision_id = d.id
+-           WHERE d.timestamp <= ?
+-             AND dl.id IS NULL
+-           ORDER BY d.timestamp ASC""",
+-        (cutoff_iso,),
+-    ).fetchall()
+-
+-    total_processed = 0
+-    total_labeled = 0
+-    errors = 0
+-
+-    for row in rows:
+-        decision = dict(row)
+-        try:
+-            n = _label_one(conn, decision, ledger_dir, head)
+-            total_labeled += n
+-            total_processed += 1
+-        except Exception as exc:
+-            logger.warning(
+-                "Labeling error for decision %s: %s",
+-                decision["id"],
+-                exc,
+-                exc_info=True,
+-            )
+-            errors += 1
+-
+-    return {
+-        "total_processed": total_processed,
+-        "total_labeled": total_labeled,
+-        "errors": errors,
+-    }
++        result = {"total_processed": 0, "total_labeled": 0, "errors": 0}
++    else:
++        # 2. Cutoff = head − longest_horizon.
++        cutoff = head - timedelta(hours=LONGEST_HOURS)
++        cutoff_iso = cutoff.isoformat().replace("+00:00", "Z")
++
++        # 3. Select all decisions ≤ cutoff that have NO label rows yet.
++        #    LEFT JOIN + IS NULL is the idempotent gate.
++        rows = conn.execute(
++            """SELECT d.id, d.agent_id, d.timestamp, d.decision_action,
++                      d.decision_reason, d.decision_details_json
++               FROM decisions d
++               LEFT JOIN decision_labels dl ON dl.decision_id = d.id
++               WHERE d.timestamp <= ?
++                 AND dl.id IS NULL
++               ORDER BY d.timestamp ASC""",
++            (cutoff_iso,),
++        ).fetchall()
++
++        total_processed = 0
++        total_labeled = 0
++        errors = 0
++
++        for row in rows:
++            decision = dict(row)
++            try:
++                n = _label_one(conn, decision, ledger_dir, head)
++                total_labeled += n
++                total_processed += 1
++            except Exception as exc:
++                logger.warning(
++                    "Labeling error for decision %s: %s",
++                    decision["id"],
++                    exc,
++                    exc_info=True,
++                )
++                errors += 1
++
++        result = {
++            "total_processed": total_processed,
++            "total_labeled": total_labeled,
++            "errors": errors,
++        }
++
++    # 4. Absorbed M6 counterfactual filler — same code path, same
++    #    semantics as store/counterfactuals.py always had.
++    from store.counterfactuals import run_counterfactual_replay
++
++    result["counterfactual"] = run_counterfactual_replay(
++        conn, config or {}, ledger_dir,
++    )
++
++    return result
+ 
+ 
+ def get_labeling_coverage(conn) -> dict:
+     """Compute labeling coverage for decisions ≥ ``LONGEST_HOURS`` old.
+ 
+     Returns
+     -------
+     dict
+         ``{eligible_decisions, labeled, coverage_pct}``.
+     """
+diff --git a/tests/test_labeling.py b/tests/test_labeling.py
+index 5efb16e..499d3d7 100644
+--- a/tests/test_labeling.py
++++ b/tests/test_labeling.py
+@@ -1,13 +1,14 @@
+ """tests/test_labeling.py — Tests for meta/labeling.py forward-labeling engine."""
+ from __future__ import annotations
+ 
++import ast
+ import json
+ import os
+ import sqlite3
+ import tempfile
+ from datetime import datetime, timedelta, timezone
+ 
+ import pytest
+ 
+ # ── Helpers ──────────────────────────────────────────────────────────────
+ 
+@@ -850,10 +851,136 @@ class TestForwardReturnStaleness:
+         assert result["errors"] == 0
+         assert result["total_labeled"] == 2, "1h must be skipped, 4h and 24h must label"
+ 
+         horizons = {
+             r[0] for r in conn.execute(
+                 "SELECT horizon FROM decision_labels"
+             ).fetchall()
+         }
+         assert horizons == {"4h", "24h"}
+         assert "1h" not in horizons
++
++
++# ── T7 Gap 1: absorb the M6 wait-only counterfactual filler ───────────────
++
++
++class TestCounterfactualAbsorption:
++    """run_labeling_job must absorb the M6 wait-only counterfactual filler:
++    the standalone nightly scheduler job in forge.py is removed, but the
++    legacy counterfactual_result / counterfactual_was_better columns must
++    still be populated -- with identical semantics -- by run_labeling_job
++    itself, via the existing unmodified store/counterfactuals.py replay
++    engine."""
++
++    def test_labeling_job_also_fills_counterfactual_columns(self):
++        """A fixture with an unfilled wait decision: after run_labeling_job,
++        both decision_labels rows (forward-labeling side) AND the
++        counterfactual_* columns (absorbed M6 filler side) are populated."""
++        from meta.labeling import LONGEST_HOURS, run_labeling_job
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        now = datetime.now(timezone.utc)
++        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
++        entry_price = 100.0
++        tp = entry_price * 1.05  # matches _insert_wait_decision's TP calc
++
++        start_ms = int(dec_ts.timestamp() * 1000)
++        candles = _make_candles(start_ms, 360, base_price=entry_price, drift=0.0)
++        # Wick candle 5 through TP so the counterfactual replay resolves
++        # deterministically (take_profit) instead of depending on 48h of
++        # forward data for a max_hold_timeout outcome.
++        ts5 = candles[5][0]
++        candles[5] = [ts5, entry_price, tp + 1.0, entry_price - 0.5, tp + 0.5, 1000.0]
++        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
++
++        decision_id = _insert_wait_decision(
++            conn, "test_agent", dec_ts, "BTC-PERP", "long", entry_price,
++        )
++
++        with tempfile.TemporaryDirectory() as td:
++            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
++            run_labeling_job(conn, td)
++
++        # decision_labels rows produced (forward-labeling side, unaffected).
++        labeled = conn.execute(
++            "SELECT COUNT(*) FROM decision_labels WHERE decision_id = ?",
++            (decision_id,),
++        ).fetchone()[0]
++        assert labeled == 3
++
++        # counterfactual_* columns populated (absorbed M6 filler side).
++        row = conn.execute(
++            """SELECT counterfactual_result, counterfactual_was_better
++               FROM decisions WHERE id = ?""",
++            (decision_id,),
++        ).fetchone()
++        assert row["counterfactual_result"] is not None
++        outcome = json.loads(row["counterfactual_result"])
++        assert outcome["reason"] == "take_profit"
++        assert outcome["profitable"] is True
++        assert row["counterfactual_was_better"] == 1
++
++    def test_run_labeling_job_return_dict_includes_counterfactual_summary(self):
++        """The returned summary surfaces the absorbed counterfactual run's
++        own counts (total_queued/processed/filled/errors) so callers (the
++        forge.py scheduler log line) see both halves of the absorbed job."""
++        from meta.labeling import run_labeling_job
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        with tempfile.TemporaryDirectory() as td:
++            result = run_labeling_job(conn, td)
++
++        assert "counterfactual" in result
++        assert result["counterfactual"] == {
++            "total_queued": 0, "processed": 0, "filled": 0, "errors": 0,
++        }
++
++
++class TestForgeSchedulerAbsorption:
++    """The standalone 'counterfactual' scheduler job must be gone from
++    forge.py -- absorbed into 'labeling'. Reads forge.py's source directly
++    (ast) instead of importing the module, matching the established
++    convention in tests/test_reflection_client.py and
++    tests/test_web_actions.py for forge.py source-level assertions."""
++
++    def _forge_source(self) -> str:
++        import pathlib
++
++        forge_py = pathlib.Path(__file__).resolve().parents[1] / "forge.py"
++        return forge_py.read_text(encoding="utf-8")
++
++    def test_no_standalone_counterfactual_job_registered(self):
++        source = self._forge_source()
++        assert 'id="counterfactual"' not in source, (
++            "the standalone nightly counterfactual job must be removed -- "
++            "run_labeling_job now absorbs it (T7 Gap 1)"
++        )
++        assert 'id="labeling"' in source, (
++            "the labeling job must still be registered"
++        )
++
++    def test_labeling_job_invocation_threads_config(self):
++        """_run_labeling_job must pass config through to run_labeling_job so
++        the absorbed counterfactual replay receives desk config."""
++        source = self._forge_source()
++        tree = ast.parse(source, filename="forge.py")
++
++        job_node = None
++        for node in ast.walk(tree):
++            if (
++                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
++                and node.name == "_run_labeling_job"
++            ):
++                job_node = node
++                break
++        assert job_node is not None, "_run_labeling_job not found in forge.py"
++
++        segment = ast.get_source_segment(source, job_node)
++        assert segment is not None
++        assert "run_labeling_job(conn, ledger_dir, config)" in segment, (
++            "expected run_labeling_job to be called with (conn, ledger_dir, "
++            "config) so the absorbed counterfactual replay gets desk config"
++        )
+diff --git a/tests/test_web_decisions.py b/tests/test_web_decisions.py
+index ec5b6e3..17e4feb 100644
+--- a/tests/test_web_decisions.py
++++ b/tests/test_web_decisions.py
+@@ -18,23 +18,26 @@ def test_decisions_page_renders_with_coverage_tiles(conn):
+     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+     conn.execute(
+         """INSERT INTO decisions (agent_id, timestamp, decision_action, decision_reason)
+            VALUES (?, ?, ?, ?)""",
+         (AGENT_ID, "2026-07-01T00:00:00Z", "wait", "no setup"),
+     )
+     conn.commit()
+ 
+     r = _client(conn).get("/decisions")
+     assert r.status_code == 200
+-    # Both coverage panels render (counterfactual M6 + labeling M10).
+-    assert "Counterfactual Coverage" in r.text
+-    assert "Forward Labeling Coverage" in r.text
++    # T7 Gap 2: one generalized coverage surface -- forward-labeling
++    # coverage is the headline, wait-counterfactual fill stats are folded
++    # in as secondary stats within the SAME section (not a second panel).
++    assert "Decision Coverage" in r.text
++    assert "Wait-Counterfactual Fill" in r.text
++    assert r.text.count("Coverage %") == 2  # one per sub-stat row, one section
+     # Decision content shows up.
+     assert "no setup" in r.text
+ 
+ 
+ def test_decisions_page_hypotheses_panel_uses_claim_column(conn):
+     """Regression: the hypotheses query used to select a non-existent
+     `summary` column, silently swallowed by a bare except, so the panel
+     always rendered empty. Verifies claim text now actually appears."""
+     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+     conn.execute(
+@@ -47,11 +50,43 @@ def test_decisions_page_hypotheses_panel_uses_claim_column(conn):
+     conn.commit()
+ 
+     r = _client(conn).get("/decisions")
+     assert r.status_code == 200
+     assert "high funding predicts mean reversion" in r.text
+ 
+ 
+ def test_decisions_page_empty_desk(conn):
+     r = _client(conn).get("/decisions")
+     assert r.status_code == 200
+-    assert "Forward Labeling Coverage" in r.text
++    assert "Decision Coverage" in r.text
++
++
++def test_decisions_page_single_coverage_context_var(conn):
++    """web/app.py must pass one unified `coverage` context var to the
++    template -- not the old two-panel `coverage` + `labeling_coverage`
++    pair -- with the counterfactual stats nested inside it."""
++    from fastapi.testclient import TestClient
++    from unittest.mock import patch
++
++    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
++    conn.commit()
++
++    captured = {}
++    from web.app import templates
++
++    orig_response = templates.TemplateResponse
++
++    def _spy(name, context, *a, **kw):
++        if name == "decisions.html":
++            captured.update(context)
++        return orig_response(name, context, *a, **kw)
++
++    with patch.object(templates, "TemplateResponse", side_effect=_spy):
++        app.state.conn = conn
++        r = TestClient(app).get("/decisions")
++
++    assert r.status_code == 200
++    assert "coverage" in captured
++    assert "labeling_coverage" not in captured
++    assert "counterfactual" in captured["coverage"]
++    assert "eligible_decisions" in captured["coverage"]  # labeling headline
++    assert "filled" in captured["coverage"]["counterfactual"]
+diff --git a/web/app.py b/web/app.py
+index 836017d..6601058 100644
+--- a/web/app.py
++++ b/web/app.py
+@@ -417,25 +417,27 @@ async def trades_page(
+             "total_pages": total_pages,
+             "total": total,
+         },
+     )
+ 
+ 
+ @app.get("/decisions", response_class=HTMLResponse)
+ async def decisions_page(request: Request):
+     conn = app.state.conn
+ 
+-    # Counterfactual coverage
+-    coverage = get_counterfactual_coverage(conn)
+-
+-    # M10: Forward-labeling coverage (meta/labeling.py's nightly job).
+-    labeling_coverage = get_labeling_coverage(conn)
++    # T7 (M10 gap closure): one generalized coverage surface. The headline
++    # is forward-labeling coverage (meta/labeling.py's nightly job, which
++    # now also absorbs the M6 wait-only counterfactual filler); the legacy
++    # wait-counterfactual fill stats are folded in as secondary stats
++    # inside the same dict rather than rendered as a second panel.
++    coverage = get_labeling_coverage(conn)
++    coverage["counterfactual"] = get_counterfactual_coverage(conn)
+ 
+     # All decisions grouped by agent
+     agents = conn.execute("SELECT id FROM agents ORDER BY id").fetchall()
+     decisions_by_agent = {}
+     for row in agents:
+         aid = row["id"]
+         rows = conn.execute(
+             """SELECT id, timestamp, decision_action, decision_reason,
+                       counterfactual_result, counterfactual_was_better
+                FROM decisions
+@@ -459,21 +461,20 @@ async def decisions_page(request: Request):
+         hypotheses = [dict(r) for r in rows]
+     except Exception:
+         logger.warning("Failed to query hypotheses for /decisions", exc_info=True)
+ 
+     return templates.TemplateResponse(
+         "decisions.html",
+         {
+             "request": request,
+             "active_page": "decisions",
+             "coverage": coverage,
+-            "labeling_coverage": labeling_coverage,
+             "decisions_by_agent": decisions_by_agent,
+             "hypotheses": hypotheses,
+             "agents": [r["id"] for r in agents],
+         },
+     )
+ 
+ 
+ @app.get("/api/query")
+ async def api_query(
+     agent: str | None = None,
+diff --git a/web/templates/decisions.html b/web/templates/decisions.html
+index 4b4a1ba..64f3d3b 100644
+--- a/web/templates/decisions.html
++++ b/web/templates/decisions.html
+@@ -1,48 +1,50 @@
+ {% extends "base.html" %}
+ {% block title %}Forge &mdash; Decisions{% endblock %}
+ {% block content %}
+ 
+-<!-- Counterfactual Coverage Summary -->
+-<h3 class="section-header">Counterfactual Coverage</h3>
++<!-- Decision Coverage (M10: forward-labeling headline; T7 folds the M6
++     wait-counterfactual fill stats in as secondary stats within this one
++     section instead of a second panel). -->
++<h3 class="section-header">Decision Coverage</h3>
+ <div class="stat-row">
+   <div class="stat-card">
+-    <div class="stat-label">Eligible Waits (&ge;24h)</div>
+-    <div class="stat-value">{{ coverage.get('eligible_waits', 0) }}</div>
++    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
++    <div class="stat-value">{{ coverage.get('eligible_decisions', 0) }}</div>
+   </div>
+   <div class="stat-card">
+-    <div class="stat-label">Filled</div>
+-    <div class="stat-value win">{{ coverage.get('filled', 0) }}</div>
++    <div class="stat-label">Labeled</div>
++    <div class="stat-value win">{{ coverage.get('labeled', 0) }}</div>
+   </div>
+   <div class="stat-card">
+     <div class="stat-label">Coverage %</div>
+     <div class="stat-value {{ 'win' if coverage.get('coverage_pct', 0) >= 80 else ('loss' if coverage.get('coverage_pct', 0) < 50 else '') }}">
+       {{ "{:.1f}%".format(coverage.get('coverage_pct', 0)) }}
+     </div>
+   </div>
+ </div>
+ 
+-<!-- Forward Labeling Coverage -->
+-<h3 class="section-header">Forward Labeling Coverage</h3>
++{% set cf = coverage.get('counterfactual', {}) %}
++<div class="stat-label" style="margin-top: 0.75rem; margin-bottom: 0.25rem;">Wait-Counterfactual Fill (compatibility)</div>
+ <div class="stat-row">
+   <div class="stat-card">
+-    <div class="stat-label">Labelable Decisions (&ge;24h)</div>
+-    <div class="stat-value">{{ labeling_coverage.get('eligible_decisions', 0) }}</div>
++    <div class="stat-label">Eligible Waits (&ge;24h)</div>
++    <div class="stat-value">{{ cf.get('eligible_waits', 0) }}</div>
+   </div>
+   <div class="stat-card">
+-    <div class="stat-label">Labeled</div>
+-    <div class="stat-value win">{{ labeling_coverage.get('labeled', 0) }}</div>
++    <div class="stat-label">Filled</div>
++    <div class="stat-value win">{{ cf.get('filled', 0) }}</div>
+   </div>
+   <div class="stat-card">
+     <div class="stat-label">Coverage %</div>
+-    <div class="stat-value {{ 'win' if labeling_coverage.get('coverage_pct', 0) >= 80 else ('loss' if labeling_coverage.get('coverage_pct', 0) < 50 else '') }}">
+-      {{ "{:.1f}%".format(labeling_coverage.get('coverage_pct', 0)) }}
++    <div class="stat-value {{ 'win' if cf.get('coverage_pct', 0) >= 80 else ('loss' if cf.get('coverage_pct', 0) < 50 else '') }}">
++      {{ "{:.1f}%".format(cf.get('coverage_pct', 0)) }}
+     </div>
+   </div>
+ </div>
+ 
+ <!-- Decisions Per Agent -->
+ <h3 class="section-header">Recent Decisions</h3>
+ {% for aid in agents %}
+ {% set agent_decisions = decisions_by_agent.get(aid, []) %}
+ {% if agent_decisions %}
+ <div class="panel" style="margin-bottom: 1rem;">

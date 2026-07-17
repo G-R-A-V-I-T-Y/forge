@@ -1,0 +1,965 @@
+## Commits (d571910..9b6d0e8, code only)
+9b6d0e8 m10: T6 review fixes — correlate close-decision labels to their trade, scope challenger baseline to trial window, bound forward-return staleness, cover shadow-challenger safety invariant
+
+## Stat
+ meta/labeling.py         |  52 +++++-
+ store/specs.py           |  35 +++-
+ tests/test_challenger.py | 426 +++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_labeling.py   | 298 +++++++++++++++++++++++++++++++++
+ 4 files changed, 797 insertions(+), 14 deletions(-)
+
+## Full diff (-U10)
+diff --git a/meta/labeling.py b/meta/labeling.py
+index 6a270c0..22e12c9 100644
+--- a/meta/labeling.py
++++ b/meta/labeling.py
+@@ -42,20 +42,28 @@ logger = logging.getLogger(__name__)
+ HORIZONS_HOURS: dict[str, int] = {"1h": 1, "4h": 4, "24h": 24}
+ 
+ #: Longest horizon in hours — a decision must be this old to be labelable.
+ LONGEST_HOURS: int = max(HORIZONS_HOURS.values())
+ 
+ #: Default SL/TP percentages when decision details don't carry them.
+ #: Matches ``scripts/build_training_dataset.py``'s DEFAULT_SL_PCT / DEFAULT_TP_PCT.
+ DEFAULT_SL_PCT: float = 0.02
+ DEFAULT_TP_PCT: float = 0.05
+ 
++#: Max allowed gap (ms) between a horizon's cutoff and the nearest available
++#: candle before that horizon is left unlabeled rather than computed from a
++#: stale candle across a ledger gap. Mirrors
++#: ``scripts/build_training_dataset.py``'s STALENESS_THRESHOLD convention:
++#: 2x the expected 5-minute candle cadence.
++CANDLE_INTERVAL_MS: int = 5 * 60 * 1000
++STALENESS_THRESHOLD_MS: int = CANDLE_INTERVAL_MS * 2
++
+ 
+ # ═════════════════════════════════════════════════════════════════════════
+ #  Public API
+ # ═════════════════════════════════════════════════════════════════════════
+ 
+ 
+ def run_labeling_job(
+     conn,
+     ledger_dir: str | Path | None = None,
+ ) -> dict:
+@@ -295,30 +303,53 @@ def _extract_wait_info(details: dict | None) -> dict | None:
+     return {
+         "asset": asset,
+         "direction": candidate.get("direction"),
+         "entry_price": float(entry_price),
+         "sl": float(sl) if isinstance(sl, (int, float)) else None,
+         "tp": float(tp) if isinstance(tp, (int, float)) else None,
+     }
+ 
+ 
+ def _extract_close_info(decision: dict, conn) -> dict | None:
+-    """Extract from a close decision by looking up the most-recently closed trade."""
++    """Extract from a close decision by correlating it to its actual trade.
++
++    ``agents/decision_loop.py``'s close branch logs
++    ``{"position_id": ..., "fill": "<dict repr>"}`` where ``fill`` is
++    ``execute_close()``'s return value and always carries the exact
++    ``trade_id`` this decision closed. That is the only reliable
++    correlation key — picking "the agent's most-recently-closed trade"
++    is wrong whenever the agent has closed more than one trade since,
++    which silently mislabels a historical close decision with a
++    different trade's asset/direction/exit price. When the trade_id
++    can't be recovered (missing/malformed details, or the trade no
++    longer exists), the decision is left unlabeled rather than guessed.
++    """
++    details = None
++    if decision["decision_details_json"]:
++        try:
++            details = json.loads(decision["decision_details_json"])
++        except (json.JSONDecodeError, TypeError):
++            pass
++    if not details:
++        return None
++
++    fill = _safe_parse_dict(details.get("fill"))
++    trade_id = fill.get("trade_id") if fill else None
++    if not trade_id:
++        return None
++
+     row = conn.execute(
+         """SELECT asset, direction, exit_price,
+                   stop_loss_price, take_profit_price
+            FROM trades
+-           WHERE agent_id = ? AND status = 'closed'
+-             AND exit_timestamp IS NOT NULL
+-           ORDER BY exit_timestamp DESC
+-           LIMIT 1""",
+-        (decision["agent_id"],),
++           WHERE id = ? AND agent_id = ?""",
++        (trade_id, decision["agent_id"]),
+     ).fetchone()
+     if not row:
+         return None
+ 
+     trade = dict(row)
+     asset = trade["asset"]
+     # Reference price = the exit price (price at close decision point).
+     entry_price = trade.get("exit_price")
+ 
+     if not asset or not isinstance(entry_price, (int, float)) or entry_price <= 0:
+@@ -577,25 +608,32 @@ def _compute_horizon_label(
+         "best_outcome_pct": round(best_outcome, 4),
+         "regret_pct": round(best_outcome - chosen_outcome, 4),
+     }
+ 
+ 
+ def _fwd_return_at_cutoff(
+     horizon_candles: list[list],
+     entry_price: float,
+     cutoff_ms: float,
+ ) -> float | None:
+-    """Return the % price change from entry to the candle nearest *cutoff_ms*."""
++    """Return the % price change from entry to the candle nearest *cutoff_ms*.
++
++    Returns ``None`` (label left null) when the nearest candle is farther
++    than ``STALENESS_THRESHOLD_MS`` from the cutoff — a ledger gap spanning
++    the horizon boundary must never be silently bridged with a stale candle.
++    """
+     if not horizon_candles or entry_price <= 0:
+         return None
+ 
+     best = min(horizon_candles, key=lambda c: abs(c[0] - cutoff_ms))
++    if abs(best[0] - cutoff_ms) > STALENESS_THRESHOLD_MS:
++        return None
+     close = best[4]
+     return (close - entry_price) / entry_price * 100
+ 
+ 
+ def _mfe_mae(
+     horizon_candles: list[list],
+     entry_price: float,
+ ) -> tuple[float, float]:
+     """Max favorable excursion (run-up) and max adverse excursion (drawdown).
+ 
+diff --git a/store/specs.py b/store/specs.py
+index 7301a1b..4a2f1a2 100644
+--- a/store/specs.py
++++ b/store/specs.py
+@@ -419,28 +419,49 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
+            "incumbent_avg_confidence": float | None,
+            "challenger_decisions": int, "incumbent_decisions": int}``.
+     """
+     challenger = get_challenger_spec(conn, agent_id)
+     if challenger is None:
+         return {"verdict": "no_challenger"}
+ 
+     incumbent = get_active_spec(conn, agent_id)
+     incumbent_version = incumbent.spec_version if incumbent else 0
+ 
++    # Trial window = the challenger's deployed_at forward. Both sides of the
++    # comparison must be scoped to this window: an unbounded incumbent query
++    # would average confidence over the agent's ENTIRE decision history,
++    # including decisions logged under prior spec versions that predate this
++    # challenger trial entirely (T6 review finding 3).
++    trial_row = conn.execute(
++        """SELECT deployed_at FROM specs
++           WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
++           ORDER BY id DESC LIMIT 1""",
++        (agent_id, challenger.spec_version),
++    ).fetchone()
++    trial_start = trial_row["deployed_at"] if trial_row else None
++
+     # Gather challenger trial decisions (logged via decision_loop with
+-    # challenger_spec_version in decision_details_json).
+-    challenger_rows = conn.execute(
+-        """SELECT decision_details_json FROM decisions
+-           WHERE agent_id = ? AND decision_details_json IS NOT NULL
+-           ORDER BY timestamp ASC""",
+-        (agent_id,),
+-    ).fetchall()
++    # challenger_spec_version in decision_details_json), scoped to the
++    # trial window on both sides of the comparison.
++    if trial_start is not None:
++        challenger_rows = conn.execute(
++            """SELECT decision_details_json FROM decisions
++               WHERE agent_id = ? AND decision_details_json IS NOT NULL
++                 AND timestamp >= ?
++               ORDER BY timestamp ASC""",
++            (agent_id, trial_start),
++        ).fetchall()
++    else:
++        # No deployed_at on record for this challenger (shouldn't happen in
++        # practice) — fail toward the safer empty-window rather than
++        # silently falling back to the unbounded, unscoped query.
++        challenger_rows = []
+ 
+     challenger_conf_sum = 0.0
+     challenger_count = 0
+     incumbent_conf_sum = 0.0
+     incumbent_count = 0
+ 
+     for row in challenger_rows:
+         try:
+             details = json.loads(row["decision_details_json"])
+         except (json.JSONDecodeError, TypeError):
+diff --git a/tests/test_challenger.py b/tests/test_challenger.py
+new file mode 100644
+index 0000000..2509ad3
+--- /dev/null
++++ b/tests/test_challenger.py
+@@ -0,0 +1,426 @@
++"""tests/test_challenger.py — M10 challenger trial coverage.
++
++Two things under test, both flagged by the T6 review as having zero
++coverage:
++
++1. store/specs.py's resolve_challenger(): promotion, rejection, and —
++   finding 3 — that pre-trial incumbent decisions (logged before the
++   challenger's deployed_at) never influence the outcome.
++2. agents/decision_loop.py's shadow-challenger block (finding 2): the
++   safety invariant that a challenger's decisions are logged (carrying
++   challenger_spec_version) but NEVER reach the risk gate or the paper
++   bridge — only the incumbent's decision is acted on. Matches
++   FORGE_PROPOSAL's test_challenger_logs_without_trading intent.
++"""
++from __future__ import annotations
++
++import json
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import pytest
++
++from backtest.dsl import EvidenceTerm, Spec, Threshold
++from store.db import insert_agent
++from store.specs import deploy_as_challenger, deploy_spec, resolve_challenger
++
++AGENT_ID = "spec_agent"
++
++
++# ---------------------------------------------------------------------------
++# Shared helpers
++# ---------------------------------------------------------------------------
++
++
++@pytest.fixture(autouse=True)
++def _redirect_specs_dir(tmp_path, monkeypatch):
++    """Never let a test write into the real agents/specs/ directory."""
++    import store.specs as specs_module
++
++    monkeypatch.setattr(specs_module, "SPECS_DIR", tmp_path / "specs")
++
++
++def _iso(dt: datetime) -> str:
++    return dt.isoformat().replace("+00:00", "Z")
++
++
++def _spec(agent_id: str, spec_version: int, direction: str = "long") -> Spec:
++    return Spec(
++        agent_id=agent_id,
++        spec_version=spec_version,
++        thesis_version=1,
++        universe_include=["SOL-PERP"],
++        regime_exclude=[],
++        direction=direction,
++        confidence_threshold=0.5,
++        scale_threshold=0.3,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term",
++                feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.6, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[],
++        stop_loss_pct=0.03,
++        take_profit_pct=0.06,
++        max_hold_hours=72,
++        leverage=3,
++        position_size_pct=0.10,
++    )
++
++
++def _insert_decision(conn, agent_id: str, ts_iso: str, details: dict) -> None:
++    conn.execute(
++        """INSERT INTO decisions
++           (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++           VALUES (?, ?, ?, ?, ?)""",
++        (agent_id, ts_iso, "enter", "test", json.dumps(details)),
++    )
++    conn.commit()
++
++
++def _challenger_deployed_at(conn, agent_id: str, spec_version: int) -> str:
++    row = conn.execute(
++        """SELECT deployed_at FROM specs
++           WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
++           ORDER BY id DESC LIMIT 1""",
++        (agent_id, spec_version),
++    ).fetchone()
++    assert row is not None
++    return row["deployed_at"]
++
++
++# ---------------------------------------------------------------------------
++# Finding 3: resolve_challenger — direct coverage
++# ---------------------------------------------------------------------------
++
++
++class TestResolveChallenger:
++    def test_promotion_path(self, conn):
++        """Challenger's average confidence exceeds the incumbent's over the
++        trial window → promoted, active_spec_version flips, incumbent goes
++        inactive."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        for i in range(2):
++            _insert_decision(
++                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
++                {"challenger_spec_version": 2, "challenger_confidence": 0.9},
++            )
++            _insert_decision(
++                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
++                {"confidence": 0.3},
++            )
++
++        result = resolve_challenger(conn, AGENT_ID)
++
++        assert result["verdict"] == "promoted"
++        assert result["challenger_version"] == 2
++        assert result["incumbent_version"] == 1
++        assert result["challenger_avg_confidence"] == pytest.approx(0.9)
++        assert result["incumbent_avg_confidence"] == pytest.approx(0.3)
++        assert result["challenger_decisions"] == 2
++        assert result["incumbent_decisions"] == 2
++
++        specs = {
++            r["spec_version"]: r["status"]
++            for r in conn.execute(
++                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == "active"
++        assert specs[1] == "inactive"
++
++        agent = conn.execute(
++            "SELECT active_spec_version FROM agents WHERE id = ?", (AGENT_ID,)
++        ).fetchone()
++        assert agent["active_spec_version"] == 2
++
++    def test_rejection_path(self, conn):
++        """Challenger's average confidence does NOT exceed the incumbent's
++        → rejected, incumbent stays active, challenger goes inactive."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            {"challenger_spec_version": 2, "challenger_confidence": 0.2},
++        )
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            {"confidence": 0.5},
++        )
++
++        result = resolve_challenger(conn, AGENT_ID)
++
++        assert result["verdict"] == "rejected"
++        assert result["challenger_avg_confidence"] == pytest.approx(0.2)
++        assert result["incumbent_avg_confidence"] == pytest.approx(0.5)
++
++        specs = {
++            r["spec_version"]: r["status"]
++            for r in conn.execute(
++                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == "inactive"
++        assert specs[1] == "active"
++
++        agent = conn.execute(
++            "SELECT active_spec_version FROM agents WHERE id = ?", (AGENT_ID,)
++        ).fetchone()
++        assert agent["active_spec_version"] == 1
++
++    def test_no_challenger_returns_no_challenger_verdict(self, conn):
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1))
++
++        result = resolve_challenger(conn, AGENT_ID)
++        assert result == {"verdict": "no_challenger"}
++
++    def test_pre_trial_incumbent_decisions_do_not_influence_outcome(self, conn):
++        """T6 review finding 3: resolve_challenger must scope BOTH sides of
++        the comparison to the challenger's trial window. A pre-trial
++        incumbent decision (logged under a prior spec version, before this
++        challenger was even deployed) must not be averaged in.
++
++        Rigged so the two possible answers disagree: including the
++        pre-trial 0.99-confidence row would push the incumbent average
++        above the challenger's and flip the verdict to "rejected"; properly
++        excluding it correctly promotes the challenger.
++        """
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++
++        # Pre-trial incumbent decision, logged long before the challenger
++        # trial started.
++        _insert_decision(
++            conn, AGENT_ID, "2020-01-01T00:00:00Z", {"confidence": 0.99},
++        )
++
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        # In-trial-window decisions.
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            {"challenger_spec_version": 2, "challenger_confidence": 0.5},
++        )
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            {"confidence": 0.1},
++        )
++
++        result = resolve_challenger(conn, AGENT_ID)
++
++        # Only the in-window incumbent decision (0.1) counted -- the
++        # pre-trial 0.99 row was excluded.
++        assert result["incumbent_decisions"] == 1
++        assert result["incumbent_avg_confidence"] == pytest.approx(0.1)
++        assert result["verdict"] == "promoted"
++
++
++# ---------------------------------------------------------------------------
++# Finding 2: shadow-challenger block in agents/decision_loop.py
++# ---------------------------------------------------------------------------
++
++
++DECISION_AGENT_ID = "shadow_falcon"
++
++
++def _decision_loop_heartbeat_packet() -> dict:
++    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
++    return {
++        "timestamp": ts,
++        "assets": {
++            "SOL-PERP": {"price": 145.20, "funding": -0.005},
++        },
++        "cross_asset": {},
++        "regime": {},
++    }
++
++
++def _decision_loop_config(heartbeat_path: str) -> dict:
++    return {
++        "universe": ["SOL-PERP"],
++        "data_source": "stub",
++        "desk": {
++            "starting_balance": 50000.0,
++            "max_leverage": 10,
++            "max_position_size_pct": 0.20,
++            "max_concurrent_positions": 3,
++            "drawdown_kill_pct": 0.15,
++            "heartbeat_path": heartbeat_path,
++            "heartbeat_interval_seconds": 300,
++        },
++    }
++
++
++@pytest.mark.asyncio
++async def test_challenger_logs_without_trading(conn, tmp_path, monkeypatch):
++    """The sole enforcement point for the M10 safety invariant: a
++    challenger's shadow decision is logged with challenger_spec_version in
++    decision_details_json, but never reaches the risk gate or the paper
++    bridge. Only the incumbent's decision executes.
++
++    Verified via spies on the REAL risk-gate function, the REAL
++    RiskOfficer.entry_gate_status, and the REAL bridge_factory call site —
++    not by mocking away the code under test.
++    """
++    from agents.decision_loop import run_decision
++    from execution.paper_bridge import PaperBridge
++    from market.heartbeat import write_heartbeat
++    from market.provider import MarketProvider
++    from store.db import insert_account_snapshot, get_trades
++
++    insert_agent(
++        conn, DECISION_AGENT_ID, DECISION_AGENT_ID, "2026-07-14T00:00:00Z",
++        json.dumps({"compiled": True}),
++    )
++    insert_account_snapshot(conn, DECISION_AGENT_ID, "paper", 50000.0, 50000.0)
++
++    # Incumbent: long, weight 0.6 on the funding evidence term -> confidence
++    # 0.6 >= confidence_threshold(0.5) -> full-size enter (long).
++    incumbent = Spec(
++        agent_id=DECISION_AGENT_ID, spec_version=1, thesis_version=1,
++        universe_include=["SOL-PERP"], regime_exclude=[], direction="long",
++        confidence_threshold=0.5, scale_threshold=0.3,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term", feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.6, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
++        max_hold_hours=72, leverage=3, position_size_pct=0.10,
++    )
++    # Challenger: short, weight 0.9 on the same feature -> confidence 0.9,
++    # a DIFFERENT direction and higher confidence than the incumbent so the
++    # test can tell the two decisions apart.
++    challenger = Spec(
++        agent_id=DECISION_AGENT_ID, spec_version=2, thesis_version=1,
++        universe_include=["SOL-PERP"], regime_exclude=[], direction="short",
++        confidence_threshold=0.5, scale_threshold=0.3,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term_challenger", feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.9, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
++        max_hold_hours=72, leverage=3, position_size_pct=0.10,
++    )
++
++    deploy_spec(conn, DECISION_AGENT_ID, incumbent)
++    deploy_as_challenger(conn, DECISION_AGENT_ID, challenger)
++
++    heartbeat_path = str(tmp_path / "heartbeat.json")
++    write_heartbeat(heartbeat_path, _decision_loop_heartbeat_packet())
++    config = _decision_loop_config(heartbeat_path)
++
++    # --- Spies on the real code path -----------------------------------
++    from meta.risk_officer import RiskOfficer
++    import agents.decision_loop as decision_loop_module
++
++    gate_calls: list[str] = []
++    orig_gate_status = RiskOfficer.entry_gate_status
++
++    def spy_gate_status(self, agent_id, *a, **kw):
++        gate_calls.append(agent_id)
++        return orig_gate_status(self, agent_id, *a, **kw)
++
++    monkeypatch.setattr(RiskOfficer, "entry_gate_status", spy_gate_status)
++
++    validate_calls: list[int] = []
++    orig_validate_order = decision_loop_module.validate_order
++
++    def spy_validate_order(*args, **kwargs):
++        validate_calls.append(1)
++        return orig_validate_order(*args, **kwargs)
++
++    monkeypatch.setattr(decision_loop_module, "validate_order", spy_validate_order)
++
++    bridge_calls: list[str] = []
++
++    def bridge_factory(agent_id, conn, provider):
++        bridge_calls.append(agent_id)
++        return PaperBridge(agent_id=agent_id, conn=conn, provider=provider, config=config)
++
++    def sentinel_llm(sp, dp, **kw):
++        raise AssertionError("compiled agent must not call the LLM")
++
++    provider = MarketProvider(config)
++    async with provider:
++        result = await run_decision(
++            agent_id=DECISION_AGENT_ID,
++            thesis_text="test thesis",
++            config=config,
++            conn=conn,
++            provider=provider,
++            llm_fn=sentinel_llm,
++            bridge_factory=bridge_factory,
++        )
++
++    # (a) Only the incumbent's decision executes: a single long trade.
++    assert result["action"] == "enter"
++    trades = get_trades(conn, DECISION_AGENT_ID)
++    assert len(trades) == 1
++    assert trades[0]["direction"] == "long", (
++        "the executed trade must be the incumbent's (long), never the "
++        "challenger's (short)"
++    )
++
++    # (b) A challenger decisions row was logged, carrying
++    # challenger_spec_version, distinct from the incumbent's own row.
++    rows = [
++        dict(r) for r in conn.execute(
++            "SELECT decision_action, decision_reason, decision_details_json "
++            "FROM decisions WHERE agent_id = ? ORDER BY id ASC",
++            (DECISION_AGENT_ID,),
++        ).fetchall()
++    ]
++    assert len(rows) == 2, f"expected challenger shadow log + incumbent log, got {rows}"
++
++    challenger_row, incumbent_row = rows
++    challenger_details = json.loads(challenger_row["decision_details_json"])
++    assert challenger_details["challenger_spec_version"] == 2
++    assert challenger_details["incumbent_spec_version"] == 1
++    assert challenger_row["decision_action"] == "enter"
++    assert "challenger/v2" in challenger_row["decision_reason"]
++
++    incumbent_details = json.loads(incumbent_row["decision_details_json"])
++    assert "challenger_spec_version" not in incumbent_details
++    assert incumbent_row["decision_action"] == "enter"
++
++    # (c) The challenger decision never invoked the risk gate or the
++    # bridge -- exactly one call each, both attributable to the
++    # incumbent's real entry (not two, which would mean the challenger
++    # also reached execution).
++    assert gate_calls == [DECISION_AGENT_ID]
++    assert validate_calls == [1]
++    assert bridge_calls == [DECISION_AGENT_ID]
+diff --git a/tests/test_labeling.py b/tests/test_labeling.py
+index 16c4eff..5efb16e 100644
+--- a/tests/test_labeling.py
++++ b/tests/test_labeling.py
+@@ -169,20 +169,83 @@ def _insert_enter_decision(
+     cur = conn.execute(
+         """INSERT INTO decisions
+            (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+            VALUES (?, ?, ?, ?, ?)""",
+         (agent_id, _ts_iso(dt), "enter", f"entered {asset}", json.dumps(details)),
+     )
+     conn.commit()
+     return cur.lastrowid
+ 
+ 
++def _insert_trade(
++    conn: sqlite3.Connection,
++    trade_id: str,
++    agent_id: str,
++    asset: str,
++    direction: str,
++    exit_price: float,
++    exit_dt: datetime,
++    sl_pct: float = 0.02,
++    tp_pct: float = 0.05,
++) -> None:
++    """Insert a closed trade row (minimal columns labeling reads)."""
++    if direction == "long":
++        sl = exit_price * (1 - sl_pct)
++        tp = exit_price * (1 + tp_pct)
++    else:
++        sl = exit_price * (1 + sl_pct)
++        tp = exit_price * (1 - tp_pct)
++
++    conn.execute(
++        """INSERT INTO trades
++           (id, agent_id, asset, direction, entry_price, stop_loss_price,
++            take_profit_price, exit_price, exit_timestamp, status)
++           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed')""",
++        (
++            trade_id, agent_id, asset, direction, exit_price, sl, tp,
++            exit_price, _ts_iso(exit_dt),
++        ),
++    )
++    conn.commit()
++
++
++def _insert_close_decision(
++    conn: sqlite3.Connection,
++    agent_id: str,
++    dt: datetime,
++    trade_id: str,
++    exit_price: float,
++) -> int:
++    """Insert a close decision with the exact decision_details_json shape
++    agents/decision_loop.py's log_decision() writes for a close action:
++    {"position_id": ..., "fill": "<dict repr of execute_close()'s return>"}.
++    """
++    fill = {
++        "trade_id": trade_id,
++        "exit_price": exit_price,
++        "pnl_pct": 0.0,
++        "pnl_usd": 0.0,
++        "fees_paid": 0.0,
++        "funding_paid": 0.0,
++    }
++    details = {"position_id": f"pos_{trade_id}", "fill": str(fill)}
++
++    cur = conn.execute(
++        """INSERT INTO decisions
++           (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++           VALUES (?, ?, ?, ?, ?)""",
++        (agent_id, _ts_iso(dt), "close", "agent_close", json.dumps(details)),
++    )
++    conn.commit()
++    return cur.lastrowid
++
++
+ def _insert_wait_decision(
+     conn: sqlite3.Connection,
+     agent_id: str,
+     dt: datetime,
+     asset: str,
+     direction: str,
+     entry_price: float,
+ ) -> int:
+     """Insert a wait decision with candidate info."""
+     candidate = {
+@@ -552,10 +615,245 @@ class TestExtractInfo:
+         assert info["sl"] == 155.0
+ 
+     def test_extract_none_for_empty(self):
+         from meta.labeling import _extract_enter_info, _extract_wait_info
+ 
+         assert _extract_enter_info(None) is None
+         assert _extract_enter_info({}) is None
+         assert _extract_wait_info(None) is None
+         assert _extract_wait_info({}) is None
+         assert _extract_wait_info({"candidate": None}) is None
++
++
++# ── Finding 1: close decisions must correlate to their actual trade ───────
++
++
++class TestExtractCloseInfo:
++    """_extract_close_info must correlate a close decision to the trade it
++    actually closed (via the trade_id embedded in decision_details_json's
++    "fill" field) — never the agent's most-recently-closed trade."""
++
++    def test_extract_close_info_correlates_via_trade_id(self):
++        from meta.labeling import _extract_close_info
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++        now = datetime.now(timezone.utc)
++
++        _insert_trade(conn, "trade_a", "test_agent", "BTC-PERP", "long", 100.0, now)
++        # A second, more-recently-closed trade for the SAME agent on a
++        # DIFFERENT asset/direction — the old "most recently closed" query
++        # would pick this one instead.
++        _insert_trade(
++            conn, "trade_b", "test_agent", "ETH-PERP", "short", 500.0,
++            now + timedelta(hours=2),
++        )
++
++        decision_id = _insert_close_decision(conn, "test_agent", now, "trade_a", 100.0)
++        row = conn.execute(
++            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
++        ).fetchone()
++
++        info = _extract_close_info(dict(row), conn)
++        assert info is not None
++        assert info["asset"] == "BTC-PERP"
++        assert info["direction"] == "long"
++        assert info["entry_price"] == 100.0
++
++    def test_extract_close_info_missing_fill_is_null(self):
++        """No decision_details_json at all → no correlation possible → None."""
++        from meta.labeling import _extract_close_info
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        cur = conn.execute(
++            """INSERT INTO decisions
++               (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++               VALUES (?, ?, ?, ?, ?)""",
++            ("test_agent", _now_iso(), "close", "agent_close", None),
++        )
++        conn.commit()
++        row = conn.execute(
++            "SELECT * FROM decisions WHERE id = ?", (cur.lastrowid,)
++        ).fetchone()
++
++        assert _extract_close_info(dict(row), conn) is None
++
++    def test_extract_close_info_unknown_trade_id_is_null(self):
++        """trade_id present in details but no matching trade row → None,
++        never guessed from a different trade."""
++        from meta.labeling import _extract_close_info
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++        now = datetime.now(timezone.utc)
++
++        # Some OTHER closed trade exists, but not the one referenced.
++        _insert_trade(conn, "trade_other", "test_agent", "SOL-PERP", "long", 10.0, now)
++
++        decision_id = _insert_close_decision(
++            conn, "test_agent", now, "trade_does_not_exist", 10.0
++        )
++        row = conn.execute(
++            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
++        ).fetchone()
++
++        assert _extract_close_info(dict(row), conn) is None
++
++
++class TestLabelCloseDecision:
++    """End-to-end run_labeling_job coverage for close-action decisions —
++    there was previously NO test exercising a close decision at all."""
++
++    def test_earlier_close_decision_labeled_from_correct_trade(self):
++        """Regression for T6 review finding 1: an agent with MULTIPLE closed
++        trades on different assets/directions must have its earlier close
++        decision labeled from ITS OWN trade, not the agent's latest closed
++        trade.
++
++        trade_b (ETH-PERP) closes AFTER trade_a (BTC-PERP) but the decision
++        under test is trade_a's close. Only BTC-PERP candles are written to
++        the ledger, so the old "most-recently-closed trade" query (which
++        would resolve to trade_b/ETH-PERP) finds no candles and labels
++        nothing (total_labeled == 0). The fix must correlate to trade_a and
++        label successfully.
++        """
++        from meta.labeling import LONGEST_HOURS, run_labeling_job
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        now = datetime.now(timezone.utc)
++        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
++        exit_price = 100.0
++
++        _insert_trade(
++            conn, "trade_a", "test_agent", "BTC-PERP", "long", exit_price, dec_ts,
++        )
++        # Closed later than trade_a, different asset/direction — this is
++        # what the buggy "most recently closed" query would return.
++        _insert_trade(
++            conn, "trade_b", "test_agent", "ETH-PERP", "short", 500.0,
++            dec_ts + timedelta(hours=2),
++        )
++
++        _insert_close_decision(conn, "test_agent", dec_ts, "trade_a", exit_price)
++
++        start_ms = int(dec_ts.timestamp() * 1000)
++        candles = _make_candles(start_ms, 360, base_price=exit_price, drift=0.001)
++        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
++
++        with tempfile.TemporaryDirectory() as td:
++            # Only BTC-PERP (trade_a's asset) has candle data.
++            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
++            result = run_labeling_job(conn, td)
++
++        assert result["total_processed"] == 1
++        assert result["total_labeled"] == 3, (
++            "close decision must be labeled from trade_a (BTC-PERP, which "
++            "has candle data), not trade_b (ETH-PERP, which has none)"
++        )
++        assert result["errors"] == 0
++
++        labels = conn.execute(
++            "SELECT horizon FROM decision_labels ORDER BY horizon"
++        ).fetchall()
++        assert {r[0] for r in labels} == {"1h", "4h", "24h"}
++
++    def test_close_decision_without_correlatable_trade_left_unlabeled(self):
++        """A close decision whose fill can't be correlated to a trade row
++        (e.g. the trade was later deleted/voided) is skipped, not guessed."""
++        from meta.labeling import LONGEST_HOURS, run_labeling_job
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        now = datetime.now(timezone.utc)
++        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
++
++        _insert_close_decision(conn, "test_agent", dec_ts, "trade_missing", 100.0)
++
++        start_ms = int(dec_ts.timestamp() * 1000)
++        candles = _make_candles(start_ms, 360, base_price=100.0)
++        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
++
++        with tempfile.TemporaryDirectory() as td:
++            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
++            result = run_labeling_job(conn, td)
++
++        assert result["total_processed"] == 1
++        assert result["total_labeled"] == 0
++
++
++# ── Finding 4: staleness bound on the forward-return candle lookup ────────
++
++
++class TestForwardReturnStaleness:
++    """_fwd_return_at_cutoff must never bridge a ledger gap with a stale
++    candle — labels must be left null across gaps, not interpolated."""
++
++    def test_candle_within_threshold_labels(self):
++        from meta.labeling import STALENESS_THRESHOLD_MS, _fwd_return_at_cutoff
++
++        candles = [[0, 100.0, 101.0, 99.0, 105.0, 1000.0]]
++        result = _fwd_return_at_cutoff(candles, 100.0, STALENESS_THRESHOLD_MS)
++        assert result is not None
++        assert abs(result - 5.0) < 1e-9
++
++    def test_candle_beyond_threshold_is_null(self):
++        from meta.labeling import STALENESS_THRESHOLD_MS, _fwd_return_at_cutoff
++
++        candles = [[0, 100.0, 101.0, 99.0, 105.0, 1000.0]]
++        result = _fwd_return_at_cutoff(
++            candles, 100.0, STALENESS_THRESHOLD_MS + 1,
++        )
++        assert result is None
++
++    def test_gap_at_horizon_boundary_leaves_that_horizon_null(self):
++        """A decision whose forward window has a mid-window gap spanning the
++        1h horizon boundary must get a null (unwritten) label for 1h, while
++        4h/24h — unaffected by the gap — label normally."""
++        from meta.labeling import LONGEST_HOURS, run_labeling_job
++
++        conn = sqlite3.connect(":memory:")
++        _init_db(conn)
++
++        now = datetime.now(timezone.utc)
++        dec_ts = now - timedelta(hours=LONGEST_HOURS + 6)
++        entry_price = 100.0
++        interval_ms = 5 * 60 * 1000
++        start_ms = int(dec_ts.timestamp() * 1000)
++
++        # Segment 1: minutes 0..40 (9 candles) — covers up to 40 min.
++        seg1 = _make_candles(start_ms, 9, base_price=entry_price, interval_ms=interval_ms)
++
++        # Gap: no candles between minute 40 and minute 80. The 1h (60 min)
++        # cutoff falls inside this gap — nearest available candle (40 min)
++        # is 20 min away, well beyond the 10-min staleness threshold.
++        seg2_start_ms = start_ms + 80 * 60 * 1000
++        # Segment 2 resumes at minute 80 and runs every 5 min through
++        # minute 1450 — covers the 4h (240 min) and 24h (1440 min) cutoffs
++        # exactly, so those horizons are unaffected by the gap.
++        count2 = (1450 - 80) // 5 + 1
++        seg2 = _make_candles(
++            seg2_start_ms, count2, base_price=seg1[-1][4], interval_ms=interval_ms,
++        )
++        candles = seg1 + seg2
++
++        _insert_enter_decision(conn, "test_agent", dec_ts, "BTC-PERP", "long", entry_price)
++
++        candle_month = dec_ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
++        with tempfile.TemporaryDirectory() as td:
++            _write_candle_ledger(td, "BTC-PERP", candles, candle_month)
++            result = run_labeling_job(conn, td)
++
++        assert result["errors"] == 0
++        assert result["total_labeled"] == 2, "1h must be skipped, 4h and 24h must label"
++
++        horizons = {
++            r[0] for r in conn.execute(
++                "SELECT horizon FROM decision_labels"
++            ).fetchall()
++        }
++        assert horizons == {"4h", "24h"}
++        assert "1h" not in horizons

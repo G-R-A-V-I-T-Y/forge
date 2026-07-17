@@ -1,0 +1,2819 @@
+## Commits (aa9cd2d..c730a0a, code only)
+c730a0a m10: T8 review fixes — resolvable web-triggered hypotheses, expiry desync, regret-count parity
+df930df m10: dossier + agent page show the hypothesis registry track record
+db9c1a4 m10: schedule the challenger resolution job
+69496db m10: hypothesis registry lifecycle -- register at Stage A, resolve on challenger trial
+ea09c5e m10: resolve_challenger compares mean labeled regret, not confidence
+
+## Stat
+ agents/dossier.py               |  68 +++---
+ agents/reflection.py            | 222 ++++++++++++-----
+ forge.py                        |  59 +++++
+ meta/reflection_scheduler.py    |  19 +-
+ store/specs.py                  | 223 +++++++++++------
+ tests/test_challenger.py        | 419 +++++++++++++++++++++++++++++---
+ tests/test_hypotheses.py        | 512 ++++++++++++++++++++++++++++++++++++++++
+ tests/test_reflection.py        |  53 +++++
+ tests/test_web_actions.py       | 106 ++++++++-
+ tests/test_web_agent_detail.py  |  46 ++++
+ web/app.py                      |  77 +++++-
+ web/templates/agent_detail.html |  59 +++++
+ 12 files changed, 1651 insertions(+), 212 deletions(-)
+
+## Full diff (-U10)
+diff --git a/agents/dossier.py b/agents/dossier.py
+index e8f2035..cd27247 100644
+--- a/agents/dossier.py
++++ b/agents/dossier.py
+@@ -157,29 +157,39 @@ class Dossier:
+         if self.feature_stats:
+             lines = []
+             for fs in self.feature_stats:
+                 lines.append(
+                     f"  {fs['feature']:<30} buckets={fs['n_buckets']}  "
+                     f"best_bucket_wr={fs.get('best_bucket_wr', 0):.1%}  "
+                     f"worst_bucket_wr={fs.get('worst_bucket_wr', 0):.1%}"
+                 )
+             sections.append(_section("FEATURE STATS", "\n".join(lines)))
+ 
+-        # 8. Hypothesis history
++        # 8. Hypothesis history — this agent's own registry track record
++        # (M10 crit 6): claim + resolution status + observed effect, so a
++        # reflection cycle sees its own falsified ideas and cannot
++        # re-propose them without addressing the falsification.
+         if self.hypothesis_history:
+             lines = []
+             for h in self.hypothesis_history:
++                effect = h.get("effect_observed")
++                effect_note = f" effect_observed={effect:.2f}" if effect is not None else ""
+                 lines.append(
+-                    f"  [{h.get('timestamp', '?')[:16]}] "
+-                    f"result={h.get('result', '?')}  "
+-                    f"hypothesis={_trunc(h.get('hypothesis', ''), 100)}"
++                    f"  [{(h.get('created_at') or '?')[:16]}] "
++                    f"status={(h.get('status') or '?').upper()}{effect_note}  "
++                    f"claim={_trunc(h.get('claim', ''), 100)}"
+                 )
++                if h.get("falsification_condition"):
++                    lines.append(
++                        f"      falsification_condition="
++                        f"{_trunc(h['falsification_condition'], 100)}"
++                    )
+             sections.append(_section("HYPOTHESIS TRACK RECORD", "\n".join(lines)))
+ 
+         # 9. Desk digest
+         if self.desk_digest:
+             sections.append(_section("DESK DIGEST", self.desk_digest))
+ 
+         full_text = "\n\n".join(sections)
+         return truncate_prompt(full_text, max_chars)
+ 
+ 
+@@ -766,52 +776,46 @@ def _feature_stats_from_trades(conn, agent_id: str) -> list[dict]:
+             "n_samples": len(values),
+             "best_bucket_wr": best_wr,
+             "worst_bucket_wr": worst_wr,
+             "buckets": buckets,
+         })
+ 
+     return stats
+ 
+ 
+ def _get_hypothesis_history(conn, agent_id: str) -> list[dict]:
+-    """Read hypothesis track record from trade records.
+-
+-    Each trade with a non-null ``hypothesis`` field is a hypothesis event.
+-    Returns newest-first, capped at 20 entries.
++    """Read the agent's own hypothesis REGISTRY track record (M10 crit 6),
++    not the free-text ``trades.hypothesis`` column (a separate, unrelated
++    per-trade note field).
++
++    This is the evidence that lets the dossier show the LLM its own
++    falsified ideas so a reflection cycle "cannot re-propose its own
++    falsified ideas without addressing the falsification" -- the whole
++    point of criterion 6. Sourced from
++    ``agents.reflection.get_agent_hypothesis_history`` (agent_id,
++    reflection_id, claim, feature, direction, regime_context,
++    predicted_effect, falsification_condition, status, effect_observed,
++    created_at, resolved_at), newest first, capped at 20 entries.
++
++    Lazy-imported (matches ``_safe_calibration``'s pattern just above) to
++    avoid a module-load cycle: agents/reflection.py imports
++    ``build_dossier`` from this module at top level.
+     """
+     try:
+-        rows = conn.execute(
+-            """SELECT entry_timestamp, hypothesis, result, pnl_pct, asset, regime
+-               FROM trades
+-               WHERE agent_id = ?
+-                 AND status = 'closed'
+-                 AND voided = 0
+-                 AND hypothesis IS NOT NULL
+-                 AND hypothesis != ''
+-               ORDER BY entry_timestamp DESC
+-               LIMIT 20""",
+-            (agent_id,),
+-        ).fetchall()
+-    except Exception:
++        from agents.reflection import get_agent_hypothesis_history  # noqa: PLC0415
++
++        rows = get_agent_hypothesis_history(conn, agent_id)
++    except Exception as exc:
++        logger.warning("Hypothesis registry history failed for %s: %s", agent_id, exc)
+         return []
+ 
+-    return [
+-        {
+-            "timestamp": r["entry_timestamp"],
+-            "hypothesis": r["hypothesis"],
+-            "result": r["result"],
+-            "pnl_pct": r["pnl_pct"],
+-            "asset": r["asset"],
+-            "regime": r["regime"],
+-        }
+-        for r in rows
+-    ]
++    return rows[:20]
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Prompt rendering helpers
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def _section(title: str, body: str) -> str:
+     """Format a titled section for the prompt."""
+     return f"{title}\n{'-' * len(title)}\n{body}"
+diff --git a/agents/reflection.py b/agents/reflection.py
+index 5e089de..4e4bf3e 100644
+--- a/agents/reflection.py
++++ b/agents/reflection.py
+@@ -165,40 +165,59 @@ _ADVERSARIAL_SYSTEM_PROMPT = (
+ # ---------------------------------------------------------------------------
+ # Public API — main entry point
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def run_reflection(
+     conn,
+     agent_id: str,
+     config: dict,
+     llm_fn: Callable[[str, str], str],
++    reflection_id: int | None = None,
+ ) -> ReflectionResult:
+     """Full reflection cycle for one agent — M10 three-stage pipeline.
+ 
+     Stages
+     ------
+     1. **Diagnose**: Build an evidence dossier from the agent's trade history,
+        calibration curve, regret decisions, and regime breakdown, then call
+        the LLM to produce a structured diagnosis (what's working, what's not).
++       Every falsifiable hypothesis parsed out of the diagnosis is
++       immediately persisted via :func:`register_hypotheses` (status
++       ``proposed``) -- regardless of what Stage 2/3 later decide, so a
++       Propose-call transport failure or a mechanical-gate rejection never
++       silently drops a hypothesis the LLM already stated (M10 crit 6).
+     2. **Propose**: Based on the diagnosis, call the LLM to generate a revised
+        strategy spec (YAML).
+     3. **Validate**: Run the mechanical evidence gates (pattern persistence,
+        a mandatory walk-forward backtest, a complexity budget) against the
+        proposed spec. The adversarial pass also runs here but is advisory
+        only -- it can never block. If all evidence gates pass, the thesis
+        and spec are deployed atomically as a **challenger**
+-       (``store.specs.deploy_as_challenger()``).
++       (``store.specs.deploy_as_challenger()``), and this cycle's
++       hypotheses move from ``proposed`` to ``challenger`` status.
+ 
+     Falls back to the legacy single-call pipeline when the dossier builder
+     cannot produce a dossier (missing ledger data, no trades, etc.). The
+-    mechanical evidence gates still apply in full on that path.
++    mechanical evidence gates still apply in full on that path. No
++    hypotheses are registered on the legacy path (Stage A never runs).
++
++    Parameters
++    ----------
++    reflection_id:
++        The ``reflections.id`` row this cycle is writing into (created by
++        the caller -- see meta/reflection_scheduler.py::run_reflection_cycle
++        -- *before* calling run_reflection). Passed straight through to
++        :func:`register_hypotheses` so each hypothesis is linked back to
++        the reflection cycle that proposed it. ``None`` is accepted for
++        ad-hoc/manual invocations that don't first insert a reflections row
++        (register_hypotheses treats that as ad-hoc registration).
+     """
+     gates_passed: list[str] = []
+ 
+     # -- Gate 0: Benchmark agents never reflect --------------------------------
+     # Benchmark agents (id starts with "benchmark_") are permanent baselines --
+     # their trade history is the null distribution every significance test is
+     # measured against. meta/reflection_scheduler.py::check_agent_eligible
+     # blocks the scheduled path; this guard protects the manual single-agent
+     # web trigger too, which calls run_reflection directly and does not go
+     # through check_agent_eligible.
+@@ -249,20 +268,21 @@ def run_reflection(
+     current_version = current_spec.spec_version if current_spec else 0
+     trades = get_trades(conn, agent_id, limit=500)
+     decisions = _get_decisions(conn, agent_id, limit=100)
+ 
+     # ------------------------------------------------------------------
+     # Stage 1: Diagnose — build dossier + call LLM for analysis
+     # ------------------------------------------------------------------
+     dossier = None
+     diagnosis = ""
+     hypotheses: list[dict] = []
++    hypothesis_ids: list[int] = []
+     try:
+         dossier_ledger_dir = config.get("ledger_dir", "ledger")
+         dossier = build_dossier(conn, agent_id, dossier_ledger_dir)
+     except Exception as exc:
+         logger.warning("Dossier build failed for %s: %s — falling back to legacy path", agent_id, exc)
+ 
+     # research_findings_json: a compact structured digest of the dossier
+     # (not the whole rendered prompt) -- persisted to reflections.
+     # research_findings_json by meta/reflection_scheduler.py for post-hoc
+     # audit of what evidence informed this cycle, regardless of outcome.
+@@ -302,20 +322,24 @@ def run_reflection(
+         diagnose_prompt = _build_diagnose_prompt(agent_id, dossier)
+         diagnosis, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, diagnose_prompt)
+         if err is not None:
+             return err
+         hypotheses = _parse_diagnose_hypotheses(diagnosis)
+         logger.info(
+             "[%s] Stage 1 (Diagnose) complete — %d chars, %d hypotheses",
+             agent_id, len(diagnosis), len(hypotheses),
+         )
+ 
++        # M10 crit 6: register hypotheses the moment Stage A states them --
++        # persisted as 'proposed' regardless of what Stage 2/3 do next.
++        hypothesis_ids = register_hypotheses(conn, agent_id, reflection_id, hypotheses)
++
+         # Stage 2: Propose — generate revised spec informed by diagnosis
+         propose_prompt = _build_propose_prompt(
+             agent_id, diagnosis, current_spec, current_version,
+         )
+         llm_response, err = _call_llm(_REFLECTION_SYSTEM_PROMPT, propose_prompt)
+         if err is not None:
+             return err
+         logger.info(
+             "[%s] Stage 2 (Propose) complete — %d chars",
+             agent_id, len(llm_response),
+@@ -651,20 +675,30 @@ def run_reflection(
+             proposed_changes=proposed_changes_json,
+             adversarial_critique=adversarial_critique_text,
+             holdout_result=holdout_result_json,
+         )
+ 
+     logger.info(
+         "[%s] revision v%d deployed as challenger (specs.id=%d, thesis v%d)",
+         agent_id, revised_spec.spec_version, spec_id, next_thesis_version,
+     )
+ 
++    # M10 crit 6: this cycle's hypotheses now have a live challenger trial
++    # to be judged by -- move them out of 'proposed' into 'challenger'.
++    if hypothesis_ids:
++        placeholders = ",".join("?" * len(hypothesis_ids))
++        conn.execute(
++            f"UPDATE hypotheses SET status = 'challenger' WHERE id IN ({placeholders})",
++            hypothesis_ids,
++        )
++        conn.commit()
++
+     return ReflectionResult(
+         triggered=True,
+         new_spec_yaml=propose_yaml,
+         spec_version=revised_spec.spec_version,
+         deployed=True,
+         rejection_reason=None,
+         blocked_by_gate=None,
+         adversarial_flaws=flaws if flaws else [],
+         gates_passed=gates_passed,
+         research_findings_json=research_findings_json,
+@@ -1646,61 +1680,82 @@ def register_hypotheses(
+         ids.append(cursor.lastrowid)
+     conn.commit()
+     return ids
+ 
+ 
+ def resolve_hypotheses(
+     conn,
+     reflection_id: int,
+     challenger_result: dict,
+ ) -> int:
+-    """Update hypothesis statuses based on challenger trial outcome.
+-
+-    Hypotheses linked to *reflection_id* that are in ``'proposed'`` or
+-    ``'challenger'`` status are resolved:
+-
+-    - If the challenger verdict is ``'promoted'``, hypotheses are marked
+-      ``'validated'``.
+-    - If the challenger verdict is ``'rejected'``, hypotheses are marked
+-      ``'falsified'``.
+-    - If the challenger had zero logged decisions (``'no_challenger'``),
+-      hypotheses are marked ``'inconclusive'``.
++    """Update hypothesis statuses based on a challenger trial outcome.
++
++    Hypotheses linked to *reflection_id* that are still in ``'proposed'``
++    or ``'challenger'`` status are resolved. Mechanical interpretation of
++    "predicted effect realized" (T8): a reflection cycle's hypotheses are
++    the claims that motivated ITS spec revision, and the challenger trial
++    is the out-of-sample test of that whole revision -- so the trial
++    verdict stands in for per-hypothesis direction-matching, which Stage A
++    doesn't currently parse a structured direction for anyway:
++
++    - ``'promoted'`` (challenger's mean regret beat the incumbent's) →
++      the predicted effect was realized → ``'validated'``.
++    - ``'rejected'`` → per spec text, "challenger rejected" alone is
++      sufficient to falsify → ``'falsified'`` (no separate
++      falsification_condition text-matching is attempted).
++    - ``'not_resolvable'`` or ``'no_challenger'`` (no labeled evidence, or
++      the trial window expired without enough signal) → ``'inconclusive'``.
++
++    ``effect_observed`` is recorded in every case it can be computed: the
++    regret improvement the challenger achieved over the incumbent
++    (``incumbent_mean_regret - challenger_mean_regret`` from
++    :func:`store.specs.resolve_challenger`'s result -- positive means the
++    challenger reduced regret). It is left ``NULL`` only when
++    *challenger_result* carries no regret numbers at all (the
++    zero-evidence / not-resolvable case).
+ 
+     Parameters
+     ----------
+     conn:
+         Open SQLite connection.
+     reflection_id:
+         The reflection cycle whose hypotheses to resolve.
+     challenger_result:
+         Output from :func:`store.specs.resolve_challenger`.
+ 
+     Returns
+     -------
+     int
+         Number of hypotheses resolved.
+     """
+     verdict = challenger_result.get("verdict", "no_challenger")
+     status_map = {
+         "promoted": "validated",
+         "rejected": "falsified",
++        "not_resolvable": "inconclusive",
+         "no_challenger": "inconclusive",
+     }
+     new_status = status_map.get(verdict, "inconclusive")
+ 
++    incumbent_mean = challenger_result.get("incumbent_mean_regret")
++    challenger_mean = challenger_result.get("challenger_mean_regret")
++    effect_observed = None
++    if isinstance(incumbent_mean, (int, float)) and isinstance(challenger_mean, (int, float)):
++        effect_observed = round(incumbent_mean - challenger_mean, 4)
++
+     # Only resolve hypotheses still in a pre-resolution state.
+     cursor = conn.execute(
+         """UPDATE hypotheses
+-           SET status = ?, resolved_at = ?
++           SET status = ?, effect_observed = ?, resolved_at = ?
+            WHERE reflection_id = ?
+              AND status IN ('proposed', 'challenger')""",
+-        (new_status, _now(), reflection_id),
++        (new_status, effect_observed, _now(), reflection_id),
+     )
+     conn.commit()
+     return cursor.rowcount
+ 
+ 
+ def get_agent_hypothesis_history(conn, agent_id: str) -> list[dict]:
+     """Return all hypotheses for *agent_id*, newest first.
+ 
+     Parameters
+     ----------
+@@ -1773,97 +1828,136 @@ def get_hypothesis_digest(conn, limit: int = 10) -> str:
+ 
+ def check_challenger_resolution(
+     conn,
+     agent_id: str,
+     desk_config: dict,
+ ) -> dict:
+     """Check whether the challenger trial for *agent_id* has enough data and
+     resolve it if so.
+ 
+     This is the entry point for the APScheduler job that periodically
+-    evaluates challenger trials.  It reads thresholds from *desk_config*:
+-
+-    - ``challenger_min_decisions`` (default 20): minimum number of shadow
+-      decisions the challenger must have logged before resolution.
+-    - ``challenger_max_days`` (default 7): maximum trial duration in days;
+-      the challenger is force-resolved when this elapses even if the
+-      decision count is below the threshold.
++    evaluates challenger trials (forge.py's ``challenger_resolution`` job).
++    It reads thresholds from *desk_config*:
++
++    - ``challenger_min_decisions`` (default 20): minimum number of
++      **labeled** shadow decisions (T8 -- joined against
++      ``decision_labels`` at :data:`store.specs.RESOLUTION_HORIZON`, not
++      raw ``decisions`` rows) the challenger must have before resolution.
++      An unlabeled shadow row (the nightly labeling job hasn't caught up
++      yet) does not count.
++    - ``challenger_max_days`` (default 7): maximum trial duration in days,
++      measured from the challenger's ``specs.deployed_at``; the challenger
++      is force-resolved when this elapses even if the labeled-decision
++      count is below the threshold.
+ 
+     Parameters
+     ----------
+     conn:
+         Open SQLite connection.
+     agent_id:
+         Agent identifier.
+     desk_config:
+         Desk configuration dict (``config["desk"]``).
+ 
+     Returns
+     -------
+     dict
+         ``{"resolved": bool, ...}`` — includes the full output of
+         :func:`store.specs.resolve_challenger` when resolution ran, or
+         ``{"resolved": False, "reason": str}`` when the trial is still
+         in progress.
+     """
+-    from store.specs import get_challenger_spec, resolve_challenger  # noqa: PLC0415
++    from store.specs import (  # noqa: PLC0415
++        RESOLUTION_HORIZON,
++        get_challenger_spec,
++        resolve_challenger,
++    )
+ 
+     challenger = get_challenger_spec(conn, agent_id)
+     if challenger is None:
+         return {"resolved": False, "reason": "no active challenger"}
+ 
+     min_decisions = desk_config.get("challenger_min_decisions", 20)
+     max_days = desk_config.get("challenger_max_days", 7)
+ 
+-    # Count logged challenger decisions.
+-    row = conn.execute(
+-        """SELECT COUNT(*) FROM decisions
+-           WHERE agent_id = ? AND decision_details_json IS NOT NULL""",
+-        (agent_id,),
++    # deployed_at comes straight from the specs row -- the authoritative
++    # trial start (matches resolve_challenger's own trial-window scoping),
++    # not inferred from the first matching decisions row (which lags the
++    # true deploy time and would undercount days_elapsed).
++    trial_row = conn.execute(
++        """SELECT deployed_at FROM specs
++           WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
++           ORDER BY id DESC LIMIT 1""",
++        (agent_id, challenger.spec_version),
+     ).fetchone()
+-    total_decisions = row[0] if row else 0
+-
+-    challenger_decisions = 0
+-    all_rows = conn.execute(
+-        """SELECT decision_details_json, timestamp FROM decisions
+-           WHERE agent_id = ? AND decision_details_json IS NOT NULL
+-           ORDER BY timestamp ASC""",
+-        (agent_id,),
+-    ).fetchall()
+-
+-    deployed_at: datetime | None = None
+-    for dr in all_rows:
+-        try:
+-            details = json.loads(dr["decision_details_json"])
+-        except (json.JSONDecodeError, TypeError):
+-            continue
+-        if details.get("challenger_spec_version") == challenger.spec_version:
+-            challenger_decisions += 1
+-            if deployed_at is None:
+-                try:
+-                    deployed_at = datetime.fromisoformat(
+-                        dr["timestamp"].replace("Z", "+00:00"),
+-                    )
+-                except (ValueError, TypeError):
+-                    pass
+-
+-    # Check time-based threshold.
+-    now = datetime.now(timezone.utc)
++    deployed_at_str = trial_row["deployed_at"] if trial_row else None
++
++    challenger_labeled = 0
++    if deployed_at_str is not None:
++        rows = conn.execute(
++            """SELECT d.decision_details_json
++               FROM decisions d
++               JOIN decision_labels dl
++                 ON dl.decision_id = d.id AND dl.horizon = ?
++               WHERE d.agent_id = ? AND d.timestamp >= ?
++                 AND dl.regret_pct IS NOT NULL""",
++            (RESOLUTION_HORIZON, agent_id, deployed_at_str),
++        ).fetchall()
++        for row in rows:
++            try:
++                details = json.loads(row["decision_details_json"]) if row["decision_details_json"] else {}
++            except (json.JSONDecodeError, TypeError):
++                details = {}
++            if details.get("challenger_spec_version") == challenger.spec_version:
++                challenger_labeled += 1
++
++    # Time-based threshold, measured fractionally (not truncated to whole
++    # days) so a trial deployed 6h ago never misreads as "0 days elapsed".
+     days_elapsed = 0.0
+-    if deployed_at is not None:
+-        days_elapsed = (now - deployed_at).days
++    if deployed_at_str is not None:
++        try:
++            deployed_at = datetime.fromisoformat(deployed_at_str.replace("Z", "+00:00"))
++            days_elapsed = (
++                datetime.now(timezone.utc) - deployed_at
++            ).total_seconds() / 86400.0
++        except (ValueError, TypeError):
++            pass
++
++    # Resolve when EITHER threshold is met. window_expired tracks whether
++    # the max_days threshold specifically is what's firing -- only in that
++    # case is it safe to force-close a zero-evidence trial (T8 review
++    # Finding 2). The min_decisions threshold alone (challenger side has
++    # enough labeled decisions) says nothing about the incumbent side, so a
++    # not_resolvable verdict reached via that path is still genuinely
++    # in-progress, not expired.
++    window_expired = days_elapsed >= max_days
++    if challenger_labeled >= min_decisions or window_expired:
++        result = resolve_challenger(conn, agent_id, force_close=window_expired)
++
++        if result.get("verdict") == "not_resolvable":
++            # This only happens when window_expired is False (force_close
++            # was False): the min_decisions threshold fired on the
++            # challenger side alone while the incumbent side still has zero
++            # labeled decisions in the trial window. That is NOT a window
++            # expiry -- the trial is still genuinely in progress, so leave
++            # both the spec row and the hypotheses untouched (T8 review
++            # Finding 2, invariant (a)) rather than reporting "resolved".
++            return {
++                "resolved": False,
++                "reason": (
++                    f"trial in progress: {challenger_labeled}/{min_decisions} labeled"
++                    f" decisions, {days_elapsed:.1f}/{max_days} days"
++                ),
++            }
+ 
+-    # Resolve when EITHER threshold is met.
+-    if challenger_decisions >= min_decisions or days_elapsed >= max_days:
+-        result = resolve_challenger(conn, agent_id)
+         result["resolved"] = True
+-        result["challenger_decisions_count"] = challenger_decisions
++        result["challenger_labeled_decisions_count"] = challenger_labeled
+         result["days_elapsed"] = round(days_elapsed, 1)
+         return result
+ 
+     return {
+         "resolved": False,
+         "reason": (
+-            f"trial in progress: {challenger_decisions}/{min_decisions} decisions, "
+-            f"{days_elapsed:.0f}/{max_days} days"
++            f"trial in progress: {challenger_labeled}/{min_decisions} labeled decisions, "
++            f"{days_elapsed:.1f}/{max_days} days"
+         ),
+     }
+diff --git a/forge.py b/forge.py
+index 93b56ec..6d3f1b6 100644
+--- a/forge.py
++++ b/forge.py
+@@ -573,20 +573,79 @@ async def main():
+             logger.warning("Reflection scheduler job failed", exc_info=True)
+ 
+     scheduler.add_job(
+         _run_reflection_scheduler_job,
+         trigger=IntervalTrigger(minutes=30, timezone=timezone.utc),
+         id="reflection_scheduler",
+         replace_existing=True,
+     )
+     logger.info("Reflection scheduler job scheduled — runs every 30 min")
+ 
++    # ------------------------------------------------------------------
++    # M10: Challenger resolution (criterion 5+6) — for every agent with a
++    # deployed challenger, applies the desk.challenger_min_decisions /
++    # desk.challenger_max_days trigger (agents/reflection.py::
++    # check_challenger_resolution, which now counts LABELED decisions) and,
++    # once due, resolves the trial via store.specs.resolve_challenger (mean
++    # labeled regret over the trial window) and the cycle's hypotheses via
++    # agents/reflection.py::resolve_hypotheses, writing the outcome into the
++    # reflections row that produced them. config["desk"] is read directly
++    # (not .get) so a missing desk section fails loudly (logged) rather than
++    # silently defaulting. Cheap and idempotent when nothing is due, so an
++    # hourly cadence is plenty.
++    # ------------------------------------------------------------------
++    async def _run_challenger_resolution_job():
++        try:
++            from agents.reflection import check_challenger_resolution, resolve_hypotheses
++
++            conn = get_connection(str(DB_PATH))
++            try:
++                desk_config = config["desk"]
++                rows = conn.execute(
++                    "SELECT DISTINCT agent_id FROM specs WHERE status = 'challenger'"
++                ).fetchall()
++                for row in rows:
++                    agent_id = row["agent_id"]
++                    result = check_challenger_resolution(conn, agent_id, desk_config)
++                    if not result.get("resolved"):
++                        continue
++                    logger.info(
++                        "Challenger resolution for %s: verdict=%s",
++                        agent_id, result.get("verdict"),
++                    )
++                    hyp_rows = conn.execute(
++                        """SELECT DISTINCT reflection_id FROM hypotheses
++                           WHERE agent_id = ? AND status = 'challenger'
++                             AND reflection_id IS NOT NULL""",
++                        (agent_id,),
++                    ).fetchall()
++                    for hr in hyp_rows:
++                        reflection_id = hr["reflection_id"]
++                        resolve_hypotheses(conn, reflection_id, result)
++                        conn.execute(
++                            "UPDATE reflections SET outcome = ? WHERE id = ?",
++                            (f"challenger_{result.get('verdict')}", reflection_id),
++                        )
++                    conn.commit()
++            finally:
++                conn.close()
++        except Exception:
++            logger.warning("Challenger resolution job failed", exc_info=True)
++
++    scheduler.add_job(
++        _run_challenger_resolution_job,
++        trigger=IntervalTrigger(hours=1, timezone=timezone.utc),
++        id="challenger_resolution",
++        replace_existing=True,
++    )
++    logger.info("Challenger resolution job scheduled — runs hourly")
++
+     # ------------------------------------------------------------------
+     # M9: Head of desk — daily briefing (crit 8). The old auto-spawner
+     # this job once latched off (pre-run finding F8) was replaced by the
+     # briefing/chat Head of Desk; population management now lives with
+     # the evaluator/spawner path, not here.
+     # ------------------------------------------------------------------
+     async def _run_daily_briefing_job():
+         try:
+             from meta.head_of_desk import generate_morning_brief, store_briefing
+             conn = get_connection(str(DB_PATH))
+diff --git a/meta/reflection_scheduler.py b/meta/reflection_scheduler.py
+index ed6e4a2..71e24ea 100644
+--- a/meta/reflection_scheduler.py
++++ b/meta/reflection_scheduler.py
+@@ -151,31 +151,42 @@ def run_reflection_cycle(
+     config: dict,
+     llm_fn: Callable[[str, str], str],
+ ) -> dict[str, Any]:
+     """Run one reflection cycle for an agent, logging the result.
+ 
+     Returns a dict with the ReflectionResult fields.
+     """
+     import agents.reflection as _reflection_mod
+ 
+     # Insert the log row at trigger time — this is the ONLY production
+-    # writer of the reflections table.  check_agent_eligible reads
+-    # triggered_at from it, so without this row an eligible agent re-fires
+-    # a full reflection (two LLM calls) every scheduler pass forever.
++    # writer of the reflections table. Both the scheduled path (forge.py's
++    # periodic job, which calls this function directly) and the manual web
++    # trigger paths (web/app.py's /api/exec/trigger-reflection/{agent_id}
++    # and /api/exec/trigger-all-reflections) route through THIS function
++    # rather than calling agents.reflection.run_reflection directly, so
++    # there is exactly one INSERT site to keep in sync (T8 review Finding
++    # 1 — web-triggered cycles used to bypass this row entirely, leaving
++    # any hypotheses they registered with reflection_id=NULL, permanently
++    # unresolvable by forge.py's hourly challenger-resolution job).
++    # check_agent_eligible reads triggered_at from it, so without this row
++    # an eligible agent re-fires a full reflection (two LLM calls) every
++    # scheduler pass forever.
+     cur = conn.execute(
+         "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
+         (agent_id, _now()),
+     )
+     reflection_row_id = cur.lastrowid
+     conn.commit()
+ 
+-    result = _reflection_mod.run_reflection(conn, agent_id, config, llm_fn)
++    result = _reflection_mod.run_reflection(
++        conn, agent_id, config, llm_fn, reflection_id=reflection_row_id,
++    )
+ 
+     rejection = None
+     if not result.deployed:
+         if result.blocked_by_gate:
+             rejection = f"blocked by gate: {result.blocked_by_gate}"
+         elif result.rejection_reason:
+             rejection = result.rejection_reason
+ 
+     ev_summary = ""
+     if result.gates_passed:
+diff --git a/store/specs.py b/store/specs.py
+index 4a2f1a2..c01e766 100644
+--- a/store/specs.py
++++ b/store/specs.py
+@@ -392,110 +392,200 @@ def deploy_as_challenger(
+ 
+ def get_challenger_spec(conn: sqlite3.Connection, agent_id: str) -> Spec | None:
+     """Return the currently-active challenger :class:`Spec` for *agent_id*.
+ 
+     At most one challenger can be active per agent at any time.  Returns
+     ``None`` when no challenger has been deployed (or after resolution).
+     """
+     return get_spec_by_status(conn, agent_id, "challenger")
+ 
+ 
+-def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
++#: Horizon policy (T8): both sides of the regret comparison are scored on a
++#: single canonical horizon rather than averaged across whichever of
++#: 1h/4h/24h happen to be labeled for a given decision. A per-decision
++#: average across available horizons would let older decisions (more
++#: horizons labeled) implicitly outweigh newer ones and would conflate
++#: short-term noise (1h) with slow-to-resolve signal (24h) into one number.
++#: 4h is the simplest defensible pick: long enough to smooth 5m-candle
++#: noise, short enough that a 20-decision trial resolves in a reasonable
++#: number of days. See meta/labeling.py::HORIZONS_HOURS.
++RESOLUTION_HORIZON = "4h"
++
++
++def resolve_challenger(
++    conn: sqlite3.Connection, agent_id: str, horizon: str = RESOLUTION_HORIZON,
++    *, force_close: bool = False,
++) -> dict:
+     """Compare the challenger's shadow decisions against the incumbent and
+     either **promote** or **reject** the challenger.
+ 
+-    The comparison uses *regret* — the difference between the challenger's
+-    average logged confidence and the incumbent's average logged confidence
+-    over the trial period.  When the challenger's average confidence exceeds
+-    the incumbent's, the challenger is promoted (status → ``active``,
++    The comparison uses *regret* — ``decision_labels.regret_pct`` (best-
++    available outcome minus chosen outcome, computed nightly by
++    ``meta/labeling.py::run_labeling_job``) at the canonical
++    :data:`RESOLUTION_HORIZON`, averaged over the challenger's shadow
++    decisions and the incumbent's executed decisions across the trial
++    window. LOWER mean regret wins: the challenger is promoted when its
++    mean regret is strictly lower than the incumbent's (status → ``active``,
+     ``active_spec_version`` updated, incumbent demoted to ``inactive``).
+     Otherwise the challenger is rejected (status → ``inactive``).
+ 
++    When either side has **zero labeled decisions** in the trial window
++    (the nightly labeling job hasn't caught up yet, or the incumbent simply
++    hasn't traded), the trial is **not resolvable** — neither side's specs
++    row is touched, so a caller can retry once more labels land rather than
++    promoting or rejecting on zero evidence.
++
++    Parameters
++    ----------
++    force_close:
++        T8 review Finding 2: when the caller has already determined the
++        trial's ``max_days`` window has elapsed (see
++        :func:`agents.reflection.check_challenger_resolution`), pass
++        ``True`` so a zero-evidence result terminally closes the trial
++        instead of leaving it live. Without this, a hypothesis flip to
++        terminal ``'inconclusive'`` on window expiry could desync from a
++        challenger spec row still sitting at ``status='challenger'`` — if
++        labels arrived later, nothing could ever correct the
++        already-terminal hypotheses. Has no effect when the trial resolves
++        normally (``challenger_count`` and ``incumbent_count`` both > 0).
++
+     Returns
+     -------
+     dict
+-        ``{"verdict": "promoted" | "rejected" | "no_challenger",
++        ``{"verdict": "promoted" | "rejected" | "not_resolvable" |
++           "expired_no_signal" | "no_challenger",
+            "challenger_version": int | None, "incumbent_version": int | None,
+-           "challenger_avg_confidence": float | None,
+-           "incumbent_avg_confidence": float | None,
+-           "challenger_decisions": int, "incumbent_decisions": int}``.
++           "challenger_mean_regret": float | None,
++           "incumbent_mean_regret": float | None,
++           "challenger_labeled_decisions": int, "incumbent_labeled_decisions": int,
++           "horizon": str}``. The ``"no_challenger"`` verdict returns just
++        ``{"verdict": "no_challenger"}`` (no challenger deployed at all).
++        ``"expired_no_signal"`` is returned only when ``force_close=True``
++        and evidence was still zero on at least one side — the challenger
++        spec row is set to ``'inactive'`` (the same terminal status an
++        ordinary rejection uses) with ``rejection_reason`` explaining why.
+     """
+     challenger = get_challenger_spec(conn, agent_id)
+     if challenger is None:
+         return {"verdict": "no_challenger"}
+ 
+     incumbent = get_active_spec(conn, agent_id)
+     incumbent_version = incumbent.spec_version if incumbent else 0
+ 
+     # Trial window = the challenger's deployed_at forward. Both sides of the
+     # comparison must be scoped to this window: an unbounded incumbent query
+-    # would average confidence over the agent's ENTIRE decision history,
++    # would average regret over the agent's ENTIRE decision history,
+     # including decisions logged under prior spec versions that predate this
+     # challenger trial entirely (T6 review finding 3).
+     trial_row = conn.execute(
+         """SELECT deployed_at FROM specs
+            WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
+            ORDER BY id DESC LIMIT 1""",
+         (agent_id, challenger.spec_version),
+     ).fetchone()
+     trial_start = trial_row["deployed_at"] if trial_row else None
+ 
+-    # Gather challenger trial decisions (logged via decision_loop with
+-    # challenger_spec_version in decision_details_json), scoped to the
+-    # trial window on both sides of the comparison.
++    challenger_regrets: list[float] = []
++    incumbent_regrets: list[float] = []
++
+     if trial_start is not None:
+-        challenger_rows = conn.execute(
+-            """SELECT decision_details_json FROM decisions
+-               WHERE agent_id = ? AND decision_details_json IS NOT NULL
+-                 AND timestamp >= ?
+-               ORDER BY timestamp ASC""",
+-            (agent_id, trial_start),
++        # Join to decision_labels at the canonical horizon -- only LABELED
++        # decisions ever enter the comparison. Production incumbent rows
++        # (enter: {"order","fill"}; wait: {"candidate": {...}} or NULL;
++        # close: {"position_id","fill"}) never carry "challenger_spec_version",
++        # so the presence/absence of that key alone distinguishes the two
++        # sides -- no confidence field required (the bug T8 replaces).
++        rows = conn.execute(
++            """SELECT d.decision_details_json, dl.regret_pct
++               FROM decisions d
++               JOIN decision_labels dl
++                 ON dl.decision_id = d.id AND dl.horizon = ?
++               WHERE d.agent_id = ? AND d.timestamp >= ?""",
++            (horizon, agent_id, trial_start),
+         ).fetchall()
+-    else:
+-        # No deployed_at on record for this challenger (shouldn't happen in
+-        # practice) — fail toward the safer empty-window rather than
+-        # silently falling back to the unbounded, unscoped query.
+-        challenger_rows = []
+-
+-    challenger_conf_sum = 0.0
+-    challenger_count = 0
+-    incumbent_conf_sum = 0.0
+-    incumbent_count = 0
+-
+-    for row in challenger_rows:
+-        try:
+-            details = json.loads(row["decision_details_json"])
+-        except (json.JSONDecodeError, TypeError):
+-            continue
+-
+-        # Challenger-logged decisions carry "challenger_spec_version".
+-        if details.get("challenger_spec_version") == challenger.spec_version:
+-            conf = details.get("challenger_confidence")
+-            if isinstance(conf, (int, float)):
+-                challenger_conf_sum += conf
+-                challenger_count += 1
+-
+-        # Incumbent decisions on the same period (for baseline comparison).
+-        if details.get("challenger_spec_version") is None:
+-            conf = details.get("confidence") or details.get("challenger_confidence")
+-            if isinstance(conf, (int, float)):
+-                incumbent_conf_sum += conf
+-                incumbent_count += 1
+-
+-    challenger_avg = challenger_conf_sum / challenger_count if challenger_count else 0.0
+-    incumbent_avg = incumbent_conf_sum / incumbent_count if incumbent_count else 0.0
+-
+-    # Decision: promote when challenger has *strictly* higher average
+-    # confidence AND at least one logged decision.
+-    verdict = "rejected"
+-    if challenger_count > 0 and challenger_avg > incumbent_avg:
+-        verdict = "promoted"
++
++        for row in rows:
++            regret = row["regret_pct"]
++            if regret is None:
++                continue
++            raw_details = row["decision_details_json"]
++            try:
++                details = json.loads(raw_details) if raw_details else {}
++            except (json.JSONDecodeError, TypeError):
++                details = {}
++
++            if details.get("challenger_spec_version") == challenger.spec_version:
++                challenger_regrets.append(regret)
++            elif "challenger_spec_version" not in details:
++                incumbent_regrets.append(regret)
++            # Decisions carrying a *different* challenger's spec_version
++            # (a prior, already-resolved trial) belong to neither side.
++
++    challenger_count = len(challenger_regrets)
++    incumbent_count = len(incumbent_regrets)
++
++    if challenger_count == 0 or incumbent_count == 0:
++        if force_close:
++            # T8 review Finding 2: the trial's max_days window has already
++            # elapsed (caller-verified) with insufficient evidence to ever
++            # resolve normally -- close it terminally now, mirroring the
++            # ordinary reject path ('inactive'), rather than leaving the
++            # spec row at 'challenger' while its hypotheses get force-
++            # flipped to terminal 'inconclusive' by the caller.
++            conn.execute(
++                """UPDATE specs SET status = 'inactive',
++                       rejection_reason = ?
++                   WHERE agent_id = ? AND status = 'challenger'
++                   AND spec_version = ?""",
++                (
++                    "challenger trial expired without sufficient labeled "
++                    "evidence (max_days elapsed)",
++                    agent_id, challenger.spec_version,
++                ),
++            )
++            conn.commit()
++            logger.info(
++                "[%s] Challenger v%d force-closed (expired, no signal) — "
++                "%d challenger / %d incumbent labeled decisions in trial window",
++                agent_id, challenger.spec_version, challenger_count, incumbent_count,
++            )
++            return {
++                "verdict": "expired_no_signal",
++                "challenger_version": challenger.spec_version,
++                "incumbent_version": incumbent_version,
++                "challenger_mean_regret": None,
++                "incumbent_mean_regret": None,
++                "challenger_labeled_decisions": challenger_count,
++                "incumbent_labeled_decisions": incumbent_count,
++                "horizon": horizon,
++            }
++        logger.info(
++            "[%s] Challenger v%d not resolvable — %d challenger / %d incumbent"
++            " labeled decisions in trial window (need >=1 each)",
++            agent_id, challenger.spec_version, challenger_count, incumbent_count,
++        )
++        return {
++            "verdict": "not_resolvable",
++            "challenger_version": challenger.spec_version,
++            "incumbent_version": incumbent_version,
++            "challenger_mean_regret": None,
++            "incumbent_mean_regret": None,
++            "challenger_labeled_decisions": challenger_count,
++            "incumbent_labeled_decisions": incumbent_count,
++            "horizon": horizon,
++        }
++
++    challenger_mean = sum(challenger_regrets) / challenger_count
++    incumbent_mean = sum(incumbent_regrets) / incumbent_count
++
++    # Decision: promote when challenger has *strictly lower* mean regret.
++    verdict = "promoted" if challenger_mean < incumbent_mean else "rejected"
+ 
+     if verdict == "promoted":
+         # Demote the current incumbent.
+         conn.execute(
+             """UPDATE specs SET status = 'inactive'
+                WHERE agent_id = ? AND status = 'active'""",
+             (agent_id,),
+         )
+         # Promote the challenger.
+         conn.execute(
+@@ -506,37 +596,38 @@ def resolve_challenger(conn: sqlite3.Connection, agent_id: str) -> dict:
+                    AND spec_version = ?
+                    ORDER BY id DESC LIMIT 1
+                )""",
+             (agent_id, challenger.spec_version),
+         )
+         conn.execute(
+             "UPDATE agents SET active_spec_version = ? WHERE id = ?",
+             (challenger.spec_version, agent_id),
+         )
+         logger.info(
+-            "[%s] Challenger v%d promoted (avg_conf %.3f > incumbent %.3f)",
+-            agent_id, challenger.spec_version, challenger_avg, incumbent_avg,
++            "[%s] Challenger v%d promoted (mean regret %.4f < incumbent %.4f)",
++            agent_id, challenger.spec_version, challenger_mean, incumbent_mean,
+         )
+     else:
+         # Reject the challenger.
+         conn.execute(
+             """UPDATE specs SET status = 'inactive'
+                WHERE agent_id = ? AND status = 'challenger'
+                AND spec_version = ?""",
+             (agent_id, challenger.spec_version),
+         )
+         logger.info(
+-            "[%s] Challenger v%d rejected (avg_conf %.3f <= incumbent %.3f)",
+-            agent_id, challenger.spec_version, challenger_avg, incumbent_avg,
++            "[%s] Challenger v%d rejected (mean regret %.4f >= incumbent %.4f)",
++            agent_id, challenger.spec_version, challenger_mean, incumbent_mean,
+         )
+ 
+     conn.commit()
+ 
+     return {
+         "verdict": verdict,
+         "challenger_version": challenger.spec_version,
+         "incumbent_version": incumbent_version,
+-        "challenger_avg_confidence": round(challenger_avg, 4),
+-        "incumbent_avg_confidence": round(incumbent_avg, 4),
+-        "challenger_decisions": challenger_count,
+-        "incumbent_decisions": incumbent_count,
++        "challenger_mean_regret": round(challenger_mean, 4),
++        "incumbent_mean_regret": round(incumbent_mean, 4),
++        "challenger_labeled_decisions": challenger_count,
++        "incumbent_labeled_decisions": incumbent_count,
++        "horizon": horizon,
+     }
+diff --git a/tests/test_challenger.py b/tests/test_challenger.py
+index 2509ad3..03f744e 100644
+--- a/tests/test_challenger.py
++++ b/tests/test_challenger.py
+@@ -67,117 +67,171 @@ def _spec(agent_id: str, spec_version: int, direction: str = "long") -> Spec:
+         ],
+         secondary_evidence=[],
+         stop_loss_pct=0.03,
+         take_profit_pct=0.06,
+         max_hold_hours=72,
+         leverage=3,
+         position_size_pct=0.10,
+     )
+ 
+ 
+-def _insert_decision(conn, agent_id: str, ts_iso: str, details: dict) -> None:
+-    conn.execute(
++def _insert_decision(conn, agent_id: str, ts_iso: str, details: dict) -> int:
++    cur = conn.execute(
+         """INSERT INTO decisions
+            (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
+            VALUES (?, ?, ?, ?, ?)""",
+         (agent_id, ts_iso, "enter", "test", json.dumps(details)),
+     )
+     conn.commit()
++    return cur.lastrowid
++
++
++def _insert_labeled_decision(
++    conn,
++    agent_id: str,
++    ts_iso: str,
++    details: dict,
++    regret_pct: float,
++    horizon: str = "4h",
++) -> int:
++    """Insert a decision AND its decision_labels row -- the production shape
++    resolve_challenger's regret rewrite reads from (T8: mean labeled regret,
++    not confidence parsed out of decision_details_json)."""
++    decision_id = _insert_decision(conn, agent_id, ts_iso, details)
++    conn.execute(
++        """INSERT INTO decision_labels
++               (decision_id, horizon, fwd_return_pct, max_runup_pct,
++                max_drawdown_pct, chosen_outcome_pct, best_action,
++                best_outcome_pct, regret_pct, labeled_at)
++           VALUES (?, ?, 0, 0, 0, 0, 'enter_long', 0, ?, ?)""",
++        (decision_id, horizon, regret_pct, ts_iso),
++    )
++    conn.commit()
++    return decision_id
++
++
++def _challenger_details(spec_version: int, incumbent_version: int) -> dict:
++    """Production shape logged by agents/decision_loop.py's shadow-challenger
++    block (ch_details in run_decision)."""
++    return {
++        "challenger_spec_version": spec_version,
++        "challenger_confidence": 0.8,
++        "challenger_action": "enter",
++        "challenger_asset": "SOL-PERP",
++        "challenger_evidence_strength": {"funding_term_challenger": 0.9},
++        "incumbent_spec_version": incumbent_version,
++    }
++
++
++def _incumbent_enter_details() -> dict:
++    """Production shape logged by agents/decision_loop.py's enter branch:
++    {"order": str(response), "fill": str(fill)} -- NO confidence key. This
++    is the exact shape that made the pre-T8 confidence-based
++    resolve_challenger always read 0.0 for the incumbent on live data."""
++    return {"order": "stub_order_repr", "fill": "stub_fill_repr"}
+ 
+ 
+ def _challenger_deployed_at(conn, agent_id: str, spec_version: int) -> str:
+     row = conn.execute(
+         """SELECT deployed_at FROM specs
+            WHERE agent_id = ? AND status = 'challenger' AND spec_version = ?
+            ORDER BY id DESC LIMIT 1""",
+         (agent_id, spec_version),
+     ).fetchone()
+     assert row is not None
+     return row["deployed_at"]
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Finding 3: resolve_challenger — direct coverage
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class TestResolveChallenger:
++    """T8 rewrite: resolve_challenger compares mean LABELED regret (joined
++    from decision_labels at the canonical 4h horizon), not confidence
++    parsed out of decision_details_json -- see resolve_challenger's
++    docstring for the horizon-policy rationale. Fixtures use the real
++    production row shapes (see _challenger_details / _incumbent_enter_details
++    above), not the old {"confidence": ...} shape production never writes."""
++
+     def test_promotion_path(self, conn):
+-        """Challenger's average confidence exceeds the incumbent's over the
+-        trial window → promoted, active_spec_version flips, incumbent goes
+-        inactive."""
++        """Challenger's mean labeled regret is LOWER than the incumbent's
++        over the trial window → promoted, active_spec_version flips,
++        incumbent goes inactive."""
+         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+ 
+         deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+ 
+         for i in range(2):
+-            _insert_decision(
++            _insert_labeled_decision(
+                 conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
+-                {"challenger_spec_version": 2, "challenger_confidence": 0.9},
++                _challenger_details(2, 1), regret_pct=0.4,
+             )
+-            _insert_decision(
++            _insert_labeled_decision(
+                 conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
+-                {"confidence": 0.3},
++                _incumbent_enter_details(), regret_pct=1.8,
+             )
+ 
+         result = resolve_challenger(conn, AGENT_ID)
+ 
+         assert result["verdict"] == "promoted"
+         assert result["challenger_version"] == 2
+         assert result["incumbent_version"] == 1
+-        assert result["challenger_avg_confidence"] == pytest.approx(0.9)
+-        assert result["incumbent_avg_confidence"] == pytest.approx(0.3)
+-        assert result["challenger_decisions"] == 2
+-        assert result["incumbent_decisions"] == 2
++        assert result["challenger_mean_regret"] == pytest.approx(0.4)
++        assert result["incumbent_mean_regret"] == pytest.approx(1.8)
++        assert result["challenger_labeled_decisions"] == 2
++        assert result["incumbent_labeled_decisions"] == 2
+ 
+         specs = {
+             r["spec_version"]: r["status"]
+             for r in conn.execute(
+                 "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+                 (AGENT_ID,),
+             ).fetchall()
+         }
+         assert specs[2] == "active"
+         assert specs[1] == "inactive"
+ 
+         agent = conn.execute(
+             "SELECT active_spec_version FROM agents WHERE id = ?", (AGENT_ID,)
+         ).fetchone()
+         assert agent["active_spec_version"] == 2
+ 
+     def test_rejection_path(self, conn):
+-        """Challenger's average confidence does NOT exceed the incumbent's
+-        → rejected, incumbent stays active, challenger goes inactive."""
++        """Challenger's mean labeled regret is NOT lower than the
++        incumbent's → rejected, incumbent stays active, challenger goes
++        inactive."""
+         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+ 
+         deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+ 
+-        _insert_decision(
++        _insert_labeled_decision(
+             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+-            {"challenger_spec_version": 2, "challenger_confidence": 0.2},
++            _challenger_details(2, 1), regret_pct=2.5,
+         )
+-        _insert_decision(
++        _insert_labeled_decision(
+             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+-            {"confidence": 0.5},
++            _incumbent_enter_details(), regret_pct=0.6,
+         )
+ 
+         result = resolve_challenger(conn, AGENT_ID)
+ 
+         assert result["verdict"] == "rejected"
+-        assert result["challenger_avg_confidence"] == pytest.approx(0.2)
+-        assert result["incumbent_avg_confidence"] == pytest.approx(0.5)
++        assert result["challenger_mean_regret"] == pytest.approx(2.5)
++        assert result["incumbent_mean_regret"] == pytest.approx(0.6)
+ 
+         specs = {
+             r["spec_version"]: r["status"]
+             for r in conn.execute(
+                 "SELECT spec_version, status FROM specs WHERE agent_id = ?",
+                 (AGENT_ID,),
+             ).fetchall()
+         }
+         assert specs[2] == "inactive"
+         assert specs[1] == "active"
+@@ -187,60 +241,206 @@ class TestResolveChallenger:
+         ).fetchone()
+         assert agent["active_spec_version"] == 1
+ 
+     def test_no_challenger_returns_no_challenger_verdict(self, conn):
+         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1))
+ 
+         result = resolve_challenger(conn, AGENT_ID)
+         assert result == {"verdict": "no_challenger"}
+ 
++    def test_not_resolvable_without_labels(self, conn):
++        """T8 deliverable 1: zero labeled decisions on either side must
++        never be promoted or rejected on zero evidence -- the spec rows are
++        left completely untouched so the trial can keep running until the
++        nightly labeling job catches up."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        # Decisions logged but never labeled (labeling job hasn't run yet).
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            _challenger_details(2, 1),
++        )
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            _incumbent_enter_details(),
++        )
++
++        result = resolve_challenger(conn, AGENT_ID)
++
++        assert result["verdict"] == "not_resolvable"
++        assert result["challenger_mean_regret"] is None
++        assert result["incumbent_mean_regret"] is None
++
++        specs = {
++            r["spec_version"]: r["status"]
++            for r in conn.execute(
++                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == "challenger"  # untouched -- not promoted or rejected
++        assert specs[1] == "active"      # untouched
++
++    # -----------------------------------------------------------------
++    # T8 review Finding 2: force_close (window-expiry force-resolution)
++    # -----------------------------------------------------------------
++
++    def test_force_close_with_zero_evidence_closes_trial_terminally(self, conn):
++        """force_close=True + zero evidence on one side -> verdict
++        'expired_no_signal' and the challenger spec row is force-closed to
++        'inactive' with a rejection_reason, instead of being left at
++        'challenger' (which is what happens without force_close -- see
++        test_not_resolvable_without_labels above)."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        _insert_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            _challenger_details(2, 1),
++        )  # unlabeled -- zero evidence
++
++        result = resolve_challenger(conn, AGENT_ID, force_close=True)
++
++        assert result["verdict"] == "expired_no_signal"
++        assert result["challenger_mean_regret"] is None
++        assert result["incumbent_mean_regret"] is None
++
++        specs = {
++            r["spec_version"]: (r["status"], r["rejection_reason"])
++            for r in conn.execute(
++                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2][0] == "inactive"
++        assert specs[2][1] is not None
++        assert specs[1][0] == "active"  # incumbent untouched
++
++    def test_force_close_does_not_alter_promotion_verdict(self, conn):
++        """(c) force_close=True must have NO effect when both sides have
++        evidence -- the ordinary promoted/rejected paths are unchanged."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        for i in range(2):
++            _insert_labeled_decision(
++                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
++                _challenger_details(2, 1), regret_pct=0.4,
++            )
++            _insert_labeled_decision(
++                conn, AGENT_ID, _iso(base + timedelta(seconds=i + 1)),
++                _incumbent_enter_details(), regret_pct=1.8,
++            )
++
++        result = resolve_challenger(conn, AGENT_ID, force_close=True)
++
++        assert result["verdict"] == "promoted"  # NOT "expired_no_signal"
++        assert result["challenger_mean_regret"] == pytest.approx(0.4)
++        assert result["incumbent_mean_regret"] == pytest.approx(1.8)
++
++        specs = {
++            r["spec_version"]: r["status"]
++            for r in conn.execute(
++                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == "active"
++        assert specs[1] == "inactive"
++
++    def test_force_close_does_not_alter_rejection_verdict(self, conn):
++        """(c) force_close=True must have NO effect on a genuine rejection
++        (both sides labeled, challenger loses)."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++        base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            _challenger_details(2, 1), regret_pct=2.5,
++        )
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
++            _incumbent_enter_details(), regret_pct=0.6,
++        )
++
++        result = resolve_challenger(conn, AGENT_ID, force_close=True)
++
++        assert result["verdict"] == "rejected"  # NOT "expired_no_signal"
++        specs = {
++            r["spec_version"]: r["status"]
++            for r in conn.execute(
++                "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == "inactive"
++        assert specs[1] == "active"
++
+     def test_pre_trial_incumbent_decisions_do_not_influence_outcome(self, conn):
+         """T6 review finding 3: resolve_challenger must scope BOTH sides of
+         the comparison to the challenger's trial window. A pre-trial
+         incumbent decision (logged under a prior spec version, before this
+         challenger was even deployed) must not be averaged in.
+ 
+         Rigged so the two possible answers disagree: including the
+-        pre-trial 0.99-confidence row would push the incumbent average
+-        above the challenger's and flip the verdict to "rejected"; properly
++        pre-trial near-zero-regret row would pull the incumbent average
++        below the challenger's and flip the verdict to "rejected"; properly
+         excluding it correctly promotes the challenger.
+         """
+         insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+         deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+ 
+         # Pre-trial incumbent decision, logged long before the challenger
+         # trial started.
+-        _insert_decision(
+-            conn, AGENT_ID, "2020-01-01T00:00:00Z", {"confidence": 0.99},
++        _insert_labeled_decision(
++            conn, AGENT_ID, "2020-01-01T00:00:00Z",
++            _incumbent_enter_details(), regret_pct=0.01,
+         )
+ 
+         deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
+         deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
+         base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
+ 
+         # In-trial-window decisions.
+-        _insert_decision(
++        _insert_labeled_decision(
+             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+-            {"challenger_spec_version": 2, "challenger_confidence": 0.5},
++            _challenger_details(2, 1), regret_pct=1.0,
+         )
+-        _insert_decision(
++        _insert_labeled_decision(
+             conn, AGENT_ID, _iso(base + timedelta(seconds=1)),
+-            {"confidence": 0.1},
++            _incumbent_enter_details(), regret_pct=1.5,
+         )
+ 
+         result = resolve_challenger(conn, AGENT_ID)
+ 
+-        # Only the in-window incumbent decision (0.1) counted -- the
+-        # pre-trial 0.99 row was excluded.
+-        assert result["incumbent_decisions"] == 1
+-        assert result["incumbent_avg_confidence"] == pytest.approx(0.1)
++        # Only the in-window incumbent decision (1.5) counted -- the
++        # pre-trial 0.01-regret row was excluded.
++        assert result["incumbent_labeled_decisions"] == 1
++        assert result["incumbent_mean_regret"] == pytest.approx(1.5)
+         assert result["verdict"] == "promoted"
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Finding 2: shadow-challenger block in agents/decision_loop.py
+ # ---------------------------------------------------------------------------
+ 
+ 
+ DECISION_AGENT_ID = "shadow_falcon"
+ 
+@@ -417,10 +617,163 @@ async def test_challenger_logs_without_trading(conn, tmp_path, monkeypatch):
+     assert "challenger_spec_version" not in incumbent_details
+     assert incumbent_row["decision_action"] == "enter"
+ 
+     # (c) The challenger decision never invoked the risk gate or the
+     # bridge -- exactly one call each, both attributable to the
+     # incumbent's real entry (not two, which would mean the challenger
+     # also reached execution).
+     assert gate_calls == [DECISION_AGENT_ID]
+     assert validate_calls == [1]
+     assert bridge_calls == [DECISION_AGENT_ID]
++
++
++# ---------------------------------------------------------------------------
++# T8 deliverable 7: named regression tests
++# ---------------------------------------------------------------------------
++
++
++def test_challenger_promotion_on_lower_regret(conn):
++    """A challenger with lower mean labeled regret over the trial window
++    becomes active; the incumbent is demoted to inactive."""
++    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++    deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++    deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++    deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++    base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++    for i in range(3):
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
++            _challenger_details(2, 1), regret_pct=0.5,
++        )
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
++            _incumbent_enter_details(), regret_pct=2.0,
++        )
++
++    result = resolve_challenger(conn, AGENT_ID)
++
++    assert result["verdict"] == "promoted"
++    assert result["challenger_mean_regret"] == pytest.approx(0.5)
++    assert result["incumbent_mean_regret"] == pytest.approx(2.0)
++
++    specs = {
++        r["spec_version"]: r["status"]
++        for r in conn.execute(
++            "SELECT spec_version, status FROM specs WHERE agent_id = ?",
++            (AGENT_ID,),
++        ).fetchall()
++    }
++    assert specs[2] == "active"
++    assert specs[1] == "inactive"
++
++    agent = conn.execute(
++        "SELECT active_spec_version FROM agents WHERE id = ?", (AGENT_ID,)
++    ).fetchone()
++    assert agent["active_spec_version"] == 2
++
++
++def test_challenger_rejection_resolves_hypotheses(conn):
++    """T8 deliverable 4: a losing challenger trial marks the cycle's
++    hypotheses falsified, with effect_observed recorded (not left null)."""
++    from agents.reflection import register_hypotheses, resolve_hypotheses
++
++    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++    deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++
++    cur = conn.execute(
++        "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
++        (AGENT_ID, "2026-01-02T00:00:00Z"),
++    )
++    reflection_id = cur.lastrowid
++    conn.commit()
++
++    hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++        {
++            "claim": "funding term improves entries",
++            "predicted_effect": "regret decreases",
++            "falsification_condition": "challenger trial shows no improvement",
++        },
++    ])
++    conn.execute(
++        "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
++    )
++    conn.commit()
++
++    deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++    deployed_at = _challenger_deployed_at(conn, AGENT_ID, 2)
++    base = datetime.fromisoformat(deployed_at.replace("Z", "+00:00"))
++
++    _insert_labeled_decision(
++        conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++        _challenger_details(2, 1), regret_pct=3.0,
++    )
++    _insert_labeled_decision(
++        conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++        _incumbent_enter_details(), regret_pct=0.5,
++    )
++
++    challenger_result = resolve_challenger(conn, AGENT_ID)
++    assert challenger_result["verdict"] == "rejected"
++
++    n = resolve_hypotheses(conn, reflection_id, challenger_result)
++    assert n == 1
++
++    row = conn.execute(
++        "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
++        (hyp_ids[0],),
++    ).fetchone()
++    assert row["status"] == "falsified"
++    assert row["effect_observed"] == pytest.approx(0.5 - 3.0)
++    assert row["resolved_at"] is not None
++
++
++# ---------------------------------------------------------------------------
++# T8 deliverable 2: scheduler-job wiring (ast-based, matches
++# tests/test_labeling.py::TestForgeSchedulerAbsorption's convention of
++# reading forge.py's source directly rather than importing the module).
++# ---------------------------------------------------------------------------
++
++
++class TestChallengerResolutionSchedulerWiring:
++    def _forge_source(self) -> str:
++        import pathlib
++
++        forge_py = pathlib.Path(__file__).resolve().parents[1] / "forge.py"
++        return forge_py.read_text(encoding="utf-8")
++
++    def test_challenger_resolution_job_registered(self):
++        source = self._forge_source()
++        assert 'id="challenger_resolution"' in source, (
++            "the M10 challenger-resolution scheduler job must be registered"
++            " in forge.py"
++        )
++
++    def test_challenger_resolution_job_invokes_check_and_resolve(self):
++        import ast
++
++        source = self._forge_source()
++        tree = ast.parse(source, filename="forge.py")
++
++        job_node = None
++        for node in ast.walk(tree):
++            if (
++                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
++                and node.name == "_run_challenger_resolution_job"
++            ):
++                job_node = node
++                break
++        assert job_node is not None, (
++            "_run_challenger_resolution_job not found in forge.py"
++        )
++
++        segment = ast.get_source_segment(source, job_node)
++        assert segment is not None
++        assert "check_challenger_resolution(" in segment, (
++            "expected the job to apply the min-decisions/max-days trigger"
++            " via agents.reflection.check_challenger_resolution"
++        )
++        assert "resolve_hypotheses(" in segment, (
++            "expected the job to resolve the cycle's hypotheses on"
++            " challenger resolution"
++        )
+diff --git a/tests/test_hypotheses.py b/tests/test_hypotheses.py
+new file mode 100644
+index 0000000..41ab009
+--- /dev/null
++++ b/tests/test_hypotheses.py
+@@ -0,0 +1,512 @@
++"""tests/test_hypotheses.py — M10 hypothesis registry lifecycle coverage.
++
++T8: wires the previously-dead functions in agents/reflection.py
++(register_hypotheses, resolve_hypotheses, get_agent_hypothesis_history,
++check_challenger_resolution) against production-shaped fixtures — the
++hypotheses table + decision_labels-driven challenger resolution, not the
++placeholder confidence comparison T8 replaces.
++"""
++from __future__ import annotations
++
++import json
++from datetime import datetime, timedelta
++
++import pytest
++
++from agents.reflection import (
++    check_challenger_resolution,
++    get_agent_hypothesis_history,
++    get_hypothesis_digest,
++    register_hypotheses,
++    resolve_hypotheses,
++)
++from backtest.dsl import EvidenceTerm, Spec, Threshold
++from store.db import insert_agent
++from store.specs import deploy_as_challenger, deploy_spec, resolve_challenger
++
++AGENT_ID = "hypo_agent"
++
++
++@pytest.fixture(autouse=True)
++def _redirect_specs_dir(tmp_path, monkeypatch):
++    """Never let a test write into the real agents/specs/ directory."""
++    import store.specs as specs_module
++
++    monkeypatch.setattr(specs_module, "SPECS_DIR", tmp_path / "specs")
++
++
++def _iso(dt: datetime) -> str:
++    return dt.isoformat().replace("+00:00", "Z")
++
++
++def _spec(agent_id: str, spec_version: int, direction: str = "long") -> Spec:
++    return Spec(
++        agent_id=agent_id,
++        spec_version=spec_version,
++        thesis_version=1,
++        universe_include=["SOL-PERP"],
++        regime_exclude=[],
++        direction=direction,
++        confidence_threshold=0.5,
++        scale_threshold=0.3,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term",
++                feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.6, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[],
++        stop_loss_pct=0.03,
++        take_profit_pct=0.06,
++        max_hold_hours=72,
++        leverage=3,
++        position_size_pct=0.10,
++    )
++
++
++def _insert_reflection(conn, agent_id: str, triggered_at: str = "2026-07-01T00:00:00Z") -> int:
++    cur = conn.execute(
++        "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
++        (agent_id, triggered_at),
++    )
++    conn.commit()
++    return cur.lastrowid
++
++
++def _insert_labeled_decision(
++    conn, agent_id: str, ts_iso: str, details: dict, regret_pct: float, horizon: str = "4h",
++) -> int:
++    cur = conn.execute(
++        """INSERT INTO decisions
++               (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++           VALUES (?, ?, 'enter', 'test', ?)""",
++        (agent_id, ts_iso, json.dumps(details)),
++    )
++    conn.commit()
++    decision_id = cur.lastrowid
++    conn.execute(
++        """INSERT INTO decision_labels
++               (decision_id, horizon, fwd_return_pct, max_runup_pct,
++                max_drawdown_pct, chosen_outcome_pct, best_action,
++                best_outcome_pct, regret_pct, labeled_at)
++           VALUES (?, ?, 0, 0, 0, 0, 'enter_long', 0, ?, ?)""",
++        (decision_id, horizon, regret_pct, ts_iso),
++    )
++    conn.commit()
++    return decision_id
++
++
++def _deployed_at_base(conn, agent_id: str) -> datetime:
++    row = conn.execute(
++        """SELECT deployed_at FROM specs
++           WHERE agent_id = ? AND status = 'challenger'
++           ORDER BY id DESC LIMIT 1""",
++        (agent_id,),
++    ).fetchone()
++    assert row is not None
++    return datetime.fromisoformat(row["deployed_at"].replace("Z", "+00:00"))
++
++
++# ---------------------------------------------------------------------------
++# test_registry_roundtrip
++# ---------------------------------------------------------------------------
++
++
++class TestRegistryRoundtrip:
++    def test_registry_roundtrip(self, conn):
++        """proposed -> challenger -> validated transitions persist with
++        timestamps and observed effects; re-resolving is a no-op."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++
++        reflection_id = _insert_reflection(conn, AGENT_ID)
++
++        ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {
++                "claim": "negative funding predicts short-term reversion",
++                "predicted_effect": "regret decreases when entering on funding<-0.001",
++                "falsification_condition": "challenger trial shows no regret improvement",
++            },
++        ])
++        assert len(ids) == 1
++        hyp_id = ids[0]
++
++        row = dict(conn.execute(
++            "SELECT * FROM hypotheses WHERE id = ?", (hyp_id,),
++        ).fetchone())
++        assert row["status"] == "proposed"
++        assert row["agent_id"] == AGENT_ID
++        assert row["reflection_id"] == reflection_id
++        assert row["resolved_at"] is None
++        assert row["effect_observed"] is None
++
++        history = get_agent_hypothesis_history(conn, AGENT_ID)
++        assert len(history) == 1
++        assert history[0]["claim"] == row["claim"]
++
++        # Deploy as challenger -- registry status moves to 'challenger', the
++        # transition run_reflection performs on a successful deploy.
++        conn.execute("UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_id,))
++        conn.commit()
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        # Challenger beats incumbent -> promoted.
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"challenger_spec_version": 2, "challenger_confidence": 0.8,
++             "incumbent_spec_version": 1}, regret_pct=0.4,
++        )
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"order": "stub", "fill": "stub"}, regret_pct=2.0,
++        )
++
++        challenger_result = resolve_challenger(conn, AGENT_ID)
++        assert challenger_result["verdict"] == "promoted"
++
++        n = resolve_hypotheses(conn, reflection_id, challenger_result)
++        assert n == 1
++
++        resolved = dict(conn.execute(
++            "SELECT * FROM hypotheses WHERE id = ?", (hyp_id,),
++        ).fetchone())
++        assert resolved["status"] == "validated"
++        assert resolved["effect_observed"] == pytest.approx(2.0 - 0.4)
++        assert resolved["resolved_at"] is not None
++
++        # Re-resolving is a no-op -- already-resolved hypotheses are excluded.
++        n2 = resolve_hypotheses(conn, reflection_id, challenger_result)
++        assert n2 == 0
++
++    def test_rejected_challenger_falsifies_all_cycle_hypotheses(self, conn):
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        reflection_id = _insert_reflection(conn, AGENT_ID)
++        ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {"claim": "c1", "predicted_effect": "e1"},
++            {"claim": "c2", "predicted_effect": "e2"},
++        ])
++        conn.executemany(
++            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?",
++            [(i,) for i in ids],
++        )
++        conn.commit()
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        base = _deployed_at_base(conn, AGENT_ID)
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"challenger_spec_version": 2, "incumbent_spec_version": 1}, regret_pct=3.0,
++        )
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"order": "stub", "fill": "stub"}, regret_pct=0.2,
++        )
++
++        result = resolve_challenger(conn, AGENT_ID)
++        assert result["verdict"] == "rejected"
++
++        n = resolve_hypotheses(conn, reflection_id, result)
++        assert n == 2
++        rows = conn.execute(
++            "SELECT status, effect_observed FROM hypotheses WHERE reflection_id = ?",
++            (reflection_id,),
++        ).fetchall()
++        for r in rows:
++            assert r["status"] == "falsified"
++            assert r["effect_observed"] == pytest.approx(0.2 - 3.0)
++
++    def test_not_resolvable_verdict_marks_inconclusive(self, conn):
++        """Window-expired-without-signal semantics: a 'not_resolvable'
++        challenger verdict (zero labels) resolves the cycle's hypotheses to
++        'inconclusive' rather than leaving them stuck forever."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        reflection_id = _insert_reflection(conn, AGENT_ID)
++        ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {"claim": "c1", "predicted_effect": "e1"},
++        ])
++        conn.execute(
++            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (ids[0],),
++        )
++        conn.commit()
++
++        n = resolve_hypotheses(conn, reflection_id, {"verdict": "not_resolvable"})
++        assert n == 1
++        row = conn.execute(
++            "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
++            (ids[0],),
++        ).fetchone()
++        assert row["status"] == "inconclusive"
++        assert row["effect_observed"] is None
++        assert row["resolved_at"] is not None
++
++
++# ---------------------------------------------------------------------------
++# check_challenger_resolution: labeled-decision counting
++# ---------------------------------------------------------------------------
++
++
++class TestCheckChallengerResolution:
++    def test_counts_only_labeled_decisions(self, conn):
++        """M10 spec: challenger_min_decisions must count LABELED decisions,
++        not raw shadow-log rows -- an unlabeled shadow row (the nightly
++        labeling job hasn't caught up yet) must not count toward the
++        threshold."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        # One labeled challenger decision...
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"challenger_spec_version": 2, "incumbent_spec_version": 1}, regret_pct=1.0,
++        )
++        # ...and one unlabeled one (must not count toward min_decisions=2).
++        conn.execute(
++            """INSERT INTO decisions
++                   (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++               VALUES (?, ?, 'enter', 'test', ?)""",
++            (
++                AGENT_ID, _iso(base + timedelta(minutes=2)),
++                json.dumps({"challenger_spec_version": 2, "incumbent_spec_version": 1}),
++            ),
++        )
++        conn.commit()
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 2, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is False
++        assert "1/2" in result["reason"]
++
++    def test_null_regret_pct_labeled_row_does_not_count(self, conn):
++        """T8 review Finding 3 (MINOR): the trigger's labeled-decision count
++        must agree with resolve_challenger's own regret-averaging loop,
++        which skips any decision_labels row with regret_pct IS NULL.
++        Before this fix the trigger counted such a row (only checking
++        horizon, not regret_pct), so it could claim enough evidence and
++        then immediately hit resolve_challenger's not_resolvable path on
++        the very next call."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        # Labeled at the canonical horizon, but regret_pct itself is NULL
++        # -- matches resolve_challenger's `if regret is None: continue`.
++        cur = conn.execute(
++            """INSERT INTO decisions
++                   (agent_id, timestamp, decision_action, decision_reason, decision_details_json)
++               VALUES (?, ?, 'enter', 'test', ?)""",
++            (
++                AGENT_ID, _iso(base + timedelta(minutes=1)),
++                json.dumps({"challenger_spec_version": 2, "incumbent_spec_version": 1}),
++            ),
++        )
++        decision_id = cur.lastrowid
++        conn.execute(
++            """INSERT INTO decision_labels
++                   (decision_id, horizon, fwd_return_pct, max_runup_pct,
++                    max_drawdown_pct, chosen_outcome_pct, best_action,
++                    best_outcome_pct, regret_pct, labeled_at)
++               VALUES (?, '4h', 0, 0, 0, 0, 'enter_long', 0, NULL, ?)""",
++            (decision_id, _iso(base + timedelta(minutes=1))),
++        )
++        conn.commit()
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is False
++        assert "0/1" in result["reason"]
++
++    def test_resolves_once_min_labeled_decisions_met(self, conn):
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        for i in range(2):
++            _insert_labeled_decision(
++                conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
++                {"challenger_spec_version": 2, "incumbent_spec_version": 1}, regret_pct=0.5,
++            )
++            _insert_labeled_decision(
++                conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
++                {"order": "stub", "fill": "stub"}, regret_pct=2.0,
++            )
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 2, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is True
++        assert result["verdict"] == "promoted"
++
++    def test_no_active_challenger_not_resolved(self, conn):
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
++        )
++        assert result == {"resolved": False, "reason": "no active challenger"}
++
++
++# ---------------------------------------------------------------------------
++# T8 review Finding 2: window-expiry desync -- hypothesis status must never
++# go terminal while the trial is still live. Three pinned behaviors:
++#   (a) pre-expiry not_resolvable -> nothing changes anywhere
++#   (b) post-expiry (max_days elapsed) not_resolvable -> trial closed
++#       terminally + hypotheses inconclusive with effect_observed/resolved_at
++#   (c) existing promoted/rejected paths unchanged (see test_challenger.py)
++# ---------------------------------------------------------------------------
++
++
++class TestWindowExpiryDesync:
++    def test_pre_expiry_not_resolvable_leaves_everything_untouched(self, conn):
++        """(a) The min_decisions threshold can fire on the challenger side
++        alone while the incumbent side still has zero labeled decisions and
++        max_days hasn't elapsed. That is NOT a window expiry -- the trial
++        is genuinely still in progress, so check_challenger_resolution must
++        report unresolved and touch neither the spec row nor any
++        hypotheses."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        reflection_id = _insert_reflection(conn, AGENT_ID)
++        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {"claim": "c1", "predicted_effect": "e1"},
++        ])
++        conn.execute(
++            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
++        )
++        conn.commit()
++
++        # Challenger side clears min_decisions=2; incumbent side has zero
++        # labeled decisions. deployed_at is "now" so days_elapsed ~ 0,
++        # nowhere near max_days=7.
++        for i in range(2):
++            _insert_labeled_decision(
++                conn, AGENT_ID, _iso(base + timedelta(minutes=i + 1)),
++                {"challenger_spec_version": 2, "incumbent_spec_version": 1}, regret_pct=0.5,
++            )
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 2, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is False
++
++        specs = {
++            r["spec_version"]: (r["status"], r["rejection_reason"])
++            for r in conn.execute(
++                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2] == ("challenger", None)  # untouched
++        assert specs[1][0] == "active"           # untouched
++
++        hyp = conn.execute(
++            "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
++            (hyp_ids[0],),
++        ).fetchone()
++        assert hyp["status"] == "challenger"     # untouched
++        assert hyp["effect_observed"] is None
++        assert hyp["resolved_at"] is None
++
++    def test_post_expiry_not_resolvable_closes_trial_and_hypotheses(self, conn):
++        """(b) max_days has elapsed with zero labeled decisions on the
++        incumbent side -- check_challenger_resolution must force-close the
++        trial (challenger spec row -> terminal 'inactive', with a
++        rejection_reason recorded) AND report resolved=True so the caller
++        (forge.py's hourly job) resolves the cycle's hypotheses to
++        'inconclusive' with effect_observed/resolved_at set -- never
++        leaving a terminal hypothesis desynced from a still-'challenger'
++        spec row."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++
++        # Backdate deployed_at well past max_days=7, with zero labeled
++        # decisions on either side (labeling job never caught up). Must
++        # stay timezone-aware ("Z" suffix) -- check_challenger_resolution
++        # silently treats a naive/unparseable deployed_at as
++        # days_elapsed=0.0 (caught ValueError/TypeError), which would
++        # defeat this test's whole premise.
++        base = _deployed_at_base(conn, AGENT_ID)
++        old_ts = _iso(base - timedelta(days=10))
++        conn.execute(
++            "UPDATE specs SET deployed_at = ? WHERE agent_id = ? AND status = 'challenger'",
++            (old_ts, AGENT_ID),
++        )
++        conn.commit()
++
++        reflection_id = _insert_reflection(conn, AGENT_ID)
++        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {"claim": "c1", "predicted_effect": "e1"},
++        ])
++        conn.execute(
++            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
++        )
++        conn.commit()
++
++        result = check_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is True
++        assert result["verdict"] == "expired_no_signal"
++
++        specs = {
++            r["spec_version"]: (r["status"], r["rejection_reason"])
++            for r in conn.execute(
++                "SELECT spec_version, status, rejection_reason FROM specs WHERE agent_id = ?",
++                (AGENT_ID,),
++            ).fetchall()
++        }
++        assert specs[2][0] == "inactive"          # trial closed terminally
++        assert specs[2][1] is not None            # reason recorded
++        assert specs[1][0] == "active"            # incumbent untouched
++
++        # Mirrors forge.py's hourly job: resolve the cycle's hypotheses
++        # using this result.
++        n = resolve_hypotheses(conn, reflection_id, result)
++        assert n == 1
++        hyp = conn.execute(
++            "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
++            (hyp_ids[0],),
++        ).fetchone()
++        assert hyp["status"] == "inconclusive"
++        assert hyp["effect_observed"] is None
++        assert hyp["resolved_at"] is not None
++
++
++# ---------------------------------------------------------------------------
++# get_hypothesis_digest — light coverage (wired for testability; no
++# production call site is added by T8, see t8-report.md).
++# ---------------------------------------------------------------------------
++
++
++def test_get_hypothesis_digest_lists_recent_claims(conn):
++    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++    reflection_id = _insert_reflection(conn, AGENT_ID)
++    register_hypotheses(conn, AGENT_ID, reflection_id, [
++        {
++            "claim": "funding drives reversion",
++            "predicted_effect": "e",
++            "feature": "funding",
++            "direction": "down",
++        },
++    ])
++    digest = get_hypothesis_digest(conn)
++    assert "funding drives reversion" in digest
++    assert "PROPOSED" in digest
+diff --git a/tests/test_reflection.py b/tests/test_reflection.py
+index 2704018..bf026cc 100644
+--- a/tests/test_reflection.py
++++ b/tests/test_reflection.py
+@@ -689,20 +689,73 @@ class TestEndToEndReflection:
+             (AGENT_ID,),
+         ).fetchone()
+         assert active is not None
+         assert active["spec_version"] == 1
+ 
+         # v2 deployed as challenger, not active.
+         challenger = get_challenger_spec(conn, AGENT_ID)
+         assert challenger is not None
+         assert challenger.spec_version == 2
+ 
++    def test_full_cycle_registers_and_transitions_hypotheses(self, conn, monkeypatch, tmp_path):
++        """T8 deliverable 3: Stage A's parsed hypotheses are persisted
++        (status 'proposed', linked to the reflection row) the moment
++        Diagnose runs, and move to 'challenger' once the cycle's proposal
++        deploys as a challenger."""
++        _setup_agent(conn)
++        _deploy_initial_spec(conn)
++        _insert_trades(conn, 35)
++
++        monkeypatch.setattr(
++            reflection_module, "run_walk_forward",
++            lambda *a, **k: _passing_wf_report(),
++        )
++
++        diagnose_with_hypotheses = (
++            _DIAGNOSE_RESPONSE + "\n\n"
++            '```json\n{"hypotheses": [\n'
++            '  {"claim": "funding_zscore > 1.5 predicts short-term reversion",\n'
++            '   "evidence_refs": ["regret_decision_12"],\n'
++            '   "predicted_effect": "regret decreases by 0.5pp",\n'
++            '   "falsification_condition": "no regret improvement in trial"}\n'
++            "]}\n```\n"
++        )
++        llm = _make_llm(
++            diagnose_with_hypotheses,
++            _valid_spec_yaml(version=2),
++            "No critical flaws found.",
++        )
++        config = {
++            "desk": {"max_leverage": 10, "max_position_size_pct": 0.5},
++            "ledger_dir": str(tmp_path / "ledger"),
++        }
++
++        cur = conn.execute(
++            "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, '2026-07-10T00:00:00Z')",
++            (AGENT_ID,),
++        )
++        reflection_id = cur.lastrowid
++        conn.commit()
++
++        result = run_reflection(conn, AGENT_ID, config, llm, reflection_id=reflection_id)
++        assert result.deployed is True, result.rejection_reason or result.blocked_by_gate
++
++        rows = conn.execute(
++            "SELECT claim, status, reflection_id, agent_id FROM hypotheses WHERE reflection_id = ?",
++            (reflection_id,),
++        ).fetchall()
++        assert len(rows) == 1
++        assert rows[0]["agent_id"] == AGENT_ID
++        assert rows[0]["claim"] == "funding_zscore > 1.5 predicts short-term reversion"
++        # Deployed as challenger -> hypothesis moved out of 'proposed'.
++        assert rows[0]["status"] == "challenger"
++
+     def test_llm_parse_failure_returns_error(self, conn):
+         """When the LLM transport is exhausted/raises mid-pipeline (Stage 1
+         Diagnose consumes the only queued response, then Stage 2 Propose
+         hits the mock's StopIteration), reflection is triggered but
+         gracefully rejected -- the exception must not escape run_reflection."""
+         _setup_agent(conn)
+         _insert_trades(conn, 25)
+         _deploy_initial_spec(conn)
+ 
+         llm = _make_llm("I don't want to output YAML. Here's a plain text analysis instead.")
+diff --git a/tests/test_web_actions.py b/tests/test_web_actions.py
+index 175a2cf..5ef7f04 100644
+--- a/tests/test_web_actions.py
++++ b/tests/test_web_actions.py
+@@ -13,20 +13,21 @@ Covers all 8 exec endpoints plus the close-position endpoint:
+ 
+ Every exec action requires ``?reason=...`` and each writes an audit_log row.
+ """
+ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from unittest.mock import patch, MagicMock
+ 
+ import pytest
+ from fastapi.testclient import TestClient
+ 
++from agents.reflection import ReflectionResult
+ from store.db import (
+     insert_agent,
+     insert_account_snapshot,
+     insert_trade,
+     insert_position,
+ )
+ from market.heartbeat import write_heartbeat
+ from web.app import app
+ 
+ AGENT_ID = "jade_hawk"
+@@ -55,20 +56,43 @@ def _seed_agent(conn, agent_id=AGENT_ID, status="active") -> None:
+     if status != "active":
+         conn.execute("UPDATE agents SET status = ? WHERE id = ?", (status, agent_id))
+         conn.commit()
+     insert_account_snapshot(conn, agent_id, "paper", 50000.0, 50000.0)
+ 
+ 
+ def _count_audit_log(conn) -> int:
+     return conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+ 
+ 
++def _stub_reflection_result(**overrides) -> ReflectionResult:
++    """A ReflectionResult stand-in for mocking agents.reflection.run_reflection.
++
++    The trigger endpoints now route through
++    meta.reflection_scheduler.run_reflection_cycle (T8 review Finding 1),
++    which post-processes the real return value (result.deployed,
++    result.gates_passed, etc.) -- a bare ``None``/MagicMock mock return no
++    longer works, so tests need a real ReflectionResult shape.
++    """
++    fields = dict(
++        triggered=False,
++        new_spec_yaml=None,
++        spec_version=None,
++        deployed=False,
++        rejection_reason=None,
++        blocked_by_gate=None,
++        adversarial_flaws=[],
++        gates_passed=[],
++    )
++    fields.update(overrides)
++    return ReflectionResult(**fields)
++
++
+ def _iso(hours_ago: float = 0) -> str:
+     return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime(
+         "%Y-%m-%dT%H:%M:%SZ"
+     )
+ 
+ 
+ def _seed_closed_trades(conn, agent_id, n, hours_ago=1) -> None:
+     """n closed winning trades, patterned on tests/test_meta_controller.py's
+     _seed_trades -- entry_timestamp is always relative to now() so these
+     fixtures don't age past meta/evaluator.py's zero-trades-in-5-days rule."""
+@@ -172,36 +196,97 @@ def test_close_position_not_found(conn):
+ # ---------------------------------------------------------------------------
+ # Trigger reflection
+ # ---------------------------------------------------------------------------
+ 
+ class TestTriggerReflection:
+ 
+     def test_success(self, conn):
+         _seed_agent(conn)
+         client = _client(conn)
+         app.state.llm_fn = MagicMock()
+-        with patch("web.app.run_reflection") as mock_run:
+-            mock_run.return_value = None
++        with patch("agents.reflection.run_reflection") as mock_run:
++            mock_run.return_value = _stub_reflection_result()
+             r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
+         assert r.status_code == 200
+         data = r.json()
+         assert data["ok"] is True
+         assert "detail" in data
+         mock_run.assert_called_once()
+ 
+         # Audit-log verification
+         assert _count_audit_log(conn) == 1
+         row = conn.execute("SELECT * FROM audit_log").fetchone()
+         assert row["action"] == "trigger_reflection"
+         assert row["agent_id"] == AGENT_ID
+         assert row["reason"] == "test"
+ 
++        # T8 review Finding 1: the endpoint must create its own reflections
++        # row (via run_reflection_cycle) so any hypotheses this cycle
++        # registers carry a non-null reflection_id.
++        refl_row = conn.execute(
++            "SELECT id FROM reflections WHERE agent_id = ?", (AGENT_ID,),
++        ).fetchone()
++        assert refl_row is not None
++
++    def test_web_triggered_challenger_deploy_yields_resolvable_hypotheses(self, conn):
++        """T8 review Finding 1 (IMPORTANT): before this fix, web/app.py's
++        trigger endpoints called agents.reflection.run_reflection directly
++        without ever inserting a reflections row, so hypotheses registered
++        during a web-triggered cycle got reflection_id=NULL. forge.py's
++        hourly challenger-resolution job filters
++        ``AND reflection_id IS NOT NULL`` (forge.py ~line 618), so a
++        challenger deployed via this endpoint could never resolve --
++        hypotheses stuck in 'challenger' forever.
++
++        This drives the real /api/exec/trigger-reflection/{agent_id}
++        endpoint (only the LLM pipeline internals are stubbed) and asserts
++        the SAME SQL SHAPE forge.py's job uses finds the hypotheses this
++        cycle registered."""
++        from agents.reflection import register_hypotheses
++
++        _seed_agent(conn)
++
++        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
++            # Mirrors what the real Stage-A/deploy pipeline does: register
++            # a hypothesis against the reflection_id the caller created,
++            # then move it to 'challenger' once the cycle's proposal
++            # deploys -- the exact state the forge.py hourly resolution
++            # job scans for.
++            hyp_ids = register_hypotheses(conn, agent_id, reflection_id, [
++                {"claim": "funding term improves entries", "predicted_effect": "regret decreases"},
++            ])
++            conn.execute(
++                "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
++            )
++            conn.commit()
++            return _stub_reflection_result(triggered=True, deployed=True, spec_version=2)
++
++        client = _client(conn)
++        app.state.llm_fn = MagicMock()
++
++        with patch("agents.reflection.run_reflection", side_effect=_fake_run_reflection):
++            r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
++        assert r.status_code == 200
++
++        # Same SQL shape as forge.py's _run_challenger_resolution_job.
++        rows = conn.execute(
++            """SELECT DISTINCT reflection_id FROM hypotheses
++               WHERE agent_id = ? AND status = 'challenger'
++                 AND reflection_id IS NOT NULL""",
++            (AGENT_ID,),
++        ).fetchall()
++        assert len(rows) == 1, (
++            "web-triggered challenger hypotheses must carry a non-null "
++            "reflection_id findable by the forge resolution job's query"
++        )
++        assert rows[0]["reflection_id"] is not None
++
+     def test_missing_reason(self, conn):
+         _seed_agent(conn)
+         app.state.llm_fn = MagicMock()
+         r = _client(conn).post(f"/api/exec/trigger-reflection/{AGENT_ID}")
+         _assert_missing_reason(r)
+ 
+     def test_agent_not_found(self, conn):
+         r = _client(conn).post("/api/exec/trigger-reflection/ghost?reason=test")
+         assert r.status_code == 404
+         assert "Agent not found" in r.json().get("error", "")
+@@ -327,33 +412,36 @@ class TestTriggerAllReflections:
+ 
+         # eligible_agent clears the default trade_count trigger (interval 20)
+         _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1)
+         # benchmark_random_walk also clears the trigger by trade count alone,
+         # but must still be skipped -- benchmarks never reflect.
+         _seed_closed_trades(conn, "benchmark_random_walk", n=20, hours_ago=1)
+         # ineligible_agent has zero closed trades -> trades_since=0 < 20
+ 
+         fake_llm = MagicMock(return_value="")
+ 
+-        def _fake_run_reflection(conn, agent_id, config, llm_fn):
++        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
+             # Mirrors the real run_reflection/llm_fn contract (Task 1): the
+             # pipeline calls llm_fn(system_prompt, user_prompt) internally.
+             # agents/reflection.py internals are out of scope for this task,
+             # so this stands in for the real pipeline while still exercising
+-            # the transport wiring end to end.
++            # the transport wiring end to end. Accepts reflection_id (now
++            # always supplied by run_reflection_cycle, T8 review Finding 1)
++            # and returns a real ReflectionResult since run_reflection_cycle
++            # post-processes the return value's fields.
+             llm_fn("system prompt", "user prompt")
+-            return None
++            return _stub_reflection_result(triggered=True)
+ 
+         client = _client(conn)
+         app.state.llm_fn = fake_llm
+ 
+-        with patch("web.app.run_reflection", side_effect=_fake_run_reflection) as mock_run:
++        with patch("agents.reflection.run_reflection", side_effect=_fake_run_reflection) as mock_run:
+             r = client.post("/api/exec/trigger-all-reflections?reason=test")
+ 
+         assert r.status_code == 200
+         data = r.json()
+         results = {row["agent_id"]: row for row in data["results"]}
+ 
+         assert results["eligible_agent"]["status"] == "queued"
+         assert results["ineligible_agent"]["status"] == "skipped"
+         assert "20" in results["ineligible_agent"]["reason"]
+         assert results["benchmark_random_walk"]["status"] == "skipped"
+@@ -381,22 +469,22 @@ def test_reflect_endpoint_has_llm_fn(conn):
+     test_scheduler_uses_reflection_transport: with forge's startup wiring in
+     place (app.state.llm_fn = llm.reflection_client.complete, set up the same
+     way forge.py does it), /api/exec/trigger-reflection/{agent_id} must not
+     return 503."""
+     _seed_agent(conn)
+     client = _client(conn)
+ 
+     from llm import reflection_client
+     app.state.llm_fn = reflection_client.complete
+ 
+-    with patch("web.app.run_reflection") as mock_run:
+-        mock_run.return_value = None
++    with patch("agents.reflection.run_reflection") as mock_run:
++        mock_run.return_value = _stub_reflection_result()
+         r = client.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=test")
+ 
+     assert r.status_code == 200
+     assert r.status_code != 503
+ 
+     # Source-level belt-and-braces: forge.py's startup literally wires
+     # app.state.llm_fn to reflection_client.complete. Read the source instead
+     # of importing forge.py, which imports apscheduler (not installed in this
+     # Python env -- see CLAUDE.md's Local LLM server notes).
+     forge_source = (Path(__file__).resolve().parents[1] / "forge.py").read_text(
+@@ -691,21 +779,21 @@ class TestEmergencyStop:
+ # ---------------------------------------------------------------------------
+ 
+ class TestAuditLog:
+ 
+     def test_multiple_actions_all_logged(self, conn):
+         """Call several different exec actions and verify all create audit rows."""
+         _seed_agent(conn, status="active")
+         c = _client(conn)
+         app.state.llm_fn = MagicMock()
+ 
+-        with patch("web.app.run_reflection"):
++        with patch("agents.reflection.run_reflection", return_value=_stub_reflection_result()):
+             c.post(f"/api/exec/trigger-reflection/{AGENT_ID}?reason=reflect_now")
+         c.post(f"/api/exec/trigger-evaluation/{AGENT_ID}?reason=eval_now")
+         c.post(f"/api/exec/disable-entries/{AGENT_ID}?reason=stop_entries")
+         c.post(f"/api/exec/demote-agent/{AGENT_ID}?reason=demote_now")
+         c.post("/api/exec/emergency-stop?reason=panic")
+ 
+         rows = conn.execute(
+             "SELECT action, reason FROM audit_log ORDER BY id"
+         ).fetchall()
+         assert len(rows) == 5
+diff --git a/tests/test_web_agent_detail.py b/tests/test_web_agent_detail.py
+index 95f673e..23ab185 100644
+--- a/tests/test_web_agent_detail.py
++++ b/tests/test_web_agent_detail.py
+@@ -1,11 +1,13 @@
+ """Tests for the agent detail page's spec diff view and calibration report."""
++import json
++
+ from fastapi.testclient import TestClient
+ 
+ from store.db import insert_agent, insert_trade
+ from web.app import app
+ 
+ AGENT_ID = "jade_hawk"
+ 
+ 
+ def _client(conn) -> TestClient:
+     app.state.conn = conn
+@@ -103,10 +105,54 @@ def test_agent_detail_calibration_report_buckets_and_win_rate(conn):
+     _insert_closed_trade(conn, "t2", 0.68, "loss")
+     _insert_closed_trade(conn, "t3", 0.85, "win")
+     r = _client(conn).get(f"/agents/{AGENT_ID}")
+     assert r.status_code == 200
+     assert "0.6-0.7" in r.text
+     assert "0.8-0.9" in r.text
+     # bucket 0.6-0.7 has 2 trades, 1 win -> 50.0%
+     assert "50.0%" in r.text
+     # bucket 0.8-0.9 has 1 trade, 1 win -> 100.0%
+     assert "100.0%" in r.text
++
++
++def test_agent_detail_no_reflections_shows_graceful_state(conn):
++    _seed_agent(conn)
++    r = _client(conn).get(f"/agents/{AGENT_ID}")
++    assert r.status_code == 200
++    assert "No reflection cycles recorded yet" in r.text
++
++
++def test_agent_detail_reflection_cycle_shows_digest_diff_and_hypotheses(conn):
++    """M10 'Done when': the agent page shows the dossier digest, hypothesis
++    outcomes, and thesis/spec diffs for the cycle."""
++    _seed_agent(conn)
++    cur = conn.execute(
++        """INSERT INTO reflections
++               (agent_id, triggered_at, outcome, research_findings_json, proposed_changes)
++           VALUES (?, ?, ?, ?, ?)""",
++        (
++            AGENT_ID, "2026-07-10T00:00:00Z", "deployed",
++            json.dumps({"closed_trades": 25, "regimes": ["trending"]}),
++            json.dumps({"spec_diff_summary": {"from_version": 1, "to_version": 2}}),
++        ),
++    )
++    reflection_id = cur.lastrowid
++    conn.execute(
++        """INSERT INTO hypotheses
++               (agent_id, reflection_id, claim, predicted_effect, status,
++                effect_observed, created_at, resolved_at)
++           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
++        (
++            AGENT_ID, reflection_id, "funding term improves entries",
++            "regret decreases", "validated", 1.5,
++            "2026-07-10T00:00:00Z", "2026-07-12T00:00:00Z",
++        ),
++    )
++    conn.commit()
++
++    r = _client(conn).get(f"/agents/{AGENT_ID}")
++    assert r.status_code == 200
++    assert "Reflection Cycles" in r.text
++    assert "funding term improves entries" in r.text
++    assert "VALIDATED" in r.text
++    assert "closed_trades" in r.text  # dossier digest JSON rendered
++    assert "spec_diff_summary" in r.text  # thesis/spec diff JSON rendered
+diff --git a/web/app.py b/web/app.py
+index 6601058..c05eaa5 100644
+--- a/web/app.py
++++ b/web/app.py
+@@ -10,24 +10,28 @@ from fastapi.concurrency import run_in_threadpool
+ from fastapi.responses import HTMLResponse, JSONResponse
+ from fastapi.templating import Jinja2Templates
+ from fastapi.staticfiles import StaticFiles
+ 
+ from market.heartbeat import (
+     DEFAULT_HEARTBEAT_PATH,
+     heartbeat_max_age_seconds,
+     read_heartbeat,
+     read_heartbeat_or_none,
+ )
+-from agents.reflection import compute_calibration_curve, run_reflection
++from agents.reflection import compute_calibration_curve
+ from meta.controller import evaluate_agent
+ from meta.evaluator import get_lifecycle_decision, get_null_metrics
+-from meta.reflection_scheduler import check_agent_eligible, get_reflection_trigger
++from meta.reflection_scheduler import (
++    check_agent_eligible,
++    get_reflection_trigger,
++    run_reflection_cycle,
++)
+ from store.performance import compute_metrics
+ from store.query import query_trades, count_trades, get_trade
+ from store import settings as settings_store
+ from store.specs import get_spec_history
+ from store.counterfactuals import get_counterfactual_coverage
+ from meta.labeling import get_labeling_coverage
+ from execution.paper_bridge import PaperBridge
+ from meta.head_of_desk import (
+     compose_chat_answer,
+     generate_morning_brief,
+@@ -644,42 +648,95 @@ async def agent_detail(request: Request, name: str):
+     thesis_version = agent.get("current_thesis_version", 1)
+     thesis_path = Path("agents/theses") / f"{aid}_v{thesis_version}.md"
+     try:
+         thesis_text = thesis_path.read_text(encoding="utf-8")
+     except FileNotFoundError:
+         thesis_text = "Thesis file not found."
+ 
+     spec_history = get_spec_history(conn, aid)
+     spec_diff = _spec_diff(spec_history)
+     calibration = compute_calibration_curve(conn, aid)
++    reflection_cycles = _get_reflection_cycles(conn, aid)
+ 
+     return templates.TemplateResponse(
+         "agent_detail.html",
+         {
+             "request": request,
+             "agent": agent,
+             "account": account_dict,
+             "max_drawdown": max_dd,
+             "metrics": metrics,
+             "open_positions": [dict(p) for p in open_positions],
+             "trade_history": [dict(t) for t in trade_history],
+             "thesis_version": thesis_version,
+             "thesis_text": thesis_text,
+             "data_source": data_source,
+             "exchange_ok": exchange_ok,
+             "spec_history": spec_history,
+             "spec_diff": spec_diff,
+             "calibration": calibration,
++            "reflection_cycles": reflection_cycles,
+         },
+     )
+ 
+ 
++def _get_reflection_cycles(conn, agent_id: str, limit: int = 10) -> list[dict]:
++    """Recent reflection cycles for the agent-detail page (M10 "Done when":
++    the agent page must show the dossier digest, hypothesis outcomes, and
++    thesis/spec diffs for the cycle) -- the dossier digest is
++    reflections.research_findings_json, the thesis/spec diff is
++    reflections.proposed_changes (hypotheses + diff summaries written by
++    agents/reflection.py::run_reflection), and hypothesis outcomes are the
++    hypotheses table rows linked back to each reflection_id."""
++    rows = conn.execute(
++        """SELECT id, triggered_at, outcome, rejection_reason, evidence_summary,
++                  research_findings_json, proposed_changes, adversarial_critique,
++                  holdout_result
++           FROM reflections
++           WHERE agent_id = ?
++           ORDER BY id DESC LIMIT ?""",
++        (agent_id, limit),
++    ).fetchall()
++
++    cycles: list[dict] = []
++    for r in rows:
++        cycle = dict(r)
++        try:
++            cycle["research_findings"] = (
++                _json.loads(cycle["research_findings_json"])
++                if cycle["research_findings_json"] else None
++            )
++        except (ValueError, TypeError):
++            cycle["research_findings"] = None
++        try:
++            cycle["proposed_changes_parsed"] = (
++                _json.loads(cycle["proposed_changes"])
++                if cycle["proposed_changes"] else None
++            )
++        except (ValueError, TypeError):
++            cycle["proposed_changes_parsed"] = None
++
++        hyp_rows = conn.execute(
++            """SELECT id, claim, feature, direction, predicted_effect,
++                      falsification_condition, status, effect_observed,
++                      created_at, resolved_at
++               FROM hypotheses
++               WHERE reflection_id = ?
++               ORDER BY id""",
++            (cycle["id"],),
++        ).fetchall()
++        cycle["hypotheses"] = [dict(h) for h in hyp_rows]
++        cycles.append(cycle)
++
++    return cycles
++
++
+ @app.get("/api/agents/{name}")
+ async def api_agent_detail(name: str):
+     conn = app.state.conn
+     agent = conn.execute("SELECT * FROM agents WHERE id = ?", (name,)).fetchone()
+     if not agent:
+         return JSONResponse({"error": "not found"}, status_code=404)
+     aid = agent["id"]
+     account = conn.execute(
+         "SELECT * FROM accounts WHERE agent_id = ? AND mode = 'paper' ORDER BY id DESC LIMIT 1",
+         (aid,),
+@@ -759,21 +816,29 @@ async def exec_trigger_reflection(agent_id: str, reason: str = Query(...)):
+     agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+     if not agent:
+         return JSONResponse({"error": "Agent not found"}, status_code=404)
+ 
+     agent_config = conn.execute("SELECT config_json FROM agents WHERE id = ?", (agent_id,)).fetchone()
+     agent_cfg = _json.loads(agent_config["config_json"]) if agent_config and agent_config["config_json"] else {}
+     llm_fn = getattr(app.state, "llm_fn", None)
+     if llm_fn is None:
+         return JSONResponse({"error": "LLM function not available"}, status_code=503)
+ 
+-    run_reflection(conn, agent_id, config, llm_fn)
++    # Routed through run_reflection_cycle (the same function forge.py's
++    # scheduler uses) rather than calling agents.reflection.run_reflection
++    # directly -- that function creates the reflections row this cycle
++    # writes into, so any hypotheses it registers carry a non-null
++    # reflection_id and are findable by forge.py's hourly
++    # challenger-resolution job. Before this fix, hypotheses registered via
++    # this endpoint had reflection_id = NULL and a deployed challenger
++    # could never resolve (T8 review Finding 1).
++    run_reflection_cycle(conn, agent_id, config, llm_fn)
+     _audit(conn, "trigger_reflection", agent_id, reason)
+     return {"ok": True, "detail": f"Reflection triggered for {agent_id}"}
+ 
+ 
+ @app.post("/api/exec/trigger-all-reflections")
+ async def exec_trigger_all_reflections(reason: str = Query(...)):
+     """Enqueue a reflection cycle for every candidate agent that
+     check_agent_eligible clears (M9 criterion 3). Runs each eligible agent's
+     reflection inline via app.state.llm_fn -- the same execution style as
+     the single-agent /api/exec/trigger-reflection/{agent_id} endpoint above,
+@@ -790,21 +855,25 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
+     ).fetchall()
+ 
+     results = []
+     for row in agents:
+         aid = row["id"]
+         eligible, ineligible_reason = check_agent_eligible(conn, aid, trigger)
+         if not eligible:
+             results.append({"agent_id": aid, "status": "skipped", "reason": ineligible_reason})
+             continue
+         try:
+-            run_reflection(conn, aid, config, llm_fn)
++            # See exec_trigger_reflection above: run_reflection_cycle
++            # creates the reflections row so this cycle's hypotheses stay
++            # resolvable (T8 review Finding 1). trigger-all-reflections is
++            # a documented production control path, not a debug path.
++            run_reflection_cycle(conn, aid, config, llm_fn)
+             _audit(conn, "trigger_reflection", aid, reason)
+             results.append({"agent_id": aid, "status": "queued"})
+         except Exception as exc:
+             logger.warning("Reflection failed for %s: %s", aid, exc)
+             results.append({"agent_id": aid, "status": "skipped", "reason": str(exc)})
+ 
+     return {"ok": True, "results": results}
+ 
+ 
+ @app.post("/api/exec/trigger-evaluation/{agent_id}")
+diff --git a/web/templates/agent_detail.html b/web/templates/agent_detail.html
+index 83d7eac..7dc9d6b 100644
+--- a/web/templates/agent_detail.html
++++ b/web/templates/agent_detail.html
+@@ -90,20 +90,21 @@
+ <div class="panel" style="height:200px;display:flex;align-items:center;justify-content:center;">
+   <span class="neutral">Equity chart (uPlot) — coming in template asset pipeline</span>
+ </div>
+ 
+ <!-- ═══ Tab System ═══ -->
+ <div class="tab-bar">
+   <button class="tab active" data-tab="perf">Performance</button>
+   <button class="tab" data-tab="thesis">Thesis v{{ thesis_version }}</button>
+   <button class="tab" data-tab="spec">Spec History</button>
+   <button class="tab" data-tab="cal">Calibration</button>
++  <button class="tab" data-tab="reflect">Reflection Cycles</button>
+ </div>
+ 
+ <!-- ── Performance Tab ── -->
+ <div class="tab-content active" id="tab-perf">
+   <table class="data-table">
+     <tr>
+       <th>Metric</th>
+       <th>All Time</th>
+       <th>Last 20</th>
+     </tr>
+@@ -222,20 +223,78 @@
+       <td>{{ row.count }}</td>
+       <td class="{{ 'win' if row.win_rate >= 0.5 else 'loss' }}">{{ "{:.1%}".format(row.win_rate) }}</td>
+     </tr>
+     {% endfor %}
+   </table>
+   {% else %}
+   <div class="neutral help-text">Not enough closed trades with recorded confidence yet to compute a calibration report.</div>
+   {% endif %}
+ </div>
+ 
++<!-- ── Reflection Cycles Tab ── -->
++<div class="tab-content" id="tab-reflect">
++  {% if reflection_cycles %}
++  {% for cycle in reflection_cycles %}
++  <div class="panel" style="margin-bottom:var(--space-lg);">
++    <div class="panel-header">
++      Cycle #{{ cycle.id }} — {{ cycle.triggered_at[:19] if cycle.triggered_at else '—' }}
++      <span class="badge badge-{{ cycle.outcome or 'pending' }}">{{ (cycle.outcome or 'PENDING').upper() }}</span>
++    </div>
++
++    {% if cycle.rejection_reason %}
++    <div class="neutral help-text">Rejection: {{ cycle.rejection_reason }}</div>
++    {% endif %}
++
++    <h4 class="section-header">Dossier Digest</h4>
++    {% if cycle.research_findings %}
++    <pre class="code-block">{{ cycle.research_findings | tojson(indent=2) }}</pre>
++    {% else %}
++    <div class="neutral help-text">No dossier digest recorded for this cycle.</div>
++    {% endif %}
++
++    <h4 class="section-header">Thesis / Spec Diff</h4>
++    {% if cycle.proposed_changes_parsed %}
++    <pre class="code-block">{{ cycle.proposed_changes_parsed | tojson(indent=2) }}</pre>
++    {% else %}
++    <div class="neutral help-text">No proposed changes recorded for this cycle.</div>
++    {% endif %}
++
++    <h4 class="section-header">Hypothesis Outcomes</h4>
++    {% if cycle.hypotheses %}
++    <table class="data-table">
++      <tr>
++        <th>Claim</th>
++        <th>Predicted Effect</th>
++        <th>Status</th>
++        <th>Effect Observed</th>
++        <th>Resolved</th>
++      </tr>
++      {% for h in cycle.hypotheses %}
++      <tr>
++        <td>{{ h.claim }}</td>
++        <td class="help-text">{{ h.predicted_effect or '—' }}</td>
++        <td><span class="badge badge-{{ h.status }}">{{ h.status.upper() }}</span></td>
++        <td>{{ "%.2f"|format(h.effect_observed) if h.effect_observed is not none else '—' }}</td>
++        <td class="help-text">{{ h.resolved_at[:19] if h.resolved_at else '—' }}</td>
++      </tr>
++      {% endfor %}
++    </table>
++    {% else %}
++    <div class="neutral help-text">No hypotheses registered for this cycle.</div>
++    {% endif %}
++  </div>
++  {% endfor %}
++  {% else %}
++  <div class="neutral help-text">No reflection cycles recorded yet for this agent.</div>
++  {% endif %}
++</div>
++
+ <!-- ═══ Open Positions ═══ -->
+ <h3 class="section-header">Open Positions</h3>
+ {% if open_positions %}
+ <table class="data-table">
+   <tr>
+     <th>Asset</th>
+     <th>Dir</th>
+     <th>Entry</th>
+     <th>SL</th>
+     <th>TP</th>

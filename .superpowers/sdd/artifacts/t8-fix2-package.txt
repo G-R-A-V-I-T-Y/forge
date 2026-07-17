@@ -1,0 +1,727 @@
+## Commits (c730a0a..fec1d49, code only)
+fec1d49 m10: T8 review fixes r2 — labelable shadow decisions, unconditional reflections.outcome
+
+## Stat
+ agents/decision_loop.py  |  42 +++++++
+ agents/reflection.py     |  78 +++++++++++++
+ forge.py                 |  50 ++++-----
+ tests/test_challenger.py | 278 +++++++++++++++++++++++++++++++++++++++++++++--
+ tests/test_hypotheses.py | 127 ++++++++++++++++++++++
+ 5 files changed, 537 insertions(+), 38 deletions(-)
+
+## Full diff (-U10)
+diff --git a/agents/decision_loop.py b/agents/decision_loop.py
+index 732d1ce..4d411ac 100644
+--- a/agents/decision_loop.py
++++ b/agents/decision_loop.py
+@@ -226,20 +226,62 @@ async def run_decision(
+                         ch_details: dict = {
+                             "challenger_spec_version": challenger_spec.spec_version,
+                             "challenger_confidence": ch_best_decision["confidence"],
+                             "challenger_action": ch_best_decision["action"],
+                             "challenger_asset": ch_best_asset,
+                             "challenger_evidence_strength": ch_best_decision.get(
+                                 "evidence_strength",
+                             ),
+                             "incumbent_spec_version": active_spec.spec_version,
+                         }
++                        # T8 review r2 Fix A: shadow rows must be labelable
++                        # by meta/labeling.py's extractors, which need an
++                        # "order" (enter) or "candidate" (wait) block with
++                        # asset/entry_price/SL/TP -- the challenger_* keys
++                        # alone were invisible to run_labeling_job, so no
++                        # decision_labels row was ever written for a shadow
++                        # decision and resolve_challenger's zero-evidence
++                        # guard fired on every live trial (never promoted).
++                        # The blocks mirror the incumbent's own shapes
++                        # exactly: "order" is a str() repr (like the enter
++                        # branch's str(response)), "candidate" is a plain
++                        # dict (like the compiled-wait branch above).
++                        # challenger_spec_version stays top-level -- it is
++                        # what resolve_challenger and the shadow-safety
++                        # test key on.
++                        ch_price = assets.get(ch_best_asset, {}).get("price", 0)
++                        if ch_price and ch_price > 0:
++                            ch_sl = (
++                                ch_price * (1 - challenger_spec.stop_loss_pct)
++                                if challenger_spec.direction == "long"
++                                else ch_price * (1 + challenger_spec.stop_loss_pct)
++                            )
++                            ch_tp = (
++                                ch_price * (1 + challenger_spec.take_profit_pct)
++                                if challenger_spec.direction == "long"
++                                else ch_price * (1 - challenger_spec.take_profit_pct)
++                            )
++                            shadow_ctx = {
++                                "asset": ch_best_asset,
++                                "direction": challenger_spec.direction,
++                                "entry_price": ch_price,
++                                "stop_loss_price": ch_sl,
++                                "take_profit_price": ch_tp,
++                                "confidence": ch_best_decision["confidence"],
++                                "max_hold_hours": getattr(
++                                    challenger_spec, "max_hold_hours", 48
++                                ),
++                            }
++                            if ch_best_decision["action"] == "enter":
++                                ch_details["order"] = str(shadow_ctx)
++                            else:
++                                ch_details["candidate"] = shadow_ctx
+                         log_decision(
+                             conn,
+                             agent_id,
+                             ch_best_decision["action"],
+                             f"challenger/v{challenger_spec.spec_version}"
+                             f" shadow on {ch_best_asset}",
+                             ch_details,
+                             confidence=ch_best_decision["confidence"],
+                             evidence_strength=ch_best_decision.get("evidence_strength"),
+                             model_used=f"compiled/v{challenger_spec.spec_version}",
+diff --git a/agents/reflection.py b/agents/reflection.py
+index 4e4bf3e..005be68 100644
+--- a/agents/reflection.py
++++ b/agents/reflection.py
+@@ -1954,10 +1954,88 @@ def check_challenger_resolution(
+         result["days_elapsed"] = round(days_elapsed, 1)
+         return result
+ 
+     return {
+         "resolved": False,
+         "reason": (
+             f"trial in progress: {challenger_labeled}/{min_decisions} labeled decisions, "
+             f"{days_elapsed:.1f}/{max_days} days"
+         ),
+     }
++
++
++def apply_challenger_resolution(
++    conn,
++    agent_id: str,
++    desk_config: dict,
++) -> dict:
++    """Run one full challenger-resolution pass for *agent_id* -- the
++    per-agent body of forge.py's hourly ``challenger_resolution`` job,
++    extracted here so it is importable and behaviorally testable (forge.py
++    imports apscheduler at module load, unavailable in the test env).
++
++    When :func:`check_challenger_resolution` reports the trial resolved,
++    performs the spec's TWO unconditional actions (FORGE_PROPOSAL.md:1183 --
++    "Either way the outcome lands in reflections AND resolves the cycle's
++    hypotheses"):
++
++    1. Resolves every reflection cycle whose hypotheses are still
++       ``status='challenger'`` for this agent (via
++       :func:`resolve_hypotheses`).
++    2. Writes ``reflections.outcome = "challenger_{verdict}"``. T8 review
++       r2 Fix B: this write is NOT gated on the cycle having registered
++       hypotheses -- a cycle with zero hypotheses (legacy pipeline path, or
++       Stage A parsed none) previously never got its outcome recorded and
++       showed PENDING on the agent page forever. When no hypothesis rows
++       link a reflection cycle to this trial, the outcome lands on the most
++       recent ``outcome='deployed'`` reflections row for the agent -- the
++       cycle that deployed this challenger (run_reflection_cycle writes
++       ``'deployed'`` on every successful challenger deploy, scheduled and
++       web-triggered alike).
++
++    Returns
++    -------
++    dict
++        :func:`check_challenger_resolution`'s result, unchanged.
++    """
++    result = check_challenger_resolution(conn, agent_id, desk_config)
++    if not result.get("resolved"):
++        return result
++
++    hyp_rows = conn.execute(
++        """SELECT DISTINCT reflection_id FROM hypotheses
++           WHERE agent_id = ? AND status = 'challenger'
++             AND reflection_id IS NOT NULL""",
++        (agent_id,),
++    ).fetchall()
++    reflection_ids = [hr["reflection_id"] for hr in hyp_rows]
++
++    for reflection_id in reflection_ids:
++        resolve_hypotheses(conn, reflection_id, result)
++
++    if not reflection_ids:
++        # Zero-hypotheses cycle: fall back to the reflections row that
++        # deployed this challenger.
++        row = conn.execute(
++            """SELECT id FROM reflections
++               WHERE agent_id = ? AND outcome = 'deployed'
++               ORDER BY id DESC LIMIT 1""",
++            (agent_id,),
++        ).fetchone()
++        if row is not None:
++            reflection_ids = [row["id"]]
++        else:
++            logger.warning(
++                "[%s] Challenger resolved (verdict=%s) but no reflections row "
++                "found to record the outcome on (no challenger-status "
++                "hypotheses and no 'deployed' reflection)",
++                agent_id, result.get("verdict"),
++            )
++
++    outcome = f"challenger_{result.get('verdict')}"
++    for reflection_id in reflection_ids:
++        conn.execute(
++            "UPDATE reflections SET outcome = ? WHERE id = ?",
++            (outcome, reflection_id),
++        )
++    conn.commit()
++    return result
+diff --git a/forge.py b/forge.py
+index 6d3f1b6..987e543 100644
+--- a/forge.py
++++ b/forge.py
+@@ -575,64 +575,52 @@ async def main():
+     scheduler.add_job(
+         _run_reflection_scheduler_job,
+         trigger=IntervalTrigger(minutes=30, timezone=timezone.utc),
+         id="reflection_scheduler",
+         replace_existing=True,
+     )
+     logger.info("Reflection scheduler job scheduled — runs every 30 min")
+ 
+     # ------------------------------------------------------------------
+     # M10: Challenger resolution (criterion 5+6) — for every agent with a
+-    # deployed challenger, applies the desk.challenger_min_decisions /
+-    # desk.challenger_max_days trigger (agents/reflection.py::
+-    # check_challenger_resolution, which now counts LABELED decisions) and,
+-    # once due, resolves the trial via store.specs.resolve_challenger (mean
+-    # labeled regret over the trial window) and the cycle's hypotheses via
+-    # agents/reflection.py::resolve_hypotheses, writing the outcome into the
+-    # reflections row that produced them. config["desk"] is read directly
+-    # (not .get) so a missing desk section fails loudly (logged) rather than
+-    # silently defaulting. Cheap and idempotent when nothing is due, so an
+-    # hourly cadence is plenty.
++    # deployed challenger, agents/reflection.py::apply_challenger_resolution
++    # applies the desk.challenger_min_decisions / desk.challenger_max_days
++    # trigger (check_challenger_resolution, which counts LABELED decisions)
++    # and, once due, resolves the trial via store.specs.resolve_challenger
++    # (mean labeled regret over the trial window), resolves the cycle's
++    # hypotheses via resolve_hypotheses, AND writes reflections.outcome
++    # unconditionally — including for cycles that registered zero
++    # hypotheses (T8 review r2 Fix B). The per-agent body lives in
++    # agents/reflection.py so it is testable without importing this module
++    # (apscheduler is not installed in the test env). config["desk"] is
++    # read directly (not .get) so a missing desk section fails loudly
++    # (logged) rather than silently defaulting. Cheap and idempotent when
++    # nothing is due, so an hourly cadence is plenty.
+     # ------------------------------------------------------------------
+     async def _run_challenger_resolution_job():
+         try:
+-            from agents.reflection import check_challenger_resolution, resolve_hypotheses
++            from agents.reflection import apply_challenger_resolution
+ 
+             conn = get_connection(str(DB_PATH))
+             try:
+                 desk_config = config["desk"]
+                 rows = conn.execute(
+                     "SELECT DISTINCT agent_id FROM specs WHERE status = 'challenger'"
+                 ).fetchall()
+                 for row in rows:
+                     agent_id = row["agent_id"]
+-                    result = check_challenger_resolution(conn, agent_id, desk_config)
+-                    if not result.get("resolved"):
+-                        continue
+-                    logger.info(
+-                        "Challenger resolution for %s: verdict=%s",
+-                        agent_id, result.get("verdict"),
+-                    )
+-                    hyp_rows = conn.execute(
+-                        """SELECT DISTINCT reflection_id FROM hypotheses
+-                           WHERE agent_id = ? AND status = 'challenger'
+-                             AND reflection_id IS NOT NULL""",
+-                        (agent_id,),
+-                    ).fetchall()
+-                    for hr in hyp_rows:
+-                        reflection_id = hr["reflection_id"]
+-                        resolve_hypotheses(conn, reflection_id, result)
+-                        conn.execute(
+-                            "UPDATE reflections SET outcome = ? WHERE id = ?",
+-                            (f"challenger_{result.get('verdict')}", reflection_id),
++                    result = apply_challenger_resolution(conn, agent_id, desk_config)
++                    if result.get("resolved"):
++                        logger.info(
++                            "Challenger resolution for %s: verdict=%s",
++                            agent_id, result.get("verdict"),
+                         )
+-                    conn.commit()
+             finally:
+                 conn.close()
+         except Exception:
+             logger.warning("Challenger resolution job failed", exc_info=True)
+ 
+     scheduler.add_job(
+         _run_challenger_resolution_job,
+         trigger=IntervalTrigger(hours=1, timezone=timezone.utc),
+         id="challenger_resolution",
+         replace_existing=True,
+diff --git a/tests/test_challenger.py b/tests/test_challenger.py
+index 03f744e..25023db 100644
+--- a/tests/test_challenger.py
++++ b/tests/test_challenger.py
+@@ -619,20 +619,280 @@ async def test_challenger_logs_without_trading(conn, tmp_path, monkeypatch):
+ 
+     # (c) The challenger decision never invoked the risk gate or the
+     # bridge -- exactly one call each, both attributable to the
+     # incumbent's real entry (not two, which would mean the challenger
+     # also reached execution).
+     assert gate_calls == [DECISION_AGENT_ID]
+     assert validate_calls == [1]
+     assert bridge_calls == [DECISION_AGENT_ID]
+ 
+ 
++# ---------------------------------------------------------------------------
++# T8 review r2 Fix A: shadow decisions must be labelable by the REAL
++# production pipeline. Before this fix, decision_loop.py's shadow block
++# logged only challenger_* keys -- meta/labeling.py's extractors (enter
++# needs "order", wait needs "candidate") returned None, so NO
++# decision_labels row was ever written for a shadow decision and every
++# live challenger trial ended not_resolvable/expired_no_signal, never
++# promoted. These tests run the actual decision loop + the actual
++# run_labeling_job over a synthetic candle ledger -- no direct
++# decision_labels inserts anywhere.
++# ---------------------------------------------------------------------------
++
++
++async def _run_real_shadow_cycle(conn, tmp_path, challenger_spec: Spec) -> None:
++    """Deploy incumbent v1 (long, enters on the stub heartbeat) plus
++    *challenger_spec* as v2, then run the REAL decision loop once so it
++    logs a genuine shadow decision row (and the incumbent's own row)."""
++    from agents.decision_loop import run_decision
++    from execution.paper_bridge import PaperBridge
++    from market.heartbeat import write_heartbeat
++    from market.provider import MarketProvider
++    from store.db import insert_account_snapshot
++
++    insert_agent(
++        conn, DECISION_AGENT_ID, DECISION_AGENT_ID, "2026-07-14T00:00:00Z",
++        json.dumps({"compiled": True}),
++    )
++    insert_account_snapshot(conn, DECISION_AGENT_ID, "paper", 50000.0, 50000.0)
++
++    incumbent = Spec(
++        agent_id=DECISION_AGENT_ID, spec_version=1, thesis_version=1,
++        universe_include=["SOL-PERP"], regime_exclude=[], direction="long",
++        confidence_threshold=0.5, scale_threshold=0.3,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term", feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.6, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
++        max_hold_hours=72, leverage=3, position_size_pct=0.10,
++    )
++    deploy_spec(conn, DECISION_AGENT_ID, incumbent)
++    deploy_as_challenger(conn, DECISION_AGENT_ID, challenger_spec)
++
++    heartbeat_path = str(tmp_path / "heartbeat.json")
++    write_heartbeat(heartbeat_path, _decision_loop_heartbeat_packet())
++    config = _decision_loop_config(heartbeat_path)
++
++    def sentinel_llm(sp, dp, **kw):
++        raise AssertionError("compiled agent must not call the LLM")
++
++    def bridge_factory(agent_id, conn_, provider_):
++        return PaperBridge(
++            agent_id=agent_id, conn=conn_, provider=provider_, config=config
++        )
++
++    provider = MarketProvider(config)
++    async with provider:
++        await run_decision(
++            agent_id=DECISION_AGENT_ID,
++            thesis_text="test thesis",
++            config=config,
++            conn=conn,
++            provider=provider,
++            llm_fn=sentinel_llm,
++            bridge_factory=bridge_factory,
++        )
++
++
++def _decision_loop_challenger_spec(
++    direction: str = "short",
++    confidence_threshold: float = 0.5,
++    scale_threshold: float = 0.3,
++) -> Spec:
++    return Spec(
++        agent_id=DECISION_AGENT_ID, spec_version=2, thesis_version=1,
++        universe_include=["SOL-PERP"], regime_exclude=[], direction=direction,
++        confidence_threshold=confidence_threshold, scale_threshold=scale_threshold,
++        evidence=[
++            EvidenceTerm(
++                name="funding_term_challenger", feature="funding",
++                thresholds=[
++                    Threshold(op="<", weight=0.9, value=-0.001),
++                    Threshold(op="else", weight=0.0),
++                ],
++                missing="skip",
++            ),
++        ],
++        secondary_evidence=[], stop_loss_pct=0.03, take_profit_pct=0.06,
++        max_hold_hours=72, leverage=3, position_size_pct=0.10,
++    )
++
++
++def _backdate_cycle_and_write_candles(conn, tmp_path, hours_back: int = 25) -> Path:
++    """Backdate this cycle's decision rows (and the challenger's
++    deployed_at) *hours_back* into the past, then write a synthetic
++    SOL-PERP 5m candle ledger from just before that point up to now --
++    so run_labeling_job's head-minus-24h cutoff makes the decisions
++    labelable at every horizon. Returns the ledger dir."""
++    from store.ledger import append_ledger_record
++
++    backdate = datetime.now(timezone.utc) - timedelta(hours=hours_back)
++    backdate_iso = _iso(backdate)
++    conn.execute(
++        "UPDATE decisions SET timestamp = ? WHERE agent_id = ?",
++        (backdate_iso, DECISION_AGENT_ID),
++    )
++    conn.execute(
++        """UPDATE specs SET deployed_at = ?
++           WHERE agent_id = ? AND status = 'challenger'""",
++        (_iso(backdate - timedelta(hours=1)), DECISION_AGENT_ID),
++    )
++    conn.commit()
++
++    ledger_dir = tmp_path / "ledger"
++    interval_ms = 5 * 60 * 1000
++    start = backdate - timedelta(minutes=30)
++    start_ms = int(start.timestamp() * 1000)
++    n_candles = (hours_back * 60 + 60) // 5  # covers backdate-30m .. ~now+30m
++    price = 145.20
++    for i in range(n_candles):
++        ts = start_ms + i * interval_ms
++        o = price
++        h = price * 1.002
++        l = price * 0.999
++        c = price * 1.0001
++        append_ledger_record(
++            "candles_5m",
++            {"ts": ts, "asset": "SOL-PERP", "o": o, "h": h, "l": l, "c": c, "v": 1000.0},
++            when=datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
++            ledger_dir=str(ledger_dir),
++        )
++        price = c
++    return ledger_dir
++
++
++def _shadow_decision_id(conn) -> int:
++    row = conn.execute(
++        """SELECT id FROM decisions
++           WHERE agent_id = ? AND decision_details_json LIKE '%challenger_spec_version%'""",
++        (DECISION_AGENT_ID,),
++    ).fetchone()
++    assert row is not None, "shadow decision row not logged"
++    return row["id"]
++
++
++@pytest.mark.asyncio
++async def test_enter_shadow_labelable_by_production_pipeline(conn, tmp_path):
++    """MANDATORY closing-the-hole test (Fix A): an enter-action shadow
++    decision logged by the REAL decision loop is labeled by the REAL
++    run_labeling_job (non-null regret_pct), and resolve_challenger then
++    sees challenger evidence -- the trial is resolvable end-to-end on
++    production-pipeline output alone."""
++    from meta.labeling import run_labeling_job
++
++    # Challenger confidence 0.9 >= threshold 0.5 -> enter-action shadow.
++    await _run_real_shadow_cycle(
++        conn, tmp_path, _decision_loop_challenger_spec(),
++    )
++    shadow_id = _shadow_decision_id(conn)
++    ledger_dir = _backdate_cycle_and_write_candles(conn, tmp_path)
++
++    result = run_labeling_job(conn, ledger_dir)
++    assert result["errors"] == 0
++
++    # (1) The shadow decision got a real decision_labels row with
++    # non-null regret_pct at the canonical resolution horizon.
++    label = conn.execute(
++        """SELECT regret_pct FROM decision_labels
++           WHERE decision_id = ? AND horizon = '4h'""",
++        (shadow_id,),
++    ).fetchone()
++    assert label is not None, (
++        "production labeling pipeline wrote no decision_labels row for the "
++        "shadow decision -- challenger trials can never resolve on live data"
++    )
++    assert label["regret_pct"] is not None
++
++    # (2) resolve_challenger sees challenger evidence produced entirely by
++    # the production pipeline -- no direct decision_labels inserts.
++    resolution = resolve_challenger(conn, DECISION_AGENT_ID)
++    assert resolution["challenger_labeled_decisions"] > 0
++    assert resolution["verdict"] in ("promoted", "rejected")
++
++
++@pytest.mark.asyncio
++async def test_wait_shadow_labelable_by_production_pipeline(conn, tmp_path):
++    """Fix A, wait-action variant: a challenger whose confidence lands
++    below its scale_threshold logs a wait-action shadow -- that row must
++    also be labelable by the real pipeline."""
++    from meta.labeling import run_labeling_job
++
++    # Challenger confidence 0.9 < scale_threshold 0.95 -> wait-action shadow.
++    await _run_real_shadow_cycle(
++        conn, tmp_path,
++        _decision_loop_challenger_spec(
++            confidence_threshold=0.95, scale_threshold=0.95,
++        ),
++    )
++    shadow_id = _shadow_decision_id(conn)
++    shadow_action = conn.execute(
++        "SELECT decision_action FROM decisions WHERE id = ?", (shadow_id,),
++    ).fetchone()["decision_action"]
++    assert shadow_action == "wait", "test premise: shadow must be a wait"
++
++    ledger_dir = _backdate_cycle_and_write_candles(conn, tmp_path)
++    result = run_labeling_job(conn, ledger_dir)
++    assert result["errors"] == 0
++
++    label = conn.execute(
++        """SELECT regret_pct FROM decision_labels
++           WHERE decision_id = ? AND horizon = '4h'""",
++        (shadow_id,),
++    ).fetchone()
++    assert label is not None
++    assert label["regret_pct"] is not None
++
++    resolution = resolve_challenger(conn, DECISION_AGENT_ID)
++    assert resolution["challenger_labeled_decisions"] > 0
++
++
++def test_legacy_shadow_shape_skipped_not_crashed(conn, tmp_path):
++    """Backward tolerance: shadow rows logged BEFORE the Fix A enrichment
++    (challenger_* keys only, no "order"/"candidate") must be skipped by
++    run_labeling_job -- zero labels, zero errors -- never crash the job."""
++    from meta.labeling import run_labeling_job
++    from store.ledger import append_ledger_record
++
++    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++
++    backdate = datetime.now(timezone.utc) - timedelta(hours=25)
++    _insert_decision(
++        conn, AGENT_ID, _iso(backdate),
++        _challenger_details(2, 1),  # the exact pre-fix shadow shape
++    )
++
++    # Minimal candle ledger so the job has a head and the row is eligible.
++    interval_ms = 5 * 60 * 1000
++    start_ms = int((backdate - timedelta(minutes=30)).timestamp() * 1000)
++    for i in range(26 * 12):
++        ts = start_ms + i * interval_ms
++        append_ledger_record(
++            "candles_5m",
++            {"ts": ts, "asset": "SOL-PERP", "o": 145.2, "h": 145.5,
++             "l": 145.0, "c": 145.3, "v": 1000.0},
++            when=datetime.fromtimestamp(ts / 1000, tz=timezone.utc),
++            ledger_dir=str(tmp_path / "ledger"),
++        )
++
++    result = run_labeling_job(conn, tmp_path / "ledger")
++    assert result["errors"] == 0
++    n_labels = conn.execute("SELECT COUNT(*) FROM decision_labels").fetchone()[0]
++    assert n_labels == 0
++
++
+ # ---------------------------------------------------------------------------
+ # T8 deliverable 7: named regression tests
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_challenger_promotion_on_lower_regret(conn):
+     """A challenger with lower mean labeled regret over the trial window
+     becomes active; the incumbent is demoted to inactive."""
+     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+     deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
+@@ -762,18 +1022,22 @@ class TestChallengerResolutionSchedulerWiring:
+                 and node.name == "_run_challenger_resolution_job"
+             ):
+                 job_node = node
+                 break
+         assert job_node is not None, (
+             "_run_challenger_resolution_job not found in forge.py"
+         )
+ 
+         segment = ast.get_source_segment(source, job_node)
+         assert segment is not None
+-        assert "check_challenger_resolution(" in segment, (
+-            "expected the job to apply the min-decisions/max-days trigger"
+-            " via agents.reflection.check_challenger_resolution"
+-        )
+-        assert "resolve_hypotheses(" in segment, (
+-            "expected the job to resolve the cycle's hypotheses on"
+-            " challenger resolution"
++        # T8 review r2 Fix B: the per-agent body (check trigger -> resolve
++        # hypotheses -> record reflections.outcome unconditionally) was
++        # extracted to agents/reflection.py::apply_challenger_resolution so
++        # it is behaviorally testable without importing forge.py (which
++        # needs apscheduler). The job must call that single entry point;
++        # the check/resolve/outcome behavior itself is covered by
++        # tests/test_hypotheses.py::TestApplyChallengerResolution.
++        assert "apply_challenger_resolution(" in segment, (
++            "expected the job to run the trigger + hypothesis resolution +"
++            " outcome recording via"
++            " agents.reflection.apply_challenger_resolution"
+         )
+diff --git a/tests/test_hypotheses.py b/tests/test_hypotheses.py
+index 41ab009..9ce5bb0 100644
+--- a/tests/test_hypotheses.py
++++ b/tests/test_hypotheses.py
+@@ -483,20 +483,147 @@ class TestWindowExpiryDesync:
+         assert n == 1
+         hyp = conn.execute(
+             "SELECT status, effect_observed, resolved_at FROM hypotheses WHERE id = ?",
+             (hyp_ids[0],),
+         ).fetchone()
+         assert hyp["status"] == "inconclusive"
+         assert hyp["effect_observed"] is None
+         assert hyp["resolved_at"] is not None
+ 
+ 
++# ---------------------------------------------------------------------------
++# T8 review r2 Fix B: apply_challenger_resolution -- the per-agent body of
++# forge.py's hourly job, extracted so it is behaviorally testable (forge.py
++# itself imports apscheduler, unavailable in this env). Spec
++# (FORGE_PROPOSAL.md:1183): "Either way the outcome lands in reflections AND
++# resolves the cycle's hypotheses" -- TWO unconditional actions. Before this
++# fix the reflections.outcome UPDATE sat inside the hypotheses loop, so a
++# resolved trial whose cycle registered zero hypotheses (legacy path, or
++# Stage A parsed none) never got its outcome recorded -- PENDING forever on
++# the agent page.
++# ---------------------------------------------------------------------------
++
++
++class TestApplyChallengerResolution:
++    def _deploy_trial_with_evidence(self, conn, verdict: str = "rejected") -> None:
++        """Incumbent v1 + challenger v2 with enough labeled evidence that
++        check_challenger_resolution resolves immediately (min_decisions=1)."""
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        base = _deployed_at_base(conn, AGENT_ID)
++
++        ch_regret, inc_regret = (3.0, 0.5) if verdict == "rejected" else (0.5, 3.0)
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"challenger_spec_version": 2, "incumbent_spec_version": 1},
++            regret_pct=ch_regret,
++        )
++        _insert_labeled_decision(
++            conn, AGENT_ID, _iso(base + timedelta(minutes=1)),
++            {"order": "stub", "fill": "stub"}, regret_pct=inc_regret,
++        )
++
++    def test_zero_hypotheses_cycle_still_records_outcome(self, conn):
++        """Fix B core: a resolved trial whose deploying cycle registered NO
++        hypotheses must still get reflections.outcome written (to the most
++        recent 'deployed' reflections row for the agent)."""
++        from agents.reflection import apply_challenger_resolution
++
++        self._deploy_trial_with_evidence(conn, verdict="rejected")
++
++        # The reflections row that deployed this challenger -- outcome
++        # 'deployed' as run_reflection_cycle writes it. NO hypotheses.
++        cur = conn.execute(
++            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
++            (AGENT_ID, "2026-01-02T00:00:00Z"),
++        )
++        reflection_id = cur.lastrowid
++        conn.commit()
++
++        result = apply_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is True
++        assert result["verdict"] == "rejected"
++
++        row = conn.execute(
++            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
++        ).fetchone()
++        assert row["outcome"] == "challenger_rejected", (
++            "resolved trial with zero hypotheses must still record its "
++            "outcome in the reflections row"
++        )
++
++    def test_with_hypotheses_resolves_both(self, conn):
++        """Parity with the pre-extraction forge.py behavior: hypotheses
++        resolved AND outcome written on the cycle that owns them."""
++        from agents.reflection import apply_challenger_resolution
++
++        self._deploy_trial_with_evidence(conn, verdict="promoted")
++
++        cur = conn.execute(
++            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
++            (AGENT_ID, "2026-01-02T00:00:00Z"),
++        )
++        reflection_id = cur.lastrowid
++        conn.commit()
++        hyp_ids = register_hypotheses(conn, AGENT_ID, reflection_id, [
++            {"claim": "c1", "predicted_effect": "e1"},
++        ])
++        conn.execute(
++            "UPDATE hypotheses SET status = 'challenger' WHERE id = ?", (hyp_ids[0],),
++        )
++        conn.commit()
++
++        result = apply_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 1, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is True
++        assert result["verdict"] == "promoted"
++
++        hyp = conn.execute(
++            "SELECT status, resolved_at FROM hypotheses WHERE id = ?", (hyp_ids[0],),
++        ).fetchone()
++        assert hyp["status"] == "validated"
++        assert hyp["resolved_at"] is not None
++
++        row = conn.execute(
++            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
++        ).fetchone()
++        assert row["outcome"] == "challenger_promoted"
++
++    def test_unresolved_trial_changes_nothing(self, conn):
++        """Trial still in progress -> resolved=False, no outcome writes."""
++        from agents.reflection import apply_challenger_resolution
++
++        insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
++        deploy_spec(conn, AGENT_ID, _spec(AGENT_ID, 1, direction="long"))
++        deploy_as_challenger(conn, AGENT_ID, _spec(AGENT_ID, 2, direction="short"))
++        cur = conn.execute(
++            "INSERT INTO reflections (agent_id, triggered_at, outcome) VALUES (?, ?, 'deployed')",
++            (AGENT_ID, "2026-01-02T00:00:00Z"),
++        )
++        reflection_id = cur.lastrowid
++        conn.commit()
++
++        result = apply_challenger_resolution(
++            conn, AGENT_ID, {"challenger_min_decisions": 20, "challenger_max_days": 7},
++        )
++        assert result["resolved"] is False
++
++        row = conn.execute(
++            "SELECT outcome FROM reflections WHERE id = ?", (reflection_id,),
++        ).fetchone()
++        assert row["outcome"] == "deployed"  # untouched
++
++
+ # ---------------------------------------------------------------------------
+ # get_hypothesis_digest — light coverage (wired for testability; no
+ # production call site is added by T8, see t8-report.md).
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_get_hypothesis_digest_lists_recent_claims(conn):
+     insert_agent(conn, AGENT_ID, AGENT_ID, "2026-01-01T00:00:00Z", "{}")
+     reflection_id = _insert_reflection(conn, AGENT_ID)
+     register_hypotheses(conn, AGENT_ID, reflection_id, [
