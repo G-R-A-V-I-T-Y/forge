@@ -3,6 +3,8 @@ import difflib
 import json as _json
 import logging
 import math
+import random
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
@@ -44,6 +46,7 @@ from meta.head_of_desk import (
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+_THESES_DIR = Path(__file__).resolve().parent.parent / "agents" / "theses"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app = FastAPI(title="Forge")
@@ -630,6 +633,185 @@ async def api_desk_memory():
     return {"digest": digest, "trial_count": trial_count}
 
 
+# ── M11.11: Desk Scoreboard Computation ──────────────────────────────
+
+
+def compute_desk_equity(conn) -> float:
+    """Sum all agent paper balances (excluding benchmarks)."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(balance), 0) AS total "
+        "FROM accounts WHERE mode = 'paper'"
+    ).fetchone()
+    return float(row["total"]) if row else 0.0
+
+
+def compute_null_band(conn, n_bootstrap: int = 500) -> dict[str, float]:
+    """Bootstrap Sharpe distribution from benchmark_random_walk trades.
+
+    Returns percentiles p25/p50/p75 of the bootstrapped Sharpe distribution.
+    Falls back to zeros when insufficient data is available.
+    """
+    rows = conn.execute(
+        """SELECT pnl_pct FROM trades
+           WHERE agent_id = 'benchmark_random_walk'
+             AND status = 'closed' AND voided = 0
+             AND pnl_pct IS NOT NULL
+           ORDER BY entry_timestamp ASC"""
+    ).fetchall()
+    returns = [r["pnl_pct"] for r in rows]
+    if len(returns) < 2:
+        return {"p25": 0.0, "p50": 0.0, "p75": 0.0}
+
+    agent_rows = conn.execute(
+        """SELECT COUNT(*) AS cnt FROM trades
+           WHERE agent_id != 'benchmark_random_walk'
+             AND status = 'closed' AND voided = 0"""
+    ).fetchone()
+    sample_size = max(5, min(agent_rows["cnt"] if agent_rows else 20, len(returns)))
+
+    rng = random.Random(42)
+    sharpes: list[float] = []
+    for _ in range(n_bootstrap):
+        sample = rng.choices(returns, k=sample_size)
+        avg = statistics.mean(sample)
+        std = statistics.stdev(sample) if len(sample) > 1 else 1.0
+        sharpes.append(avg / std if std > 0 else 0.0)
+    sharpes.sort()
+
+    def _percentile(data: list[float], p: float) -> float:
+        k = (len(data) - 1) * p
+        lo = int(k)
+        hi = min(lo + 1, len(data) - 1)
+        frac = k - lo
+        return data[lo] + frac * (data[hi] - data[lo])
+
+    return {
+        "p25": round(_percentile(sharpes, 0.25), 4),
+        "p50": round(_percentile(sharpes, 0.50), 4),
+        "p75": round(_percentile(sharpes, 0.75), 4),
+    }
+
+
+def compute_desk_deflated_sharpe(conn) -> float:
+    """Median deflated Sharpe from backtest_trials table."""
+    try:
+        row = conn.execute(
+            "SELECT deflated_sharpe FROM backtest_trials "
+            "ORDER BY ran_at DESC LIMIT 100"
+        ).fetchall()
+        if not row:
+            return 0.0
+        values = sorted([r["deflated_sharpe"] for r in row])
+        mid = len(values) // 2
+        if len(values) % 2 == 0:
+            return round((values[mid - 1] + values[mid]) / 2, 4)
+        return round(values[mid], 4)
+    except Exception:
+        return 0.0
+
+
+def compute_hypothesis_validation_rate(conn) -> float:
+    """Ratio of validated hypotheses to total resolved (validated + falsified)."""
+    try:
+        validated = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM hypotheses WHERE status = 'validated'"
+        ).fetchone()["cnt"]
+        falsified = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM hypotheses WHERE status = 'falsified'"
+        ).fetchone()["cnt"]
+        total = validated + falsified
+        if total == 0:
+            return 0.0
+        return round(validated / total, 4)
+    except Exception:
+        return 0.0
+
+
+def get_diversity_score(conn) -> float:
+    """Pairwise feature diversity across active agents' latest specs.
+
+    Computes 1 minus average pairwise Jaccard overlap of evidence-feature
+    sets. Higher = more diverse strategies. Returns 0.0 when fewer than 2
+    agents have specs with evidence features.
+    """
+    try:
+        rows = conn.execute(
+            """SELECT agent_id, spec_yaml FROM spec_history
+               WHERE id IN (
+                   SELECT MAX(id) FROM spec_history GROUP BY agent_id
+               )"""
+        ).fetchall()
+        if len(rows) < 2:
+            return 0.0
+
+        feature_sets: list[set[str]] = []
+        for row in rows:
+            yaml_text = row["spec_yaml"] or ""
+            features: set[str] = set()
+            for line in yaml_text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- name:"):
+                    name_part = stripped.split(":", 1)[1].strip()
+                    features.add(name_part)
+                elif stripped.startswith("feature:"):
+                    feat_part = stripped.split(":", 1)[1].strip()
+                    features.add(feat_part)
+            if features:
+                feature_sets.append(features)
+
+        if len(feature_sets) < 2:
+            return 0.0
+
+        total_overlap = 0.0
+        pairs = 0
+        for i in range(len(feature_sets)):
+            for j in range(i + 1, len(feature_sets)):
+                union = feature_sets[i] | feature_sets[j]
+                if union:
+                    intersection = feature_sets[i] & feature_sets[j]
+                    total_overlap += len(intersection) / len(union)
+                pairs += 1
+
+        avg_overlap = total_overlap / pairs if pairs > 0 else 0.0
+        return round(1.0 - avg_overlap, 4)
+    except Exception:
+        return 0.0
+
+
+@app.get("/api/desk/scoreboard")
+async def api_desk_scoreboard():
+    """M11.11: Comprehensive desk scoreboard metrics."""
+    conn = app.state.conn
+    desk_equity = compute_desk_equity(conn)
+    null_band = compute_null_band(conn)
+    desk_deflated_sharpe = compute_desk_deflated_sharpe(conn)
+    validation_rate = compute_hypothesis_validation_rate(conn)
+    diversity = get_diversity_score(conn)
+
+    trial_count = 0
+    try:
+        trial_count = conn.execute("SELECT COUNT(*) FROM backtest_trials").fetchone()[0]
+    except Exception:
+        pass
+
+    active_agents = conn.execute(
+        "SELECT COUNT(*) FROM agents WHERE status IN ('active', 'rookie', 'shadow')"
+    ).fetchone()[0]
+
+    total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+
+    return {
+        "desk_equity": round(desk_equity, 2),
+        "null_band": null_band,
+        "desk_deflated_sharpe": desk_deflated_sharpe,
+        "hypothesis_validation_rate": validation_rate,
+        "diversity_score": diversity,
+        "trial_count": trial_count,
+        "active_agents": active_agents,
+        "total_trades": total_trades,
+    }
+
+
 @app.get("/agents/{name}", response_class=HTMLResponse)
 async def agent_detail(request: Request, name: str):
     conn = app.state.conn
@@ -674,7 +856,7 @@ async def agent_detail(request: Request, name: str):
     ).fetchall()
 
     thesis_version = agent.get("current_thesis_version", 1)
-    thesis_path = Path("agents/theses") / f"{aid}_v{thesis_version}.md"
+    thesis_path = _THESES_DIR / f"{aid}_v{thesis_version}.md"
     try:
         thesis_text = thesis_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -787,6 +969,114 @@ async def api_agent_detail(name: str):
         "balance": account["balance"] if account else 50000.0,
         "open_positions_count": pos_count,
         "last_model_used": agent["last_model_used"] if "last_model_used" in agent.keys() else None,
+    }
+
+
+@app.get("/api/agents/{agent_id}/dossier")
+async def api_agent_dossier(agent_id: str):
+    """Return the full dossier for an agent as JSON (M10.11)."""
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    from agents.dossier import build_dossier
+
+    try:
+        dossier = build_dossier(conn, agent_id)
+    except Exception as exc:
+        logger.warning("Failed to build dossier for %s: %s", agent_id, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return {
+        "agent_id": dossier.agent_id,
+        "thesis_text": dossier.thesis_text,
+        "spec_yaml": dossier.spec_yaml,
+        "calibration_curve": dossier.calibration_curve,
+        "high_regret_decisions": dossier.high_regret_decisions,
+        "win_rate_by_regime": dossier.win_rate_by_regime,
+        "profit_factor_by_regime": dossier.profit_factor_by_regime,
+        "feature_stats": dossier.feature_stats,
+        "hypothesis_track_record": dossier.hypothesis_track_record,
+    }
+
+
+@app.get("/api/agents/{agent_id}/hypotheses")
+async def api_agent_hypotheses(agent_id: str):
+    """Return hypothesis history for an agent (M10.11)."""
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    from agents.reflection import get_agent_hypothesis_history
+
+    return get_agent_hypothesis_history(conn, agent_id)
+
+
+@app.get("/api/agents/{agent_id}/thesis-history")
+async def api_agent_thesis_history(agent_id: str):
+    """Return thesis version history with diffs (M10.11).
+
+    Scans agents/theses/ for versioned markdown files, computes pairwise
+    diffs between consecutive versions.
+    """
+    conn = app.state.conn
+    agent = conn.execute("SELECT id FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    theses_dir = _THESES_DIR
+    pattern = re.compile(rf"^{re.escape(agent_id)}_v(\d+)\.md$")
+    versions: list[tuple[int, str]] = []
+    if theses_dir.is_dir():
+        for f in theses_dir.iterdir():
+            m = pattern.match(f.name)
+            if m:
+                try:
+                    text = f.read_text(encoding="utf-8")
+                    versions.append((int(m.group(1)), text))
+                except OSError:
+                    pass
+    versions.sort(key=lambda x: x[0])
+
+    diffs = []
+    for i in range(1, len(versions)):
+        old_v, old_text = versions[i - 1]
+        new_v, new_text = versions[i]
+        diff_lines = list(difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"{agent_id}_v{old_v}",
+            tofile=f"{agent_id}_v{new_v}",
+        ))
+        parsed = []
+        for line in diff_lines:
+            stripped = line.rstrip("\n")
+            if line.startswith("+++") or line.startswith("---"):
+                kind = "header"
+            elif line.startswith("@@"):
+                kind = "hunk"
+            elif line.startswith("+"):
+                kind = "add"
+            elif line.startswith("-"):
+                kind = "remove"
+            else:
+                kind = "context"
+            parsed.append({"text": stripped, "kind": kind})
+        diffs.append({
+            "from_version": old_v,
+            "to_version": new_v,
+            "lines": parsed,
+        })
+
+    current_version = versions[-1] if versions else (0, "")
+
+    return {
+        "current_version": current_version[0],
+        "current_text": current_version[1],
+        "total_versions": len(versions),
+        "diffs": diffs,
     }
 
 
@@ -1294,6 +1584,24 @@ async def api_briefing_generate():
         "agents_covered": brief["agents_covered"],
         "summary": brief["summary"],
     })
+
+
+@app.get("/api/desk-diversity")
+async def api_desk_diversity():
+    conn = app.state.conn
+    from meta.spawner import desk_diversity, get_least_covered_niche, check_immigration_quota  # noqa: PLC0415
+
+    try:
+        diversity = desk_diversity(conn)
+        niche = get_least_covered_niche(conn)
+        immigration = check_immigration_quota(conn)
+        return JSONResponse({
+            "diversity": diversity,
+            "least_covered_niche": {"family": niche[0], "sector": niche[1]},
+            "immigration_required": immigration,
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.websocket("/api/ws/chat")

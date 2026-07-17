@@ -275,6 +275,11 @@ h3.section-header { font-size: var(--font-size-base); color: var(--accent-orange
 .badge-paper { background: var(--bg-elevated); color: var(--text-secondary); }
 .badge-no-model { background: var(--accent-red); color: #fff; }
 
+.hyp-validated { background: var(--accent-green-bg); color: var(--text-primary); }
+.hyp-falsified { background: var(--accent-red-bg); color: var(--text-primary); }
+.hyp-challenger { background: var(--accent-orange-bg); color: var(--bg-primary); }
+.hyp-proposed { background: var(--text-muted); color: var(--text-primary); }
+
 /* ── Win/Loss/Open Colors ──────────────────────────────────────── */
 .win { color: var(--accent-green); }
 .loss { color: var(--accent-red); }
@@ -632,6 +637,149 @@ pre.code-block {
 .panel-gap { margin-top: var(--space-xs); }
 
 .hidden { display: none; }
+
+/* ── Scoreboard Panels (M11.11) ──────────────────────────────── */
+.scoreboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.scoreboard-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  transition: border-color var(--transition-normal);
+}
+
+.scoreboard-panel:hover {
+  border-color: var(--accent-blue);
+}
+
+.scoreboard-title {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: var(--space-md);
+}
+
+.scoreboard-equity {
+  font-size: var(--font-size-2xl);
+  font-weight: bold;
+  color: var(--text-primary);
+  margin-bottom: var(--space-sm);
+  transition: color var(--transition-normal);
+}
+
+.scoreboard-equity.win { color: var(--accent-green); }
+.scoreboard-equity.loss { color: var(--accent-red); }
+
+.null-band-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.null-band-label {
+  color: var(--text-secondary);
+  min-width: 50px;
+}
+
+.null-band-bar {
+  flex: 1;
+  height: 12px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-md);
+  position: relative;
+  overflow: hidden;
+}
+
+.null-band-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(88, 166, 255, 0.15);
+  border-radius: var(--radius-md);
+}
+
+.null-band-median {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: var(--accent-blue);
+}
+
+.scoreboard-sub {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  margin-top: var(--space-sm);
+}
+
+.scoreboard-sub .value {
+  color: var(--text-primary);
+  font-weight: bold;
+}
+
+.health-metric {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.health-metric:last-child {
+  border-bottom: none;
+}
+
+.health-metric-label {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.health-metric-value {
+  font-size: var(--font-size-lg);
+  font-weight: bold;
+}
+
+.health-metric-value.good { color: var(--accent-green); }
+.health-metric-value.mid { color: var(--accent-orange); }
+.health-metric-value.bad { color: var(--accent-red); }
+
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: var(--space-xs);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.6s ease, background-color 0.6s ease;
+}
+
+.progress-fill.good { background: var(--accent-green); }
+.progress-fill.mid { background: var(--accent-orange); }
+.progress-fill.bad { background: var(--accent-red); }
+
+@keyframes metric-flash {
+  0% { opacity: 1; }
+  50% { opacity: 0.6; }
+  100% { opacity: 1; }
+}
+
+.metric-updated {
+  animation: metric-flash 0.4s ease;
+}
 
 /* ── Responsive ────────────────────────────────────────────────── */
 @media (max-width: 1024px) {

@@ -39,6 +39,57 @@
     <div class="stat-label">Backtest Trials</div>
     <div class="stat-value">{{ trial_count }}</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-label">Desk Diversity</div>
+    <div class="stat-value">{{ diversity_score }}</div>
+  </div>
+</div>
+
+<!-- M11.11: Desk Scoreboard -->
+<div class="scoreboard-grid" id="scoreboard-grid">
+  <div class="scoreboard-panel">
+    <div class="scoreboard-title">Desk Performance</div>
+    <div class="scoreboard-equity" id="sb-equity">&mdash;</div>
+    <div class="scoreboard-sub">
+      Sharpe vs null: <span class="value" id="sb-deflated-sharpe">&mdash;</span>
+      &nbsp;|&nbsp; Trials: <span class="value" id="sb-trials">0</span>
+    </div>
+    <div style="margin-top:var(--space-md);">
+      <div class="null-band-row">
+        <span class="null-band-label">Null</span>
+        <div class="null-band-bar">
+          <div class="null-band-fill" id="sb-null-fill" style="left:0%;width:100%;"></div>
+          <div class="null-band-median" id="sb-null-median" style="left:50%;"></div>
+        </div>
+        <span class="null-band-label" style="text-align:right;">
+          <span id="sb-null-p25" style="color:var(--accent-blue);">—</span>
+          /
+          <span id="sb-null-p75" style="color:var(--accent-blue);">—</span>
+        </span>
+      </div>
+    </div>
+  </div>
+  <div class="scoreboard-panel">
+    <div class="scoreboard-title">Ecosystem Health</div>
+    <div class="health-metric">
+      <span class="health-metric-label">Hypothesis Validation</span>
+      <span class="health-metric-value" id="sb-validation-rate">&mdash;</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="sb-validation-bar" style="width:0%;"></div>
+    </div>
+    <div class="health-metric">
+      <span class="health-metric-label">Strategy Diversity</span>
+      <span class="health-metric-value" id="sb-diversity">&mdash;</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill good" id="sb-diversity-bar" style="width:0%;"></div>
+    </div>
+    <div class="health-metric">
+      <span class="health-metric-label">Active Agents</span>
+      <span class="health-metric-value" id="sb-active-agents">&mdash;</span>
+    </div>
+  </div>
 </div>
 
 <!-- Morning Brief (Head of Desk, M9 crit 8) -->
@@ -362,5 +413,64 @@ function sortTable(col) {
   });
   rows.forEach(function(r) { tbody.appendChild(r); });
 }
+
+/* ── M11.11: Scoreboard Auto-Refresh ──────────────────────────── */
+function flashElement(el) {
+  if (!el) return;
+  el.classList.remove('metric-updated');
+  void el.offsetWidth;
+  el.classList.add('metric-updated');
+}
+
+function fetchScoreboard() {
+  fetch('/api/desk/scoreboard')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var equityEl = document.getElementById('sb-equity');
+      var equity = d.desk_equity || 0;
+      equityEl.textContent = '$' + equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      equityEl.className = 'scoreboard-equity ' + (equity >= 0 ? 'win' : 'loss');
+      flashElement(equityEl);
+
+      document.getElementById('sb-deflated-sharpe').textContent = d.desk_deflated_sharpe ? d.desk_deflated_sharpe.toFixed(4) : '\u2014';
+      document.getElementById('sb-trials').textContent = d.trial_count || 0;
+
+      var nb = d.null_band || {p25: 0, p50: 0, p75: 0};
+      document.getElementById('sb-null-p25').textContent = nb.p25 ? nb.p25.toFixed(3) : '\u2014';
+      document.getElementById('sb-null-p75').textContent = nb.p75 ? nb.p75.toFixed(3) : '\u2014';
+      var bandWidth = nb.p75 - nb.p25;
+      var bandLeft = bandWidth > 0 ? (nb.p25 / (nb.p75 + Math.abs(nb.p25) + 1)) * 100 : 0;
+      var fillEl = document.getElementById('sb-null-fill');
+      fillEl.style.left = Math.max(0, bandLeft) + '%';
+      fillEl.style.width = Math.max(5, Math.min(100, bandWidth * 50 + 10)) + '%';
+      var medianEl = document.getElementById('sb-null-median');
+      medianEl.style.left = nb.p50 ? Math.max(0, Math.min(98, (nb.p50 / (nb.p75 + Math.abs(nb.p25) + 1)) * 100 + 5)) + '%' : '50%';
+
+      var vr = d.hypothesis_validation_rate || 0;
+      var vrEl = document.getElementById('sb-validation-rate');
+      vrEl.textContent = (vr * 100).toFixed(1) + '%';
+      var vrClass = vr > 0.6 ? 'good' : (vr >= 0.4 ? 'mid' : 'bad');
+      vrEl.className = 'health-metric-value ' + vrClass;
+      var vrBar = document.getElementById('sb-validation-bar');
+      vrBar.style.width = (vr * 100) + '%';
+      vrBar.className = 'progress-fill ' + vrClass;
+      flashElement(vrEl);
+
+      var ds = d.diversity_score || 0;
+      var dsEl = document.getElementById('sb-diversity');
+      dsEl.textContent = ds.toFixed(3);
+      dsEl.className = 'health-metric-value ' + (ds > 0.5 ? 'good' : (ds >= 0.25 ? 'mid' : 'bad'));
+      var dsBar = document.getElementById('sb-diversity-bar');
+      dsBar.style.width = (ds * 100) + '%';
+      var dsClass = ds > 0.5 ? 'good' : (ds >= 0.25 ? 'mid' : 'bad');
+      dsBar.className = 'progress-fill ' + dsClass;
+
+      document.getElementById('sb-active-agents').textContent = d.active_agents || 0;
+    })
+    .catch(function() {});
+}
+
+fetchScoreboard();
+setInterval(fetchScoreboard, 30000);
 </script>
 {% endblock %}
