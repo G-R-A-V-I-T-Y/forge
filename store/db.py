@@ -69,6 +69,7 @@ _AGENTS_MIGRATION_COLUMNS = {
     "keystore_path": "TEXT",
     "live_enabled": "INTEGER DEFAULT 0",
     "active_spec_version": "INTEGER NOT NULL DEFAULT 0",
+    "spawn_source": "TEXT DEFAULT 'fresh'",
 }
 
 

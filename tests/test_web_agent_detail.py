@@ -1,5 +1,7 @@
-"""Tests for the agent detail page's spec diff view and calibration report."""
+"""Tests for the agent detail page's spec diff view, calibration report,
+dossier digest, hypothesis outcomes, and thesis/spec version diffs."""
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -108,9 +110,7 @@ def test_agent_detail_calibration_report_buckets_and_win_rate(conn):
     assert r.status_code == 200
     assert "0.6-0.7" in r.text
     assert "0.8-0.9" in r.text
-    # bucket 0.6-0.7 has 2 trades, 1 win -> 50.0%
     assert "50.0%" in r.text
-    # bucket 0.8-0.9 has 1 trade, 1 win -> 100.0%
     assert "100.0%" in r.text
 
 
@@ -122,8 +122,6 @@ def test_agent_detail_no_reflections_shows_graceful_state(conn):
 
 
 def test_agent_detail_reflection_cycle_shows_digest_diff_and_hypotheses(conn):
-    """M10 'Done when': the agent page shows the dossier digest, hypothesis
-    outcomes, and thesis/spec diffs for the cycle."""
     _seed_agent(conn)
     cur = conn.execute(
         """INSERT INTO reflections
@@ -154,5 +152,141 @@ def test_agent_detail_reflection_cycle_shows_digest_diff_and_hypotheses(conn):
     assert "Reflection Cycles" in r.text
     assert "funding term improves entries" in r.text
     assert "VALIDATED" in r.text
-    assert "closed_trades" in r.text  # dossier digest JSON rendered
-    assert "spec_diff_summary" in r.text  # thesis/spec diff JSON rendered
+    assert "closed_trades" in r.text
+    assert "spec_diff_summary" in r.text
+
+
+def test_agent_detail_has_new_tabs(conn):
+    _seed_agent(conn)
+    r = _client(conn).get(f"/agents/{AGENT_ID}")
+    assert r.status_code == 200
+    assert 'data-tab="dossier"' in r.text
+    assert 'data-tab="hypotheses"' in r.text
+
+
+def test_api_dossier_returns_json(conn):
+    _seed_agent(conn)
+    _insert_closed_trade(conn, "t1", 0.7, "win")
+    _insert_closed_trade(conn, "t2", 0.8, "loss")
+    r = _client(conn).get(f"/api/agents/{AGENT_ID}/dossier")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["agent_id"] == AGENT_ID
+    assert "calibration_curve" in data
+    assert "high_regret_decisions" in data
+    assert "win_rate_by_regime" in data
+    assert "profit_factor_by_regime" in data
+    assert "feature_stats" in data
+    assert "hypothesis_track_record" in data
+
+
+def test_api_dossier_404_for_unknown_agent(conn):
+    _seed_agent(conn)
+    r = _client(conn).get("/api/agents/nonexistent/dossier")
+    assert r.status_code == 404
+
+
+def test_api_hypotheses_returns_list(conn):
+    _seed_agent(conn)
+    cur = conn.execute(
+        """INSERT INTO reflections
+               (agent_id, triggered_at, outcome)
+           VALUES (?, ?, ?)""",
+        (AGENT_ID, "2026-07-10T00:00:00Z", "deployed"),
+    )
+    reflection_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO hypotheses
+               (agent_id, reflection_id, claim, feature, regime_context,
+                predicted_effect, status, effect_observed, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            AGENT_ID, reflection_id, "funding rate predicts entries",
+            "funding_rate", "trending", "regret decreases by 0.5",
+            "validated", 0.5, "2026-07-10T00:00:00Z", "2026-07-12T00:00:00Z",
+        ),
+    )
+    conn.execute(
+        """INSERT INTO hypotheses
+               (agent_id, reflection_id, claim, predicted_effect, status,
+                created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            AGENT_ID, reflection_id, "volume spike improves timing",
+            "win rate improves", "proposed", "2026-07-11T00:00:00Z",
+        ),
+    )
+    conn.commit()
+
+    r = _client(conn).get(f"/api/agents/{AGENT_ID}/hypotheses")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 2
+    claims = {h["claim"] for h in data}
+    assert "funding rate predicts entries" in claims
+    assert "volume spike improves timing" in claims
+    statuses = {h["status"] for h in data}
+    assert "validated" in statuses
+    assert "proposed" in statuses
+
+
+def test_api_hypotheses_404_for_unknown_agent(conn):
+    _seed_agent(conn)
+    r = _client(conn).get("/api/agents/nonexistent/hypotheses")
+    assert r.status_code == 404
+
+
+def test_api_thesis_history_no_versions(conn, monkeypatch):
+    _seed_agent(conn)
+    monkeypatch.setattr("web.app._THESES_DIR", Path("/nonexistent/theses"))
+    r = _client(conn).get(f"/api/agents/{AGENT_ID}/thesis-history")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_versions"] == 0
+    assert data["current_version"] == 0
+    assert data["diffs"] == []
+
+
+def test_api_thesis_history_one_version(conn, tmp_path, monkeypatch):
+    _seed_agent(conn)
+    theses_dir = tmp_path / "theses"
+    theses_dir.mkdir()
+    (theses_dir / f"{AGENT_ID}_v1.md").write_text("# Thesis V1\nInitial version.\n")
+    monkeypatch.setattr("web.app._THESES_DIR", theses_dir)
+
+    r = _client(conn).get(f"/api/agents/{AGENT_ID}/thesis-history")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_versions"] == 1
+    assert data["current_version"] == 1
+    assert "Thesis V1" in data["current_text"]
+    assert data["diffs"] == []
+
+
+def test_api_thesis_history_two_versions_shows_diff(conn, tmp_path, monkeypatch):
+    _seed_agent(conn)
+    theses_dir = tmp_path / "theses"
+    theses_dir.mkdir()
+    (theses_dir / f"{AGENT_ID}_v1.md").write_text("# Thesis V1\nOld content.\n")
+    (theses_dir / f"{AGENT_ID}_v2.md").write_text("# Thesis V2\nNew content.\n")
+    monkeypatch.setattr("web.app._THESES_DIR", theses_dir)
+
+    r = _client(conn).get(f"/api/agents/{AGENT_ID}/thesis-history")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_versions"] == 2
+    assert data["current_version"] == 2
+    assert len(data["diffs"]) == 1
+    diff = data["diffs"][0]
+    assert diff["from_version"] == 1
+    assert diff["to_version"] == 2
+    diff_kinds = {line["kind"] for line in diff["lines"]}
+    assert "add" in diff_kinds
+    assert "remove" in diff_kinds
+
+
+def test_api_thesis_history_404_for_unknown_agent(conn, monkeypatch):
+    _seed_agent(conn)
+    monkeypatch.setattr("web.app._THESES_DIR", Path("/nonexistent"))
+    r = _client(conn).get("/api/agents/nonexistent/thesis-history")
+    assert r.status_code == 404

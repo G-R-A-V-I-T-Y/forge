@@ -276,6 +276,15 @@ async def overview(request: Request):
     except Exception:
         pass
 
+    diversity_score = "—"
+    try:
+        from meta.spawner import desk_diversity  # noqa: PLC0415
+        _div = desk_diversity(conn)
+        avg_j = _div.get("avg_jaccard", 0.0)
+        diversity_score = f"{avg_j:.2f}"
+    except Exception:
+        pass
+
     return templates.TemplateResponse(
         "overview.html",
         {

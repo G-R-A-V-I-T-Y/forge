@@ -94,6 +94,8 @@
 <!-- ═══ Tab System ═══ -->
 <div class="tab-bar">
   <button class="tab active" data-tab="perf">Performance</button>
+  <button class="tab" data-tab="dossier">Dossier Digest</button>
+  <button class="tab" data-tab="hypotheses">Hypotheses</button>
   <button class="tab" data-tab="thesis">Thesis v{{ thesis_version }}</button>
   <button class="tab" data-tab="spec">Spec History</button>
   <button class="tab" data-tab="cal">Calibration</button>
@@ -161,12 +163,41 @@
   </table>
 </div>
 
+<!-- ── Dossier Digest Tab ── -->
+<div class="tab-content" id="tab-dossier">
+  <div id="dossier-loading" class="neutral help-text">Loading dossier digest...</div>
+  <div id="dossier-content" style="display:none;">
+
+    <h3 class="section-header">High Regret Decisions</h3>
+    <div id="dossier-regret"></div>
+
+    <h3 class="section-header">Calibration Curve</h3>
+    <div id="dossier-calibration"></div>
+
+    <h3 class="section-header">Win Rate &amp; Profit Factor by Regime</h3>
+    <div id="dossier-regimes"></div>
+
+    <h3 class="section-header">Feature Statistics</h3>
+    <div id="dossier-features"></div>
+  </div>
+</div>
+
+<!-- ── Hypothesis Outcomes Tab ── -->
+<div class="tab-content" id="tab-hypotheses">
+  <div id="hyp-loading" class="neutral help-text">Loading hypothesis outcomes...</div>
+  <div id="hyp-content" style="display:none;"></div>
+</div>
+
 <!-- ── Thesis Tab ── -->
 <div class="tab-content" id="tab-thesis">
   <div class="panel">
     <div class="panel-header">Version {{ thesis_version }}</div>
     <pre class="code-block">{{ thesis_text }}</pre>
   </div>
+
+  <h3 class="section-header">Thesis Version History</h3>
+  <div id="thesis-history-loading" class="neutral help-text">Loading version history...</div>
+  <div id="thesis-history-content" style="display:none;"></div>
 </div>
 
 <!-- ── Spec History Tab ── -->
@@ -425,5 +456,167 @@ function closeModal() {
 document.getElementById('confirm-modal').addEventListener('click', function(e) {
   if (e.target === this) closeModal();
 });
+
+// ── M10.11: Dossier Digest ──
+(function() {
+  var agentId = '{{ agent.name }}';
+  fetch('/api/agents/' + agentId + '/dossier')
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(d) {
+      document.getElementById('dossier-loading').style.display = 'none';
+      document.getElementById('dossier-content').style.display = '';
+
+      var regretEl = document.getElementById('dossier-regret');
+      if (d.high_regret_decisions && d.high_regret_decisions.length) {
+        var h = '<table class="data-table"><tr><th>Timestamp</th><th>Action</th><th>Asset</th><th>Dir</th><th>Regret</th><th>Best Action</th><th>Reason</th></tr>';
+        d.high_regret_decisions.forEach(function(dec) {
+          h += '<tr><td class="help-text">' + (dec.timestamp || '—').slice(0, 19) + '</td>'
+            + '<td>' + (dec.decision_action || '—') + '</td>'
+            + '<td>' + (dec.asset || '—') + '</td>'
+            + '<td>' + (dec.direction || '—') + '</td>'
+            + '<td class="loss">' + (typeof dec.regret_score === 'number' ? dec.regret_score.toFixed(2) : '—') + '</td>'
+            + '<td class="win">' + (dec.best_action || '—') + '</td>'
+            + '<td class="help-text" style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (dec.decision_reason || '—') + '</td></tr>';
+        });
+        h += '</table>';
+        regretEl.innerHTML = h;
+      } else {
+        regretEl.innerHTML = '<div class="neutral help-text">No regret decisions recorded yet.</div>';
+      }
+
+      var calEl = document.getElementById('dossier-calibration');
+      var curve = d.calibration_curve;
+      if (curve && typeof curve === 'object' && Object.keys(curve).length) {
+        var h2 = '<table class="data-table"><tr><th>Bucket</th><th>Samples</th><th>Confidence Mid</th><th>Realized Win Rate</th></tr>';
+        Object.keys(curve).sort().forEach(function(bucket) {
+          var b = curve[bucket];
+          var wrClass = b.realized_wr >= 0.5 ? 'win' : 'loss';
+          h2 += '<tr><td>' + bucket + '</td><td>' + b.sample_count + '</td>'
+            + '<td>' + b.confidence_mid.toFixed(2) + '</td>'
+            + '<td class="' + wrClass + '">' + (b.realized_wr * 100).toFixed(1) + '%</td></tr>';
+        });
+        h2 += '</table>';
+        calEl.innerHTML = h2;
+      } else {
+        calEl.innerHTML = '<div class="neutral help-text">No calibration data available.</div>';
+      }
+
+      var regimesEl = document.getElementById('dossier-regimes');
+      var wrRegime = d.win_rate_by_regime || {};
+      var pfRegime = d.profit_factor_by_regime || {};
+      var regimeKeys = Object.keys(Object.assign({}, wrRegime, pfRegime)).sort();
+      if (regimeKeys.length) {
+        var h3 = '<table class="data-table"><tr><th>Regime</th><th>Win Rate</th><th>Profit Factor</th></tr>';
+        regimeKeys.forEach(function(r) {
+          var wr = wrRegime[r] || 0;
+          var pf = pfRegime[r] || 0;
+          h3 += '<tr><td>' + r + '</td>'
+            + '<td class="' + (wr >= 0.5 ? 'win' : 'loss') + '">' + (wr * 100).toFixed(1) + '%</td>'
+            + '<td class="' + (pf >= 1.0 ? 'win' : 'loss') + '">' + pf.toFixed(2) + '</td></tr>';
+        });
+        h3 += '</table>';
+        regimesEl.innerHTML = h3;
+      } else {
+        regimesEl.innerHTML = '<div class="neutral help-text">No regime data available.</div>';
+      }
+
+      var featEl = document.getElementById('dossier-features');
+      var featStats = d.feature_stats || {};
+      var featKeys = Object.keys(featStats).sort();
+      if (featKeys.length) {
+        var h4 = '<table class="data-table"><tr><th>Feature</th><th>Buckets</th><th>Best WR</th><th>Worst WR</th></tr>';
+        featKeys.forEach(function(f) {
+          var fs = featStats[f];
+          h4 += '<tr><td>' + f + '</td><td>' + (fs.n_buckets || 0) + '</td>'
+            + '<td class="win">' + ((fs.best_bucket_wr || 0) * 100).toFixed(1) + '%</td>'
+            + '<td class="loss">' + ((fs.worst_bucket_wr || 0) * 100).toFixed(1) + '%</td></tr>';
+        });
+        h4 += '</table>';
+        featEl.innerHTML = h4;
+      } else {
+        featEl.innerHTML = '<div class="neutral help-text">No feature statistics available.</div>';
+      }
+    })
+    .catch(function() {
+      document.getElementById('dossier-loading').innerHTML = '<div class="neutral help-text">Failed to load dossier.</div>';
+    });
+})();
+
+// ── M10.11: Hypothesis Outcomes ──
+(function() {
+  var agentId = '{{ agent.name }}';
+  fetch('/api/agents/' + agentId + '/hypotheses')
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(hypotheses) {
+      document.getElementById('hyp-loading').style.display = 'none';
+      var el = document.getElementById('hyp-content');
+      if (!hypotheses.length) {
+        el.innerHTML = '<div class="neutral help-text">No hypotheses registered yet.</div>';
+        el.style.display = '';
+        return;
+      }
+      var h = '<table class="data-table"><tr><th>Created</th><th>Claim</th><th>Feature</th><th>Regime</th><th>Predicted</th><th>Status</th><th>Effect</th><th>Resolved</th></tr>';
+      hypotheses.forEach(function(hyp) {
+        var statusClass = 'hyp-proposed';
+        if (hyp.status === 'validated') statusClass = 'hyp-validated';
+        else if (hyp.status === 'falsified') statusClass = 'hyp-falsified';
+        else if (hyp.status === 'challenger') statusClass = 'hyp-challenger';
+        h += '<tr><td class="help-text">' + (hyp.created_at || '—').slice(0, 16) + '</td>'
+          + '<td>' + (hyp.claim || '—') + '</td>'
+          + '<td class="help-text">' + (hyp.feature || '—') + '</td>'
+          + '<td class="help-text">' + (hyp.regime_context || '—') + '</td>'
+          + '<td class="help-text">' + (hyp.predicted_effect || '—') + '</td>'
+          + '<td><span class="badge ' + statusClass + '">' + (hyp.status || 'proposed').toUpperCase() + '</span></td>'
+          + '<td>' + (hyp.effect_observed !== null && hyp.effect_observed !== undefined ? hyp.effect_observed.toFixed(4) : '—') + '</td>'
+          + '<td class="help-text">' + (hyp.resolved_at ? hyp.resolved_at.slice(0, 16) : '—') + '</td></tr>';
+      });
+      h += '</table>';
+      el.innerHTML = h;
+      el.style.display = '';
+    })
+    .catch(function() {
+      document.getElementById('hyp-loading').innerHTML = '<div class="neutral help-text">Failed to load hypotheses.</div>';
+    });
+})();
+
+// ── M10.11: Thesis Version History ──
+(function() {
+  var agentId = '{{ agent.name }}';
+  fetch('/api/agents/' + agentId + '/thesis-history')
+    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(data) {
+      document.getElementById('thesis-history-loading').style.display = 'none';
+      var el = document.getElementById('thesis-history-content');
+      if (!data.total_versions || data.total_versions < 2) {
+        el.innerHTML = '<div class="neutral help-text">Only one thesis version — no diffs to show.</div>';
+        el.style.display = '';
+        return;
+      }
+      var h = '<div class="help-text">Current version: v' + data.current_version + ' (' + data.total_versions + ' total)</div>';
+      h += '<div style="margin-top:var(--space-lg);">';
+      data.diffs.forEach(function(diff) {
+        h += '<div class="panel" style="margin-bottom:var(--space-lg);">';
+        h += '<div class="panel-header">Diff: v' + diff.from_version + ' &rarr; v' + diff.to_version + '</div>';
+        h += '<div class="spec-diff">';
+        diff.lines.forEach(function(line) {
+          var prefix = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : line.kind === 'hunk' ? '@@ ' : '';
+          h += '<span class="' + line.kind + '">' + prefix + escapeHtml(line.text) + '</span>\n';
+        });
+        h += '</div></div>';
+      });
+      h += '</div>';
+      el.innerHTML = h;
+      el.style.display = '';
+    })
+    .catch(function() {
+      document.getElementById('thesis-history-loading').innerHTML = '<div class="neutral help-text">Failed to load thesis history.</div>';
+    });
+})();
+
+function escapeHtml(str) {
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
 </script>
 {% endblock %}

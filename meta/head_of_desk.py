@@ -166,6 +166,16 @@ def generate_morning_brief(conn, config: dict | None = None) -> dict[str, Any]:
         a["id"] for a in agents_data if a["status"] in ("suspended", "rookie")
     ]
 
+    # M11.10 — diversity metric for the briefing
+    diversity_data = None
+    try:
+        from meta.spawner import desk_diversity, check_immigration_quota  # noqa: PLC0415
+        diversity_data = desk_diversity(conn)
+        immigration = check_immigration_quota(conn)
+    except Exception:
+        logger.warning("briefing: could not compute diversity", exc_info=True)
+        immigration = False
+
     # Regime alerts: consume the risk officer's persisted regime memo
     # (M9 crit 7a) — the briefing is its primary downstream reader.
     regime_memo = None
@@ -184,6 +194,49 @@ def generate_morning_brief(conn, config: dict | None = None) -> dict[str, Any]:
         f"Strategy mix: {json.dumps(distribution)}",
         "",
     ]
+
+    try:
+        from web.app import (
+            compute_desk_equity,
+            compute_null_band,
+            compute_desk_deflated_sharpe,
+            compute_hypothesis_validation_rate,
+            get_diversity_score,
+        )
+        sb_equity = compute_desk_equity(conn)
+        sb_null_band = compute_null_band(conn)
+        sb_deflated = compute_desk_deflated_sharpe(conn)
+        sb_validation = compute_hypothesis_validation_rate(conn)
+        sb_diversity = get_diversity_score(conn)
+
+        vr_pct = sb_validation * 100
+        if sb_validation > 0.6:
+            vr_label = "LEARNING WELL"
+        elif sb_validation >= 0.4:
+            vr_label = "MIXED"
+        else:
+            vr_label = "STRUGGLING"
+
+        lines.extend([
+            "── DESK SCOREBOARD ──",
+            f"  Desk equity:       ${sb_equity:>12,.2f}",
+            f"  Deflated Sharpe:   {sb_deflated:+.4f}",
+            f"  Null band (p25/p50/p75): {sb_null_band['p25']:+.4f} / {sb_null_band['p50']:+.4f} / {sb_null_band['p75']:+.4f}",
+            f"  Hypothesis rate:   {vr_pct:.1f}% ({vr_label})",
+            f"  Diversity score:   {sb_diversity:.4f}",
+            "",
+        ])
+
+        if sb_validation < 0.4:
+            alerts.append(
+                f"⚠ VALIDATION RATE: {vr_pct:.1f}% — agents are struggling to validate hypotheses"
+            )
+        if sb_diversity < 0.25:
+            alerts.append(
+                f"⚠ LOW DIVERSITY: {sb_diversity:.3f} — strategy overlap is high, risk of groupthink"
+            )
+    except Exception:
+        logger.warning("briefing: could not compute scoreboard metrics", exc_info=True)
 
     if regime_memo:
         lines.append("── REGIME (risk officer memo) ──")
@@ -230,6 +283,19 @@ def generate_morning_brief(conn, config: dict | None = None) -> dict[str, Any]:
         for pid in pending_reviews:
             lines.append(f"  {pid}")
 
+    if diversity_data:
+        lines.append("")
+        lines.append("── DESK DIVERSITY ──")
+        lines.append(
+            f"  Agents: {diversity_data['agent_count']}  "
+            f"Avg Jaccard: {diversity_data['avg_jaccard']:.3f}  "
+            f"Min Jaccard: {diversity_data['min_jaccard']:.3f}"
+        )
+        if diversity_data.get("coverage_by_family"):
+            for fam, cov in sorted(diversity_data["coverage_by_family"].items()):
+                lines.append(f"  {fam:20s}  coverage={cov:.0%}")
+        lines.append(f"  Immigration required: {'YES' if immigration else 'no'}")
+
     briefing_text = "\n".join(lines)
 
     return {
@@ -245,6 +311,8 @@ def generate_morning_brief(conn, config: dict | None = None) -> dict[str, Any]:
             "regime_summary": regime_summary,
             "alert_count": len(alerts),
             "pending_reviews": pending_reviews,
+            "diversity": diversity_data,
+            "immigration_required": immigration,
         },
         "agents_data": agents_data,
         "regime_memo": regime_memo,
