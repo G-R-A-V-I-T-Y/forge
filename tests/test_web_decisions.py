@@ -30,7 +30,7 @@ def test_decisions_page_renders_with_coverage_tiles(conn):
     # in as secondary stats within the SAME section (not a second panel).
     assert "Decision Coverage" in r.text
     assert "Wait-Counterfactual Fill" in r.text
-    assert r.text.count("Coverage %") == 2  # one per sub-stat row, one section
+    assert r.text.count("Coverage %") == 1  # counterfactual sub-section only
     # Decision content shows up.
     assert "no setup" in r.text
 
@@ -88,5 +88,5 @@ def test_decisions_page_single_coverage_context_var(conn):
     assert "coverage" in captured
     assert "labeling_coverage" not in captured
     assert "counterfactual" in captured["coverage"]
-    assert "eligible_decisions" in captured["coverage"]  # labeling headline
+    assert "total_decisions" in captured["coverage"]  # labeling headline
     assert "filled" in captured["coverage"]["counterfactual"]

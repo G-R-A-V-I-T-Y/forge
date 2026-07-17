@@ -99,7 +99,6 @@ def _init_db(conn: sqlite3.Connection) -> None:
             voided INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS decision_labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             decision_id INTEGER NOT NULL,
             horizon TEXT NOT NULL,
             fwd_return_pct REAL,
@@ -109,11 +108,10 @@ def _init_db(conn: sqlite3.Connection) -> None:
             best_action TEXT,
             best_outcome_pct REAL,
             regret_pct REAL,
-            labeled_at TEXT NOT NULL,
+            labeled_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (decision_id, horizon),
             FOREIGN KEY (decision_id) REFERENCES decisions(id)
         );
-        CREATE INDEX IF NOT EXISTS idx_decision_labels_decision ON decision_labels(decision_id);
-        CREATE INDEX IF NOT EXISTS idx_decision_labels_horizon ON decision_labels(horizon);
     """)
     conn.execute(
         "INSERT INTO agents (id, name, status, spawn_date) VALUES (?, ?, ?, ?)",
@@ -459,7 +457,7 @@ class TestLabelingBasic:
             run_labeling_job(conn, td)
 
         cov = get_labeling_coverage(conn)
-        assert cov["eligible_decisions"] == 2
+        assert cov["total_decisions"] == 2
         assert cov["labeled"] == 2
         assert cov["coverage_pct"] == 100.0
 

@@ -251,7 +251,6 @@ CREATE INDEX IF NOT EXISTS idx_positions_asset ON positions(asset);
 CREATE INDEX IF NOT EXISTS idx_accounts_agent ON accounts(agent_id);
 
 CREATE TABLE IF NOT EXISTS decision_labels (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     decision_id INTEGER NOT NULL,
     horizon TEXT NOT NULL,  -- '1h', '4h', '24h'
     fwd_return_pct REAL,
@@ -261,10 +260,9 @@ CREATE TABLE IF NOT EXISTS decision_labels (
     best_action TEXT,  -- 'wait', 'enter_long', 'enter_short'
     best_outcome_pct REAL,
     regret_pct REAL,
-    labeled_at TEXT NOT NULL,
+    labeled_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (decision_id, horizon),
     FOREIGN KEY (decision_id) REFERENCES decisions(id)
 );
-CREATE INDEX IF NOT EXISTS idx_decision_labels_decision ON decision_labels(decision_id);
-CREATE INDEX IF NOT EXISTS idx_decision_labels_horizon ON decision_labels(horizon);
 CREATE INDEX IF NOT EXISTS idx_hypotheses_agent ON hypotheses(agent_id);
 CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);

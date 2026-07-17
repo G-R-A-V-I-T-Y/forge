@@ -341,7 +341,7 @@ async def main():
     logger.info("Heartbeat scheduler started — runs every %ds", heartbeat_interval)
 
     # ------------------------------------------------------------------
-    # M10: Forward labeling -- runs nightly at 02:30 UTC.
+    # M10: Forward labeling -- runs nightly at 03:00 UTC.
     # meta/labeling.py::run_labeling_job forward-labels every decision at
     # least LONGEST_HOURS old against recorded 5m candles (return, MFE/MAE,
     # best action, regret at 1h/4h/24h) -- feeds agents/dossier.py's
@@ -364,13 +364,13 @@ async def main():
     scheduler.add_job(
         _run_labeling_job,
         trigger="cron",
-        hour=2,
-        minute=30,
+        hour=3,
+        minute=0,
         id="labeling",
         replace_existing=True,
     )
     logger.info(
-        "Forward labeling job scheduled — runs nightly at 02:30 UTC "
+        "Forward labeling job scheduled — runs nightly at 03:00 UTC "
         "(absorbs the M6 counterfactual filler)"
     )
 
