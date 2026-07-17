@@ -287,36 +287,41 @@ def get_lifecycle_decision(
 def harvest_best_trades(
     conn, agent_id: str, count: int = 5,
 ) -> list[dict[str, Any]]:
-    """Harvest the best (highest PnL%) closed trades from an agent.
+    """Harvest the best closed trades from an agent into the seeds table.
 
-    Inserts seed records into the seeds table.
+    Trades are ranked by cleanest thesis execution first (non-null/non-empty
+    ``key_conditions_met``), then by ``pnl_pct`` descending.  This surfaces
+    the trades that most closely matched the agent's original thesis, which
+    are the strongest seeds for spawning successors.
+
     Returns the list of seed records inserted.
     """
     rows = conn.execute(
-        """SELECT id, pnl_pct, agent_reasoning_json, hypothesis
+        """SELECT id, pnl_pct, hypothesis, key_conditions_met
            FROM trades
            WHERE agent_id = ? AND status = 'closed' AND voided = 0
              AND pnl_pct IS NOT NULL
-           ORDER BY pnl_pct DESC
+           ORDER BY
+             CASE WHEN key_conditions_met IS NOT NULL
+                       AND key_conditions_met != '' THEN 0 ELSE 1 END,
+             pnl_pct DESC
            LIMIT ?""",
         (agent_id, count),
     ).fetchall()
 
     seeds = []
-    now = _now()
     for row in rows:
         conn.execute(
             """INSERT INTO seeds
-                   (source_agent_id, trade_id, harvested_at, pnl_pct,
-                    agent_reasoning_json, thesis_excerpt)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                   (agent_id, trade_id, pnl_pct, thesis_excerpt,
+                    key_conditions_met)
+               VALUES (?, ?, ?, ?, ?)""",
             (
                 agent_id,
                 row["id"],
-                now,
                 row["pnl_pct"],
-                row["agent_reasoning_json"],
                 (row["hypothesis"] or "")[:200] if row["hypothesis"] else None,
+                row["key_conditions_met"],
             ),
         )
         seeds.append(dict(row))

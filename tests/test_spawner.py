@@ -166,7 +166,7 @@ def test_harvest_seeds_on_termination(conn):
     assert result["harvested"] == 5
 
     seeds = conn.execute(
-        "SELECT trade_id, pnl_pct FROM seeds WHERE source_agent_id = 'harvest_agent' ORDER BY id"
+        "SELECT trade_id, pnl_pct FROM seeds WHERE agent_id = 'harvest_agent' ORDER BY id"
     ).fetchall()
     assert len(seeds) == 5
     pnls = [row["pnl_pct"] for row in seeds]

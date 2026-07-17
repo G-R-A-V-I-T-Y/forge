@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
     metrics_json TEXT NOT NULL,
     decision TEXT NOT NULL,
     reason TEXT,
+    review_required INTEGER DEFAULT 0,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -160,16 +161,14 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE TABLE IF NOT EXISTS seeds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_agent_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
     trade_id TEXT NOT NULL,
-    harvested_at TEXT NOT NULL,
     pnl_pct REAL NOT NULL,
-    agent_reasoning_json TEXT,
     thesis_excerpt TEXT,
-    used INTEGER NOT NULL DEFAULT 0,
+    key_conditions_met TEXT,
     spawned_agent_id TEXT,
-    FOREIGN KEY (source_agent_id) REFERENCES agents(id),
-    FOREIGN KEY (trade_id) REFERENCES trades(id)
+    used INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS briefings (
