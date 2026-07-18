@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-18T22:10:22Z",
+  "generated_at": "2026-07-18T22:15:20Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -95,7 +95,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "North Mini Code Free",
+      "last_model_used": "MiMo V2.5 Free",
       "paper_balance": 50016.69110173036,
       "paper_peak": 50417.94976138105,
       "live_balance": null
