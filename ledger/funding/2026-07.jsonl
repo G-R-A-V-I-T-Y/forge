@@ -27915,3 +27915,17 @@
 {"ts": "2026-07-18T07:15:19Z", "asset": "LTC-PERP", "rate": 1.25e-05}
 {"ts": "2026-07-18T07:15:19Z", "asset": "BCH-PERP", "rate": -2.52808e-05}
 {"ts": "2026-07-18T07:15:19Z", "asset": "ADA-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "BTC-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "ETH-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "SOL-PERP", "rate": 9.018e-07}
+{"ts": "2026-07-18T07:21:42Z", "asset": "SUI-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "AVAX-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "LINK-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "AAVE-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "BNB-PERP", "rate": 4.3402e-06}
+{"ts": "2026-07-18T07:21:42Z", "asset": "ARB-PERP", "rate": 1.3634e-06}
+{"ts": "2026-07-18T07:21:42Z", "asset": "OP-PERP", "rate": -6.06101e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "TAO-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "FET-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-18T07:21:42Z", "asset": "RENDER-PERP", "rate": 2.5681e-06}
+{"ts": "2026-07-18T07:21:42Z", "asset": "XLM-PERP", "rate": 1.25e-05}
