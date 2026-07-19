@@ -34897,3 +34897,13 @@
 {"ts": "2026-07-19T13:10:59Z", "asset": "BNB-PERP", "rate": -3.9874e-06}
 {"ts": "2026-07-19T13:10:59Z", "asset": "ARB-PERP", "rate": 1.05344e-05}
 {"ts": "2026-07-19T13:10:59Z", "asset": "OP-PERP", "rate": -6.93586e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "BTC-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "ETH-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "SOL-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "SUI-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "AVAX-PERP", "rate": 2.281e-07}
+{"ts": "2026-07-19T13:16:00Z", "asset": "LINK-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "AAVE-PERP", "rate": 1.25e-05}
+{"ts": "2026-07-19T13:16:00Z", "asset": "BNB-PERP", "rate": -2.3292e-06}
+{"ts": "2026-07-19T13:16:00Z", "asset": "ARB-PERP", "rate": 6.1597e-06}
+{"ts": "2026-07-19T13:16:00Z", "asset": "OP-PERP", "rate": -6.51652e-05}
