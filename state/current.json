@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-19T10:30:21Z",
+  "generated_at": "2026-07-19T10:35:21Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -95,7 +95,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "DeepSeek V4 Flash Free",
+      "last_model_used": "Big Pickle",
       "paper_balance": 50016.69110173036,
       "paper_peak": 50417.94976138105,
       "live_balance": null
