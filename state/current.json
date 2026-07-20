@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-20T20:52:41Z",
+  "generated_at": "2026-07-20T20:57:40Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -73,7 +73,7 @@
       "status": "rookie",
       "config_json": "{\"pinned_model\": \"ollama\"}",
       "current_thesis_version": 1,
-      "last_model_used": "no model available",
+      "last_model_used": "Local Ollama (qwen3.6:35b_optimized, thinking off)",
       "paper_balance": 50000.0,
       "paper_peak": 50000.0,
       "live_balance": null
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.019322615640558986,
+      "current_pnl_pct": 0.019853285220576427,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 2482.808169312635,
       "true_notional": 7448.424507937905,
       "opened_at": "2026-07-20T20:41:43.504039Z",
-      "current_pnl_pct": 0.005508836771884877,
+      "current_pnl_pct": 0.002675678246885944,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260720_204143_ETH_9c9e"
@@ -195,7 +195,7 @@
       "notional_usd": 5955.738178658682,
       "true_notional": 17867.214535976047,
       "opened_at": "2026-07-20T20:25:58.634648Z",
-      "current_pnl_pct": -0.010427497835480871,
+      "current_pnl_pct": -0.005432111009986052,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260720_202558_ARB_e9bd"
@@ -213,7 +213,7 @@
       "notional_usd": 5955.738178658682,
       "true_notional": 17867.214535976047,
       "opened_at": "2026-07-20T20:41:43.520900Z",
-      "current_pnl_pct": -0.00788244470924278,
+      "current_pnl_pct": -0.0015337228556819103,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260720_204143_SUI_389e"
@@ -231,7 +231,7 @@
       "notional_usd": 3654.081076744209,
       "true_notional": 14616.324306976836,
       "opened_at": "2026-07-20T20:25:58.656349Z",
-      "current_pnl_pct": -0.02841085669350643,
+      "current_pnl_pct": -0.03514207679492133,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260720_202558_ARB_4c1e"
