@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-19T23:43:38Z",
+  "generated_at": "2026-07-20T16:07:36Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -140,8 +140,8 @@
       "config_json": "{\"pinned_model\": null, \"benchmark_type\": \"btc_hold\", \"description\": \"BTC hold benchmark \\u2014 only trades BTC, holds positions indefinitely\", \"preferred_asset\": \"BTC-PERP\", \"starting_balance\": 50000.0, \"universe\": [\"BTC-PERP\", \"ETH-PERP\", \"SOL-PERP\", \"SUI-PERP\", \"AVAX-PERP\", \"LINK-PERP\", \"AAVE-PERP\", \"BNB-PERP\", \"ARB-PERP\", \"OP-PERP\", \"TAO-PERP\", \"FET-PERP\", \"RENDER-PERP\", \"XRP-PERP\", \"XLM-PERP\", \"TIA-PERP\", \"HYPE-PERP\", \"LTC-PERP\", \"BCH-PERP\", \"ADA-PERP\"]}",
       "current_thesis_version": 1,
       "last_model_used": "benchmark_btc_hold",
-      "paper_balance": null,
-      "paper_peak": null,
+      "paper_balance": 50000.0,
+      "paper_peak": 50000.0,
       "live_balance": null
     }
   ],
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.010301232780262497,
+      "current_pnl_pct": 0.021008271953555563,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
