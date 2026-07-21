@@ -130,3 +130,22 @@ async def test_decide_think_configurable():
     import json as _json
     payload = _json.loads(route.calls.last.request.content)
     assert payload["think"] is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decide_sends_keep_alive():
+    """Default Ollama keep_alive is 5m -- the same cadence as forge.py's
+    heartbeat cycle, so a cycle that starts a few seconds late pays a full
+    reload of this 36B model before it can even start inferring. An
+    explicit longer keep_alive keeps it resident across idle time between
+    cycles."""
+    route = respx.post(OLLAMA_URL).mock(
+        return_value=httpx.Response(
+            200, json={"message": {"content": '{"action": "wait", "reason": "ok"}'}}
+        )
+    )
+    await decide("sys", "prompt")
+    import json as _json
+    payload = _json.loads(route.calls.last.request.content)
+    assert payload["keep_alive"] == "30m"

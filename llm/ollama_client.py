@@ -1,6 +1,7 @@
 """Async Ollama client for local LLM inference."""
 import json
 import logging
+import time
 
 import httpx
 
@@ -48,7 +49,14 @@ async def decide(system_prompt: str, decision_prompt: str, config: dict | None =
         # empirics). Overridable via config["llm_think"] for experiments.
         "think": bool((config or {}).get("llm_think", False)),
         "options": {"temperature": 0.7},
+        # Default Ollama keep_alive is 5m -- the same cadence as forge.py's
+        # heartbeat cycle, so a cycle that starts even a few seconds late
+        # pays a full reload of this 36B model before it can start
+        # inferring. 30m keeps it resident across several cycles' worth of
+        # idle time between calls.
+        "keep_alive": "30m",
     }
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECS) as client:
             resp = await client.post(OLLAMA_URL, json=payload)
@@ -60,6 +68,7 @@ async def decide(system_prompt: str, decision_prompt: str, config: dict | None =
     except Exception as exc:
         logger.error("Ollama request failed: %s", exc)
         return None
+    logger.info("Ollama request completed in %.1fs", time.monotonic() - start)
 
     content = body.get("message", {}).get("content", "")
     if not content:
