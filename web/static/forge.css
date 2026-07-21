@@ -274,6 +274,16 @@ h3.section-header { font-size: var(--font-size-base); color: var(--accent-orange
 .badge-live-data { background: var(--accent-green-bg); color: var(--text-primary); }
 .badge-paper { background: var(--bg-elevated); color: var(--text-secondary); }
 .badge-no-model { background: var(--accent-red); color: #fff; }
+.badge-entry-disabled { background: var(--accent-red); color: #fff; }
+
+.entry-disable-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-red);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md) var(--space-xl);
+  margin-bottom: var(--space-xl);
+}
+.entry-disable-panel h3 { color: var(--accent-red); margin-top: 0; }
 
 .hyp-validated { background: var(--accent-green-bg); color: var(--text-primary); }
 .hyp-falsified { background: var(--accent-red-bg); color: var(--text-primary); }
@@ -779,6 +789,54 @@ pre.code-block {
 
 .metric-updated {
   animation: metric-flash 0.4s ease;
+}
+
+/* ── Equity Chart ─────────────────────────────────────────────── */
+.equity-chart-wrapper {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.equity-chart {
+  width: 100%;
+  overflow: hidden;
+}
+
+.equity-chart svg {
+  width: 100% !important;
+  display: block;
+}
+
+.timespan-selector {
+  display: flex;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.timespan-btn {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-accent);
+  color: var(--text-secondary);
+  padding: 2px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.timespan-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+}
+
+.timespan-btn.active {
+  background: var(--accent-blue-bg);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
 }
 
 /* ── Responsive ────────────────────────────────────────────────── */

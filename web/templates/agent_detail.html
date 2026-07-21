@@ -18,6 +18,16 @@
   </div>
 </div>
 
+{% if entry_disable %}
+<div id="risk-gate" class="entry-disable-panel">
+  <h3>&#9940; Entry Disabled</h3>
+  <p><strong>Reason:</strong> {{ entry_disable.reason or 'no reason recorded' }}</p>
+  <p><strong>Disabled by:</strong> {{ entry_disable.disabled_by }}</p>
+  <p><strong>Disabled at:</strong> {{ entry_disable.disabled_at }}</p>
+  <button class="btn btn-sm btn-primary" onclick="openModal('Enable Entries', 'Allow {{ agent.name }} to open new positions again.', '/api/exec/enable-entries/{{ agent.name }}', 'POST')">Enable Entries</button>
+</div>
+{% endif %}
+
 <!-- ═══ Stat Cards ═══ -->
 <div class="stat-row">
   <div class="stat-card">
@@ -85,10 +95,15 @@
   {% endif %}
 </div>
 
-<!-- ═══ Equity Curve Placeholder ═══ -->
+<!-- ═══ Equity Curve ═══ -->
 <h3 class="section-header">Equity Curve</h3>
-<div class="panel" style="height:200px;display:flex;align-items:center;justify-content:center;">
-  <span class="neutral">Equity chart (uPlot) — coming in template asset pipeline</span>
+<div class="equity-chart-wrapper">
+  <div class="timespan-selector" id="agent-equity-timespan">
+    <button class="timespan-btn" data-span="1d">1D</button>
+    <button class="timespan-btn active" data-span="1w">1W</button>
+    <button class="timespan-btn" data-span="1m">1M</button>
+  </div>
+  <div id="agent-equity-chart" class="equity-chart"></div>
 </div>
 
 <!-- ═══ Tab System ═══ -->
@@ -271,10 +286,13 @@
       <span class="badge badge-{{ cycle.outcome or 'pending' }}">{{ (cycle.outcome or 'PENDING').upper() }}</span>
     </div>
 
-    {% if cycle.rejection_reason %}
+    {% if cycle.outcome == 'not_triggered' %}
+    <div class="neutral help-text" style="color:var(--warning,#e8a020);">⚠ Skipped: {{ cycle.rejection_reason or 'gate blocked (no reason recorded)' }}</div>
+    {% elif cycle.rejection_reason %}
     <div class="neutral help-text">Rejection: {{ cycle.rejection_reason }}</div>
     {% endif %}
 
+    {% if cycle.outcome != 'not_triggered' %}
     <h4 class="section-header">Dossier Digest</h4>
     {% if cycle.research_findings %}
     <pre class="code-block">{{ cycle.research_findings | tojson(indent=2) }}</pre>
@@ -311,6 +329,7 @@
     </table>
     {% else %}
     <div class="neutral help-text">No hypotheses registered for this cycle.</div>
+    {% endif %}
     {% endif %}
   </div>
   {% endfor %}
@@ -411,6 +430,7 @@
     <div class="modal-title" id="modal-title">Confirm Action</div>
     <div class="modal-body" id="modal-body">Are you sure?</div>
     <textarea class="modal-note" id="modal-reason" placeholder="Reason for this action (required)"></textarea>
+    <div id="modal-result" style="display:none;margin-top:var(--space-sm);padding:var(--space-sm);border-radius:4px;font-size:0.85rem;"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" id="modal-confirm-btn">Confirm</button>
@@ -421,6 +441,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ static_url('forge.js') }}"></script>
 <script>
 // ── Tab Switching ──
 document.querySelectorAll('.tab').forEach(function(tab) {
@@ -436,22 +457,66 @@ document.querySelectorAll('.tab').forEach(function(tab) {
 function openModal(title, body, endpoint, method) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').textContent = body;
+  var resultEl = document.getElementById('modal-result');
+  resultEl.style.display = 'none';
+  resultEl.textContent = '';
+  resultEl.style.background = '';
   document.getElementById('confirm-modal').classList.add('open');
   document.getElementById('modal-confirm-btn').onclick = function() {
     var reason = document.getElementById('modal-reason').value.trim();
     if (!reason) { alert('Reason is required'); return; }
+    var btn = document.getElementById('modal-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = 'Running…';
     fetch(endpoint + '?reason=' + encodeURIComponent(reason), { method: method || 'POST' })
       .then(function(r) { return r.json(); })
       .then(function(d) {
-        if (d.ok || d.ok === undefined) { location.reload(); }
-        else { alert(d.error || 'Action failed'); }
+        btn.disabled = false;
+        btn.textContent = 'Confirm';
+        if (d.error) {
+          resultEl.style.background = 'rgba(220,50,50,0.15)';
+          resultEl.textContent = '✗ Error: ' + d.error;
+          resultEl.style.display = 'block';
+          return;
+        }
+        if (!d.ok) {
+          resultEl.style.background = 'rgba(220,50,50,0.15)';
+          resultEl.textContent = '✗ ' + (d.error || 'Action failed');
+          resultEl.style.display = 'block';
+          return;
+        }
+        var outcome = d.outcome;
+        if (outcome === 'deployed') {
+          resultEl.style.background = 'rgba(50,180,50,0.15)';
+          resultEl.textContent = '✓ Reflection complete — spec v' + d.spec_version + ' deployed as challenger.';
+        } else if (outcome === 'rejected') {
+          resultEl.style.background = 'rgba(220,150,0,0.15)';
+          resultEl.textContent = '⚠ Reflection ran but spec was rejected: ' + (d.rejection_reason || d.blocked_by_gate || 'see cycles tab for details');
+        } else if (outcome === 'not_triggered') {
+          resultEl.style.background = 'rgba(100,100,100,0.15)';
+          resultEl.textContent = '— Reflection skipped: ' + (d.blocked_by_gate || d.rejection_reason || 'gate blocked');
+        } else {
+          resultEl.style.background = 'rgba(50,180,50,0.15)';
+          resultEl.textContent = '✓ Done';
+        }
+        resultEl.style.display = 'block';
+        setTimeout(function() { location.reload(); }, 2500);
       })
-      .catch(function(e) { alert(e.message); });
+      .catch(function(e) {
+        btn.disabled = false;
+        btn.textContent = 'Confirm';
+        resultEl.style.background = 'rgba(220,50,50,0.15)';
+        resultEl.textContent = '✗ Request failed: ' + e.message;
+        resultEl.style.display = 'block';
+      });
   };
 }
 function closeModal() {
   document.getElementById('confirm-modal').classList.remove('open');
   document.getElementById('modal-reason').value = '';
+  var resultEl = document.getElementById('modal-result');
+  resultEl.style.display = 'none';
+  resultEl.textContent = '';
 }
 document.getElementById('confirm-modal').addEventListener('click', function(e) {
   if (e.target === this) closeModal();
@@ -618,5 +683,21 @@ function escapeHtml(str) {
   div.appendChild(document.createTextNode(str));
   return div.innerHTML;
 }
+
+/* ── Agent Equity Curve ───────────────────────────────────────── */
+(function() {
+  var agentName = '{{ agent.id }}';
+  function renderChart(span) {
+    renderAgentEquityChart('agent-equity-chart', agentName, span);
+  }
+  document.querySelectorAll('#agent-equity-timespan .timespan-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('#agent-equity-timespan .timespan-btn').forEach(function(b) { b.classList.remove('active'); });
+      this.classList.add('active');
+      renderChart(this.dataset.span);
+    });
+  });
+  renderChart('1w');
+})();
 </script>
 {% endblock %}
