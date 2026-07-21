@@ -59,3 +59,26 @@ def test_overview_leaderboard_shows_em_dash_before_any_cycle(conn):
     # Server-rendered leaderboard table: em-dash is the HTML entity &mdash;
     # (win_rate, profit_factor, sharpe all render as em-dash before any cycle)
     assert r.text.count("&mdash;") >= 3
+
+
+def test_overview_leaderboard_shows_entry_disabled_badge(conn):
+    """An open entry_disables row (any disabled_by) must be visible on the
+    leaderboard with its reason -- this was previously invisible anywhere
+    in the UI, which is exactly how the 2026-07-12..07-15 mass-block went
+    unnoticed for 8 days."""
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason) "
+        f"VALUES ('{AGENT_ID}', 'human', '2026-07-15T06:26:40Z', 'Entry blocked by risk check')"
+    )
+    conn.commit()
+    r = _client(conn).get("/")
+    assert r.status_code == 200
+    assert "Entry blocked by risk check" in r.text
+
+
+def test_overview_leaderboard_no_badge_when_gate_open(conn):
+    insert_agent(conn, AGENT_ID, AGENT_ID, "2026-06-29T00:00:00Z", "{}")
+    r = _client(conn).get("/")
+    assert r.status_code == 200
+    assert "ENTRY DISABLED" not in r.text

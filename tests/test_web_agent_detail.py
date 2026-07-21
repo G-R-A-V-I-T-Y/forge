@@ -72,6 +72,26 @@ def test_agent_detail_no_spec_history_shows_graceful_state(conn):
     assert "No spec versions deployed yet" in r.text
 
 
+def test_agent_detail_shows_entry_disable_panel(conn):
+    _seed_agent(conn)
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason) "
+        f"VALUES ('{AGENT_ID}', 'human', '2026-07-15T06:26:40Z', 'Entry blocked by risk check')"
+    )
+    conn.commit()
+    r = _client(conn).get(f"/agents/{AGENT_ID}")
+    assert r.status_code == 200
+    assert "Entry blocked by risk check" in r.text
+    assert "Enable Entries" in r.text
+
+
+def test_agent_detail_no_entry_disable_panel_when_gate_open(conn):
+    _seed_agent(conn)
+    r = _client(conn).get(f"/agents/{AGENT_ID}")
+    assert r.status_code == 200
+    assert "Enable Entries" not in r.text
+
+
 def test_agent_detail_single_spec_version_no_diff(conn):
     _seed_agent(conn)
     _insert_spec(conn, 1, "agent_id: jade_hawk\nspec_version: 1\n")

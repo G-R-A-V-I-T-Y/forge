@@ -253,6 +253,7 @@ async def overview(request: Request):
                 "max_drawdown": (peak - bal) / peak if peak > 0 else 0.0,
                 "open_positions_count": pos_count,
                 "last_model_used": _resolve_model_used(conn, aid, agent.get("last_model_used")),
+                "entry_disable": _entry_disable_status(conn, aid),
             }
         )
 
@@ -963,6 +964,7 @@ async def agent_detail(request: Request, name: str):
             "spec_diff": spec_diff,
             "calibration": calibration,
             "reflection_cycles": reflection_cycles,
+            "entry_disable": _entry_disable_status(conn, aid),
         },
     )
 
@@ -1195,6 +1197,23 @@ async def api_trade_detail(trade_id: str):
     if trade is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(trade)
+
+
+def _entry_disable_status(conn, agent_id: str) -> dict | None:
+    """Currently-open entry_disables row for this agent, any disabled_by.
+
+    Mirrors the live gate RiskOfficer.entry_gate_status() reads at decision
+    time (agents/decision_loop.py:491) -- this is read-only and does not
+    affect gating, it only lets the UI show what the gate is already
+    enforcing. Returns None when the gate is open.
+    """
+    row = conn.execute(
+        """SELECT reason, disabled_by, disabled_at FROM entry_disables
+           WHERE agent_id = ? AND enabled_at IS NULL
+           ORDER BY id DESC LIMIT 1""",
+        (agent_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def _audit(conn, action: str, agent_id: str | None, reason: str | None, details: str | None = None):
