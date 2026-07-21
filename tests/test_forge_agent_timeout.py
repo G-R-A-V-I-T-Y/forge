@@ -21,6 +21,9 @@ async def test_spawn_agent_runner_timeout_exceeds_ollama_headroom(monkeypatch):
 
     class FakeProc:
         returncode = 0
+        stdout = None
+        stderr = None
+        stdin = None
 
         async def communicate(self):
             return b"AGENT_RESULT [a1] action=wait detail=ok\n", b""

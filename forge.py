@@ -31,7 +31,7 @@ from backtest.dsl import load_spec
 from llm.llama_server import server_manager as llama_server
 from market import heartbeat
 from market.provider import MarketProvider
-from store.db import get_connection, init_schema
+from store.db import capture_equity_snapshot, get_connection, init_schema
 from store.git_sync import sync_to_git
 from store.positions import (
     get_all_open_positions,
@@ -133,9 +133,21 @@ async def _spawn_agent_runner(agent_id: str, db_path: str, config_path: str) -> 
         return {"agent_id": agent_id, "action": "timeout", "detail": ""}
 
     out_text = stdout.decode("utf-8", errors="replace")
+    err_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+
+    # Explicitly close streams to avoid Python 3.12+ Windows bug where
+    # asyncio subprocess transport __del__ tries to repr a closed pipe
+    # and raises ValueError: I/O operation on closed pipe.
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None and hasattr(stream, "_transport") and stream._transport is not None:
+            stream._transport.close()
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
 
     if proc.returncode not in (0, None):
-        err_text = stderr.decode("utf-8", errors="replace")[:300]
         logger.warning(
             "[%s] Agent runner exited %d: %.300s",
             agent_id,
@@ -652,6 +664,28 @@ async def main():
     # ------------------------------------------------------------------
     wake_interval = desk_config.get("wake_interval_seconds", 300)
 
+    # ------------------------------------------------------------------
+    # Equity snapshot — captures every agent's paper balance to drive
+    # the portfolio & per-agent equity curve charts in the UI.
+    # ------------------------------------------------------------------
+    async def _run_equity_snapshot_job():
+        try:
+            conn = get_connection(str(DB_PATH))
+            try:
+                capture_equity_snapshot(conn)
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning("Equity snapshot job failed", exc_info=True)
+
+    scheduler.add_job(
+        _run_equity_snapshot_job,
+        trigger=IntervalTrigger(seconds=wake_interval, timezone=timezone.utc),
+        id="equity_snapshot",
+        replace_existing=True,
+    )
+    logger.info("Equity snapshot job scheduled — runs every %ds", wake_interval)
+
     async def _fleet_loop():
         while True:
             await agent_fleet_cycle(config)
@@ -667,14 +701,28 @@ async def main():
     # ------------------------------------------------------------------
     # Web server
     # ------------------------------------------------------------------
+    import socket as _socket
+
+    def _find_free_port(start: int = 8000, attempts: int = 16) -> int:
+        for p in range(start, start + attempts):
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("0.0.0.0", p))
+                    return p
+                except OSError:
+                    continue
+        raise OSError(f"No free port found in range {start}–{start + attempts - 1}")
+
+    port = _find_free_port()
     server_config = uvicorn.Config(
         web_app,
         host="0.0.0.0",
-        port=8000,
+        port=port,
         log_level="warning",
     )
     server = uvicorn.Server(server_config)
-    logger.info("Web UI starting at http://localhost:8000")
+    logger.info("Web UI starting at http://localhost:%d", port)
 
     try:
         await asyncio.gather(server.serve(), fleet_task)

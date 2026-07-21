@@ -16,6 +16,26 @@ from pathlib import Path
 _THESES_DIR = Path(__file__).parent.parent / "agents" / "theses"
 
 
+def _seed_account(conn: sqlite3.Connection, agent_id: str, balance: float) -> None:
+    """Create the initial paper account snapshot if the agent has none.
+
+    Without an accounts row the agent is invisible to
+    capture_equity_snapshot(), so its trader page never gets an equity
+    curve (btc_hold never trades, so the trading path never creates one).
+    """
+    existing = conn.execute(
+        "SELECT 1 FROM accounts WHERE agent_id = ? AND mode = 'paper' LIMIT 1",
+        (agent_id,),
+    ).fetchone()
+    if existing is None:
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            "INSERT INTO accounts (agent_id, mode, balance, peak_balance, recorded_at) "
+            "VALUES (?, 'paper', ?, ?, ?)",
+            (agent_id, balance, balance, now),
+        )
+
+
 def _seal_thesis(agent_id: str, text: str) -> None:
     """Write a thesis file for a benchmark agent so forge.py startup doesn't
     log spurious 'Thesis not found' warnings."""
@@ -54,6 +74,7 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
             1,
         ),
     )
+    _seed_account(conn, "benchmark_random_walk", starting_balance)
     _seal_thesis(
         "benchmark_random_walk",
         "# Random Walk Benchmark\n\n"
@@ -83,6 +104,7 @@ def seed_benchmark_agents(conn: sqlite3.Connection, config: dict) -> None:
             1,
         ),
     )
+    _seed_account(conn, "benchmark_btc_hold", starting_balance)
     _seal_thesis(
         "benchmark_btc_hold",
         "# BTC Hold Benchmark\n\n"

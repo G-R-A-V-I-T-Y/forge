@@ -25,6 +25,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_trades_columns(conn)
     _migrate_positions_columns(conn)
     _migrate_agents_columns(conn)
+    _migrate_equity_snapshots(conn)
     if indexes_sql:
         conn.executescript(indexes_sql)
         conn.commit()
@@ -197,6 +198,73 @@ def get_latest_account(
         (agent_id, mode),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _migrate_equity_snapshots(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(equity_snapshots)")}
+    if "id" not in existing:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS equity_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "recorded_at TEXT NOT NULL,"
+            "total_equity REAL NOT NULL)"
+        )
+    existing_agent = {row["name"] for row in conn.execute("PRAGMA table_info(agent_equity_snapshots)")}
+    if "id" not in existing_agent:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS agent_equity_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "agent_id TEXT NOT NULL,"
+            "balance REAL NOT NULL,"
+            "recorded_at TEXT NOT NULL)"
+        )
+    conn.commit()
+
+
+def capture_equity_snapshot(conn: sqlite3.Connection) -> None:
+    """Snapshot every agent's paper balance and the portfolio total."""
+    now = _now()
+    rows = conn.execute(
+        "SELECT agent_id, balance FROM accounts WHERE mode = 'paper' "
+        "AND id IN (SELECT MAX(id) FROM accounts WHERE mode = 'paper' GROUP BY agent_id)"
+    ).fetchall()
+    if not rows:
+        return
+    total = sum(r["balance"] for r in rows)
+    conn.execute(
+        "INSERT INTO equity_snapshots (recorded_at, total_equity) VALUES (?, ?)",
+        (now, total),
+    )
+    for r in rows:
+        conn.execute(
+            "INSERT INTO agent_equity_snapshots (agent_id, balance, recorded_at) VALUES (?, ?, ?)",
+            (r["agent_id"], r["balance"], now),
+        )
+    conn.commit()
+
+
+def get_portfolio_equity_history(
+    conn: sqlite3.Connection, since: str, npoints: int = 200
+) -> list[dict]:
+    """Return evenly-spaced portfolio equity snapshots since `since` (ISO timestamp)."""
+    rows = conn.execute(
+        "SELECT recorded_at, total_equity FROM equity_snapshots "
+        "WHERE recorded_at >= ? ORDER BY recorded_at ASC",
+        (since,),
+    ).fetchall()
+    return [{"t": r["recorded_at"], "v": r["total_equity"]} for r in rows]
+
+
+def get_agent_equity_history(
+    conn: sqlite3.Connection, agent_id: str, since: str, npoints: int = 200
+) -> list[dict]:
+    """Return agent equity snapshots since `since` (ISO timestamp)."""
+    rows = conn.execute(
+        "SELECT recorded_at, balance FROM agent_equity_snapshots "
+        "WHERE agent_id = ? AND recorded_at >= ? ORDER BY recorded_at ASC",
+        (agent_id, since),
+    ).fetchall()
+    return [{"t": r["recorded_at"], "v": r["balance"]} for r in rows]
 
 
 def void_corrupted_trades(conn: sqlite3.Connection) -> int:

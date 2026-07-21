@@ -279,3 +279,20 @@ CREATE TABLE IF NOT EXISTS backtest_trials (
 );
 
 CREATE INDEX IF NOT EXISTS idx_backtest_trials_agent ON backtest_trials(agent_id);
+
+-- Equity snapshots for portfolio & per-agent equity curves
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    total_equity REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_equity_snapshots_at ON equity_snapshots(recorded_at);
+
+CREATE TABLE IF NOT EXISTS agent_equity_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    balance REAL NOT NULL,
+    recorded_at TEXT NOT NULL,
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_equity_snapshots_at ON agent_equity_snapshots(agent_id, recorded_at);
