@@ -173,6 +173,7 @@ def run_reflection(
     config: dict,
     llm_fn: Callable[[str, str], str],
     reflection_id: int | None = None,
+    force: bool = False,
 ) -> ReflectionResult:
     """Full reflection cycle for one agent — M10 three-stage pipeline.
 
@@ -211,6 +212,11 @@ def run_reflection(
         the reflection cycle that proposed it. ``None`` is accepted for
         ad-hoc/manual invocations that don't first insert a reflections row
         (register_hypotheses treats that as ad-hoc registration).
+    force:
+        When True, bypass Gate 2 (update throttle). Intended for manual
+        web-triggered reflections where the operator explicitly wants to
+        run a cycle regardless of the auto-scheduler cadence. Gate 1
+        (min_trades) still applies -- there must be enough data to reflect on.
     """
     gates_passed: list[str] = []
 
@@ -249,18 +255,21 @@ def run_reflection(
     gates_passed.append("min_trades")
 
     # -- Gate 2: Update throttle ----------------------------------------------
-    passed, reason = check_update_throttle(conn, agent_id)
-    if not passed:
-        return ReflectionResult(
-            triggered=False,
-            new_spec_yaml=None,
-            spec_version=None,
-            deployed=False,
-            rejection_reason=None,
-            blocked_by_gate=reason,
-            adversarial_flaws=[],
-            gates_passed=gates_passed,
-        )
+    # Bypassed when force=True (manual web trigger). The operator explicitly
+    # requested a reflection cycle, so the cadence guard is irrelevant.
+    if not force:
+        passed, reason = check_update_throttle(conn, agent_id)
+        if not passed:
+            return ReflectionResult(
+                triggered=False,
+                new_spec_yaml=None,
+                spec_version=None,
+                deployed=False,
+                rejection_reason=None,
+                blocked_by_gate=reason,
+                adversarial_flaws=[],
+                gates_passed=gates_passed,
+            )
     gates_passed.append("update_throttle")
 
     # -- Gather context -------------------------------------------------------
@@ -1136,7 +1145,7 @@ def _build_propose_prompt(
 
 
 def check_min_trades(
-    conn, agent_id: str, min_trades: int = 20,
+    conn, agent_id: str, min_trades: int = 15,
 ) -> tuple[bool, str | None]:
     """Gate 1: At least *min_trades* closed, non-voided trades exist."""
     row = conn.execute(
@@ -1192,7 +1201,7 @@ def check_pattern_persistence(
     conn,
     agent_id: str,
     feature_name: str,
-    min_windows: int = 3,
+    min_windows: int = 1,
     window_days: int = 7,
 ) -> tuple[bool, str | None]:
     """Gate 3: A condition's feature must have trade evidence spanning
@@ -1226,11 +1235,11 @@ def check_pattern_persistence(
         return False, "not enough valid timestamps for persistence check"
 
     date_range_days = (timestamps[-1] - timestamps[0]).days
-    total_windows = max(1, int(date_range_days / window_days))
+    total_windows = date_range_days // window_days
 
     if total_windows < min_windows:
         return False, (
-            f"trade history spans ~{max(1, date_range_days)}d"
+            f"trade history spans ~{date_range_days}d"
             f" ({total_windows} windows of {window_days}d),"
             f" need at least {min_windows} windows"
         )

@@ -387,6 +387,27 @@ class TestPatternPersistence:
         assert passed is False
         assert "no historical trades" in reason
 
+    def test_default_min_windows_fails_for_same_day_trades(self, conn):
+        """Default min_windows=1, window_days=7: same-day trades span 0
+        days (0 windows), which is < 1 required window -- the gate fails.
+        A real week of accumulated trading data is required."""
+        _setup_agent(conn)
+        for i in range(5):
+            insert_trade(conn, _trade(days_ago=0))
+
+        passed, reason = check_pattern_persistence(conn, AGENT_ID, "some_feature")
+        assert passed is False
+        assert "need at least" in reason
+
+    def test_default_min_windows_passes_at_seven_days(self, conn):
+        """Trades spanning exactly one week (7 days) satisfy min_windows=1."""
+        _setup_agent(conn)
+        insert_trade(conn, _trade(days_ago=7))
+        insert_trade(conn, _trade(days_ago=0))
+
+        passed, reason = check_pattern_persistence(conn, AGENT_ID, "some_feature")
+        assert passed is True, f"Expected pass, got: {reason}"
+
 
 class TestAdversarialPass:
     def test_no_critical_flaws_passes(self):
@@ -553,7 +574,7 @@ def test_pattern_persistence(conn):
     _deploy_initial_spec(conn)
 
     # 35 trades all within 1 day → min_trades (≥20) and holdout (≥30) pass,
-    # but pattern_persistence fails since only 1 window of 7d.
+    # but pattern_persistence fails since the 0-day span is < 1 window (7d).
     for i in range(35):
         t = _trade(days_ago=0)
         insert_trade(conn, t)

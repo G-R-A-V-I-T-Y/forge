@@ -272,23 +272,27 @@ class TestReflectionScheduler:
 
     def test_check_agent_eligible_trade_count_due(self, conn):
         from meta.reflection_scheduler import check_agent_eligible
-        # alpha_trader has 60 trades, interval is 20 — due for reflection
+        # gamma_trader has 60 trades, interval is 20 — due for reflection.
+        # (Not alpha_trader: its 60% WR / PF 2.0 clears the scheduler's
+        # "beating targets" skip added alongside this fixture, so it would
+        # never be eligible regardless of cadence — see gamma_trader's 30%
+        # WR in _seed_trades, which stays under that bar.)
         trigger = {"mode": "trade_count", "trade_interval": 20}
-        eligible, reason = check_agent_eligible(conn, "alpha_trader", trigger)
+        eligible, reason = check_agent_eligible(conn, "gamma_trader", trigger)
         assert eligible, f"Should be eligible: {reason}"
 
     def test_check_agent_eligible_trade_count_not_due(self, conn):
         from meta.reflection_scheduler import check_agent_eligible
-        # Insert a recent reflection for alpha_trader
+        # Insert a recent reflection for gamma_trader
         conn.execute(
             "INSERT INTO reflections (agent_id, triggered_at) VALUES (?, ?)",
-            ("alpha_trader", "2026-07-09T00:00:00Z"),
+            ("gamma_trader", "2026-07-09T00:00:00Z"),
         )
         conn.commit()
         trigger = {"mode": "trade_count", "trade_interval": 20}
-        # alpha has 60 trades, last reflection at trade 0, so 60 since last
+        # gamma has 60 trades, last reflection at trade 0, so 60 since last
         # Still due because 60 >= 20
-        eligible, reason = check_agent_eligible(conn, "alpha_trader", trigger)
+        eligible, reason = check_agent_eligible(conn, "gamma_trader", trigger)
         assert eligible
 
     def test_check_agent_eligible_terminated(self, conn):
@@ -508,15 +512,19 @@ class TestReflectionCycleLogging:
             lambda *a, **k: self._canned_result(triggered=True),
         )
 
+        # gamma_trader, not alpha_trader: its 30% WR stays under the
+        # scheduler's "beating targets" skip (PF>=1.4, WR>=55%), whereas
+        # alpha_trader's 60% WR / PF 2.0 would make it ineligible regardless
+        # of the trade-count cadence this test actually exercises.
         trigger = {"mode": "trade_count", "trade_interval": 20}
-        eligible_before, _ = rs.check_agent_eligible(conn, "alpha_trader", trigger)
+        eligible_before, _ = rs.check_agent_eligible(conn, "gamma_trader", trigger)
         assert eligible_before is True  # 60 closed trades, no reflection yet
 
-        rs.run_reflection_cycle(conn, "alpha_trader", {}, lambda p: "{}")
+        rs.run_reflection_cycle(conn, "gamma_trader", {}, lambda p: "{}")
 
         row = conn.execute(
             "SELECT triggered_at, outcome, rejection_reason FROM reflections "
-            "WHERE agent_id = 'alpha_trader'"
+            "WHERE agent_id = 'gamma_trader'"
         ).fetchone()
         assert row is not None, "run_reflection_cycle must insert its own reflections row"
         assert row["triggered_at"]
@@ -525,7 +533,7 @@ class TestReflectionCycleLogging:
 
         # The row is what makes eligibility real: trades since the
         # reflection are now < interval, so the scheduler stops re-firing.
-        eligible_after, reason = rs.check_agent_eligible(conn, "alpha_trader", trigger)
+        eligible_after, reason = rs.check_agent_eligible(conn, "gamma_trader", trigger)
         assert eligible_after is False, reason
 
     def test_untriggered_reflection_still_paces_scheduler(self, conn, monkeypatch):

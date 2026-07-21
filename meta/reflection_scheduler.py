@@ -79,6 +79,33 @@ def check_agent_eligible(conn, agent_id: str, trigger: dict[str, Any]) -> tuple[
     if mode == "manual":
         return False, "reflection trigger is set to manual"
 
+    # Optional global start gate: nothing is eligible before this instant,
+    # regardless of mode. Lets an operator schedule "start the cadence at
+    # midnight PT tonight" without an external cron job -- the setting can
+    # be written now and the code enforces the delay itself.
+    not_before = trigger.get("not_before")
+    if not_before:
+        try:
+            not_before_dt = datetime.fromisoformat(not_before.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) < not_before_dt:
+                return False, f"reflection trigger not active until {not_before}"
+        except (ValueError, TypeError):
+            pass
+
+    # Skip agents that are already beating the proposal's per-agent targets
+    # (PF >= 1.4 and win rate >= 55%, docs/FORGE_PROPOSAL.md "Target
+    # Performance"). Reflection exists to fix a thesis that isn't working --
+    # an agent clearing both bars isn't a candidate for revision, and
+    # forcing a reflection risks overfitting a thesis that's already correct.
+    from store.performance import compute_metrics
+
+    metrics = compute_metrics(conn, agent_id)
+    if metrics.get("profit_factor", 0) >= 1.4 and metrics.get("win_rate", 0) >= 0.55:
+        return False, (
+            f"agent beating targets (PF={metrics.get('profit_factor', 0):.2f}, "
+            f"WR={metrics.get('win_rate', 0):.1%}) — reflection skipped"
+        )
+
     if mode == "trade_count":
         interval = trigger.get("trade_interval", 20)
         # Count trades since last reflection
@@ -150,6 +177,7 @@ def run_reflection_cycle(
     agent_id: str,
     config: dict,
     llm_fn: Callable[[str, str], str],
+    force: bool = False,
 ) -> dict[str, Any]:
     """Run one reflection cycle for an agent, logging the result.
 
@@ -178,7 +206,7 @@ def run_reflection_cycle(
     conn.commit()
 
     result = _reflection_mod.run_reflection(
-        conn, agent_id, config, llm_fn, reflection_id=reflection_row_id,
+        conn, agent_id, config, llm_fn, reflection_id=reflection_row_id, force=force,
     )
 
     rejection = None

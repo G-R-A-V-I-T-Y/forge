@@ -79,9 +79,24 @@ def _trade(agent_id=AGENT_ID, days_ago=0, result="win", pnl_pct=0.05):
 
 def _insert_trades(conn, agent_id, count):
     """Insert *count* closed trades spanning *count* days (newest last) --
-    enough date spread to satisfy the pattern_persistence gate."""
+    enough date spread to satisfy the pattern_persistence gate.
+
+    Mixed win/loss (40% win rate) so these fixtures stay under the
+    reflection_scheduler "beating targets" skip (PF >= 1.4 and WR >= 55%,
+    see check_agent_eligible) -- these tests exercise cadence gating, not
+    the performance skip, and an all-winners fixture would trip it.
+    """
     for i in range(count):
-        insert_trade(conn, _trade(agent_id=agent_id, days_ago=count - i))
+        is_win = i % 5 < 2  # 2 of every 5 trades win
+        insert_trade(
+            conn,
+            _trade(
+                agent_id=agent_id,
+                days_ago=count - i,
+                result="win" if is_win else "loss",
+                pnl_pct=0.05 if is_win else -0.03,
+            ),
+        )
 
 
 def _setup_agent(conn, agent_id=AGENT_ID):
@@ -262,7 +277,7 @@ def test_rejected_revision_logged_with_gate(conn, monkeypatch, tmp_path):
     _setup_agent(conn)
     _deploy_initial_spec(conn)
     # 35 trades all entered "today" -- min_trades/holdout pass, but
-    # pattern_persistence fails (only 1 window of 7 days).
+    # pattern_persistence fails (0-day span is < 1 window of 7 days).
     for _ in range(35):
         insert_trade(conn, _trade(days_ago=0))
 
