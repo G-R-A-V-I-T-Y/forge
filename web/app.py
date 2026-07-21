@@ -4,6 +4,7 @@ import json as _json
 import logging
 import math
 import random
+import re
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from store.query import query_trades, count_trades, get_trade
 from store import settings as settings_store
 from store.specs import get_spec_history
 from store.counterfactuals import get_counterfactual_coverage
+from store.db import get_agent_equity_history, get_portfolio_equity_history
 from meta.labeling import get_labeling_coverage
 from execution.paper_bridge import PaperBridge
 from meta.head_of_desk import (
@@ -49,10 +51,44 @@ STATIC_DIR = Path(__file__).parent / "static"
 _THESES_DIR = Path(__file__).resolve().parent.parent / "agents" / "theses"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def static_url(filename: str) -> str:
+    """Versioned URL for a static asset (e.g. /static/forge.js?v=1721433600).
+
+    StaticFiles sends no Cache-Control header, so browsers apply heuristic
+    freshness and keep serving a stale cached copy after the file changes on
+    disk — which silently broke the equity charts when forge.js gained new
+    functions. The mtime query string changes the cache key whenever the
+    file changes, forcing a fresh fetch.
+    """
+    if filename not in _STATIC_VERSIONS:
+        path = STATIC_DIR / filename
+        try:
+            _STATIC_VERSIONS[filename] = int(path.stat().st_mtime)
+        except OSError:
+            _STATIC_VERSIONS[filename] = 0
+    return f"/static/{filename}?v={_STATIC_VERSIONS[filename]}"
+
+
+_STATIC_VERSIONS: dict[str, int] = {}
+templates.env.globals["static_url"] = static_url
+
 app = FastAPI(title="Forge")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Wire the reflection transport for standalone uvicorn startup.
+# When the web server runs through forge.py (line 296), this is
+# overwritten with the same value.  When running standalone
+# (`uvicorn web.app:app --reload`) the wire never happens, and
+# /api/exec/trigger-reflection returns 503 because getattr(…, "llm_fn", None)
+# is None.  Import is local to avoid circular imports at module level.
+@app.on_event("startup")
+async def _wire_reflection_transport():
+    from llm import reflection_client
+    app.state.llm_fn = reflection_client.complete
 
 logger = logging.getLogger("forge.web")
 
@@ -821,6 +857,39 @@ async def api_desk_scoreboard():
     }
 
 
+_SPAN_HOURS = {"1d": 24, "1w": 168, "1m": 720}
+
+
+def _since_from_span(span: str) -> str:
+    hours = _SPAN_HOURS.get(span, 168)
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@app.get("/api/equity/history")
+async def api_equity_history(span: str = "1w"):
+    """Portfolio equity curve data points."""
+    conn = app.state.conn
+    since = _since_from_span(span)
+    try:
+        points = get_portfolio_equity_history(conn, since)
+    except Exception:
+        points = []
+    return {"points": points, "span": span}
+
+
+@app.get("/api/agents/{name}/equity")
+async def api_agent_equity_history(name: str, span: str = "1w"):
+    """Per-agent equity curve data points."""
+    conn = app.state.conn
+    since = _since_from_span(span)
+    try:
+        points = get_agent_equity_history(conn, name, since)
+    except Exception:
+        points = []
+    return {"points": points, "span": span, "agent": name}
+
+
 @app.get("/agents/{name}", response_class=HTMLResponse)
 async def agent_detail(request: Request, name: str):
     conn = app.state.conn
@@ -1158,9 +1227,18 @@ async def exec_trigger_reflection(agent_id: str, reason: str = Query(...)):
     # challenger-resolution job. Before this fix, hypotheses registered via
     # this endpoint had reflection_id = NULL and a deployed challenger
     # could never resolve (T8 review Finding 1).
-    run_reflection_cycle(conn, agent_id, config, llm_fn)
+    result = run_reflection_cycle(conn, agent_id, config, llm_fn, force=True)
     _audit(conn, "trigger_reflection", agent_id, reason)
-    return {"ok": True, "detail": f"Reflection triggered for {agent_id}"}
+    return {
+        "ok": True,
+        "detail": f"Reflection triggered for {agent_id}",
+        "outcome": result.get("outcome"),
+        "triggered": result.get("triggered"),
+        "deployed": result.get("deployed"),
+        "rejection_reason": result.get("rejection_reason"),
+        "blocked_by_gate": result.get("blocked_by_gate"),
+        "spec_version": result.get("spec_version"),
+    }
 
 
 @app.post("/api/exec/trigger-all-reflections")
@@ -1198,7 +1276,7 @@ async def exec_trigger_all_reflections(reason: str = Query(...)):
             # creates the reflections row so this cycle's hypotheses stay
             # resolvable (T8 review Finding 1). trigger-all-reflections is
             # a documented production control path, not a debug path.
-            run_reflection_cycle(conn, aid, config, llm_fn)
+            run_reflection_cycle(conn, aid, config, llm_fn, force=True)
             _audit(conn, "trigger_reflection", aid, reason)
             queued.append(aid)
         except Exception as exc:
@@ -1270,13 +1348,26 @@ async def exec_disable_entries(agent_id: str, reason: str = Query(...)):
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
+    # Idempotent: a repeated call (retry, or a script hitting this in a
+    # loop) must not stack another open row on top of an existing one --
+    # this endpoint is exactly how 5,225 stuck entry_disables rows
+    # accumulated 2026-07-12..07-15, invisible because nothing reads
+    # entry_disables in the UI and RiskOfficer.enable_entry can only lift
+    # rows it created itself (never a human-set one).
+    existing = conn.execute(
+        "SELECT id FROM entry_disables WHERE agent_id = ? AND enabled_at IS NULL",
+        (agent_id,),
+    ).fetchone()
+    if existing:
+        return {"ok": True, "already_disabled": True}
+
     conn.execute(
         "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason, enabled_at) VALUES (?, 'human', ?, ?, NULL)",
         (agent_id, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), reason),
     )
     conn.commit()
     _audit(conn, "disable_entries", agent_id, reason)
-    return {"ok": True}
+    return {"ok": True, "already_disabled": False}
 
 
 @app.post("/api/exec/enable-entries/{agent_id}")

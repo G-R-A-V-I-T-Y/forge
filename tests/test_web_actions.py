@@ -92,18 +92,33 @@ def _iso(hours_ago: float = 0) -> str:
     )
 
 
-def _seed_closed_trades(conn, agent_id, n, hours_ago=1) -> None:
-    """n closed winning trades, patterned on tests/test_meta_controller.py's
+def _seed_closed_trades(conn, agent_id, n, hours_ago=1, win_rate=1.0) -> None:
+    """n closed trades, patterned on tests/test_meta_controller.py's
     _seed_trades -- entry_timestamp is always relative to now() so these
-    fixtures don't age past meta/evaluator.py's zero-trades-in-5-days rule."""
+    fixtures don't age past meta/evaluator.py's zero-trades-in-5-days rule.
+
+    win_rate controls the win/loss mix (default 1.0 = all wins, the
+    original behavior). Reflection-eligibility fixtures pass a lower value
+    so they clear the trade-count gate without also clearing
+    meta/reflection_scheduler.py's "beating targets" (PF>=1.4, WR>=55%)
+    skip, which an all-winners fixture would trip."""
     ts = _iso(hours_ago)
+    n_wins = round(n * win_rate)
     for i in range(n):
+        is_win = i < n_wins
         conn.execute(
             """INSERT INTO trades (id, agent_id, asset, direction, entry_price, exit_price,
                leverage, status, pnl_pct, pnl_usd, result, entry_timestamp, exit_timestamp)
-               VALUES (?, ?, 'BTC-PERP', 'long', 50000, 50500, 1,
-               'closed', 0.01, 100.0, 'win', ?, ?)""",
-            (f"{agent_id}_t{i}", agent_id, ts, ts),
+               VALUES (?, ?, 'BTC-PERP', 'long', 50000, ?, 1,
+               'closed', ?, ?, ?, ?, ?)""",
+            (
+                f"{agent_id}_t{i}", agent_id,
+                50500 if is_win else 49500,
+                0.01 if is_win else -0.01,
+                100.0 if is_win else -100.0,
+                "win" if is_win else "loss",
+                ts, ts,
+            ),
         )
     conn.commit()
 
@@ -245,7 +260,7 @@ class TestTriggerReflection:
 
         _seed_agent(conn)
 
-        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
+        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None, force=False):
             # Mirrors what the real Stage-A/deploy pipeline does: register
             # a hypothesis against the reflection_id the caller created,
             # then move it to 'challenger' once the cycle's proposal
@@ -417,12 +432,12 @@ class TestTriggerAllReflections:
         _seed_agent(conn, agent_id="ineligible_agent", status="active")
         _seed_agent(conn, agent_id="benchmark_random_walk", status="active")
 
-        _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1)
+        _seed_closed_trades(conn, "eligible_agent", n=20, hours_ago=1, win_rate=0.4)
         _seed_closed_trades(conn, "benchmark_random_walk", n=20, hours_ago=1)
 
         fake_llm = MagicMock(return_value="")
 
-        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None):
+        def _fake_run_reflection(conn, agent_id, config, llm_fn, reflection_id=None, force=False):
             llm_fn("system prompt", "user prompt")
             return _stub_reflection_result(triggered=True)
 
@@ -523,6 +538,24 @@ class TestDisableEntries:
         r = _client(conn).post("/api/exec/disable-entries/ghost?reason=test")
         assert r.status_code == 404
         assert "Agent not found" in r.json().get("error", "")
+
+    def test_idempotent_repeat_calls(self, conn):
+        """Repeated disable calls must not stack duplicate open rows -- this
+        is the exact mechanism that produced 5,225 stuck entry_disables rows
+        2026-07-12..07-15 (disabled_by='human', no way for the officer to
+        ever auto-clear them since RiskOfficer.enable_entry only lifts its
+        own rows)."""
+        _seed_agent(conn)
+        client = _client(conn)
+        for _ in range(5):
+            r = client.post(f"/api/exec/disable-entries/{AGENT_ID}?reason=spam_test")
+            assert r.status_code == 200
+
+        open_rows = conn.execute(
+            "SELECT COUNT(*) FROM entry_disables WHERE agent_id = ? AND enabled_at IS NULL",
+            (AGENT_ID,),
+        ).fetchone()[0]
+        assert open_rows == 1
 
 
 # ---------------------------------------------------------------------------
