@@ -470,6 +470,30 @@ def test_run_risk_officer_job_event_blackout_disables_all(conn):
     assert "blackout" in output.reason.lower()
 
 
+def test_run_risk_officer_job_surfaces_non_officer_disables(conn):
+    """A human/other-originated entry_disables row (the exact shape that
+    got stuck invisibly for 8 days, 2026-07-12..07-15) must show up in the
+    output even though the officer did not create it and can never clear
+    it -- entry_disabled_agents (the reduce-only-invariant field) must NOT
+    include it, since a later human re-enable via the web endpoint bypasses
+    validate_risk_officer_output and would look like an illegal risk
+    decrease if this field claimed ownership of it."""
+    _seed_agent_with_position(conn, "agent_a", balance=10000, notional=1000)
+    conn.execute(
+        "INSERT INTO entry_disables (agent_id, disabled_by, disabled_at, reason) "
+        "VALUES ('agent_a', 'human', '2026-07-12T18:11:10Z', 'Entry blocked by risk check')"
+    )
+    conn.commit()
+    output = run_risk_officer_job(conn, _config())
+
+    assert "agent_a" not in output.entry_disabled_agents
+    assert len(output.other_open_disables) == 1
+    assert output.other_open_disables[0]["agent_id"] == "agent_a"
+    assert output.other_open_disables[0]["disabled_by"] == "human"
+    assert output.other_open_disables[0]["reason"] == "Entry blocked by risk check"
+    assert "agent_a" in output.reason
+
+
 def test_run_risk_officer_job_regime_populated(conn, tmp_path):
     heartbeat_path = str(tmp_path / "heartbeat.json")
     write_heartbeat(heartbeat_path, {

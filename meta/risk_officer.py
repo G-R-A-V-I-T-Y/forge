@@ -76,6 +76,14 @@ class RiskOfficerOutput:
     entry_disabled_agents: list[str] = field(default_factory=list)
     reason: str = ""
     regime: str = ""
+    # Informational only -- NOT covered by validate_risk_officer_output's
+    # reduce-only invariant. Rows here are entry_disables the officer did
+    # not create (disabled_by != 'risk_officer') and therefore can never
+    # auto-clear (RiskOfficer.enable_entry only lifts its own rows). This
+    # field exists purely so a stuck human/other disable is visible in
+    # logs/UI instead of silent -- see the 2026-07-12..07-15 incident where
+    # 5,225 such rows blocked every agent for 8 days unnoticed.
+    other_open_disables: list[dict] = field(default_factory=list)
 
 
 def run_risk_officer_job(conn, config: dict | None = None) -> RiskOfficerOutput:
@@ -94,6 +102,13 @@ def run_risk_officer_job(conn, config: dict | None = None) -> RiskOfficerOutput:
            WHERE enabled_at IS NULL AND disabled_by = 'risk_officer'"""
     ).fetchall()
     entry_disabled_agents = sorted(row["agent_id"] for row in disabled_rows)
+
+    other_rows = conn.execute(
+        """SELECT agent_id, reason, disabled_by, disabled_at FROM entry_disables
+           WHERE enabled_at IS NULL AND disabled_by != 'risk_officer'
+           ORDER BY disabled_at"""
+    ).fetchall()
+    other_open_disables = [dict(r) for r in other_rows]
 
     desk_kill = report.get("desk_kill_switch", False)
     blackout = report.get("event_blackout")
@@ -115,6 +130,9 @@ def run_risk_officer_job(conn, config: dict | None = None) -> RiskOfficerOutput:
     throttled = report.get("gross_exposure_throttled_agents", [])
     if throttled:
         reasons.append(f"gross exposure throttle: {', '.join(throttled)}")
+    if other_open_disables:
+        agents_blocked = ", ".join(sorted({r["agent_id"] for r in other_open_disables}))
+        reasons.append(f"non-officer entry disables open for: {agents_blocked}")
     reason = "; ".join(reasons) if reasons else "all clear"
 
     memo = report.get("regime_memo") or {}
@@ -124,6 +142,7 @@ def run_risk_officer_job(conn, config: dict | None = None) -> RiskOfficerOutput:
         entry_disabled_agents=entry_disabled_agents,
         reason=reason,
         regime=regime,
+        other_open_disables=other_open_disables,
     )
 
 
