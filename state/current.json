@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-22T20:09:56Z",
+  "generated_at": "2026-07-22T20:14:56Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -95,7 +95,7 @@
       "status": "rookie",
       "config_json": "{}",
       "current_thesis_version": 1,
-      "last_model_used": "Big Pickle",
+      "last_model_used": "MiMo V2.5 Free",
       "paper_balance": 49549.24443831041,
       "paper_peak": 50417.94976138105,
       "live_balance": null
@@ -129,7 +129,7 @@
       "config_json": "{\"pinned_model\": null, \"benchmark_type\": \"random_walk\", \"description\": \"Random walk benchmark \\u2014 makes random trading decisions\", \"starting_balance\": 50000.0, \"universe\": [\"BTC-PERP\", \"ETH-PERP\", \"SOL-PERP\", \"SUI-PERP\", \"AVAX-PERP\", \"LINK-PERP\", \"AAVE-PERP\", \"BNB-PERP\", \"ARB-PERP\", \"OP-PERP\", \"TAO-PERP\", \"FET-PERP\", \"RENDER-PERP\", \"XRP-PERP\", \"XLM-PERP\", \"TIA-PERP\", \"HYPE-PERP\", \"LTC-PERP\", \"BCH-PERP\", \"ADA-PERP\"]}",
       "current_thesis_version": 1,
       "last_model_used": "benchmark_random_walk",
-      "paper_balance": 49557.58932962669,
+      "paper_balance": 49446.41359700205,
       "paper_peak": 50186.064602088234,
       "live_balance": null
     },
@@ -159,28 +159,10 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.02712658005258017,
+      "current_pnl_pct": 0.028624941219688237,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
-    },
-    {
-      "id": "pos_benchmark_random_walk_20260722_101552_LTC_4c08",
-      "agent_id": "benchmark_random_walk",
-      "asset": "LTC-PERP",
-      "direction": "short",
-      "entry_price": 46.46797847958251,
-      "stop_loss_price": 47.397360000000006,
-      "take_profit_price": 44.60928,
-      "leverage": 3,
-      "position_size_pct": 0.05,
-      "notional_usd": 2487.0756062763303,
-      "true_notional": 7461.226818828991,
-      "opened_at": "2026-07-22T10:15:52.735310Z",
-      "current_pnl_pct": -0.04261137725460726,
-      "max_hold_hours": 48.0,
-      "mode": "paper",
-      "trade_id": "benchmark_random_walk_20260722_101552_LTC_4c08"
     },
     {
       "id": "pos_benchmark_random_walk_20260722_162511_BCH_ab2b",
@@ -195,7 +177,7 @@
       "notional_usd": 2479.9725395822825,
       "true_notional": 7439.917618746847,
       "opened_at": "2026-07-22T16:25:11.932301Z",
-      "current_pnl_pct": 0.005594439997196751,
+      "current_pnl_pct": 0.0028631903415186986,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260722_162511_BCH_ab2b"
@@ -213,7 +195,7 @@
       "notional_usd": 2477.8794664813345,
       "true_notional": 7433.638399444004,
       "opened_at": "2026-07-22T18:19:57.168393Z",
-      "current_pnl_pct": -0.016578168736847313,
+      "current_pnl_pct": -0.012549867552133664,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260722_181957_ETH_b83b"
@@ -231,7 +213,7 @@
       "notional_usd": 3210.2623842184494,
       "true_notional": 6420.524768436899,
       "opened_at": "2026-07-22T17:01:36.356311Z",
-      "current_pnl_pct": 0.012083131494297879,
+      "current_pnl_pct": 0.009183179826164106,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "crimson_fox_20260722_170136_BTC_941b"
@@ -249,7 +231,7 @@
       "notional_usd": 2951.3061489032593,
       "true_notional": 8853.918446709778,
       "opened_at": "2026-07-22T08:49:06.703572Z",
-      "current_pnl_pct": -0.03938367021143931,
+      "current_pnl_pct": -0.03304910732341912,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260722_084906_XLM_44c9"
@@ -267,7 +249,7 @@
       "notional_usd": 5864.461493512088,
       "true_notional": 17593.384480536264,
       "opened_at": "2026-07-22T09:20:18.580518Z",
-      "current_pnl_pct": 0.022140008284093828,
+      "current_pnl_pct": 0.026209246163894785,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260722_092018_SUI_40aa"
@@ -285,7 +267,7 @@
       "notional_usd": 5864.461493512088,
       "true_notional": 17593.384480536264,
       "opened_at": "2026-07-22T09:52:17.179834Z",
-      "current_pnl_pct": 0.022963865877695402,
+      "current_pnl_pct": 0.03064908406219738,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260722_095217_ARB_75ac"
@@ -303,7 +285,7 @@
       "notional_usd": 3491.248350333786,
       "true_notional": 13964.993401335145,
       "opened_at": "2026-07-22T18:19:57.181287Z",
-      "current_pnl_pct": 0.016896696442584683,
+      "current_pnl_pct": 0.013750692385276469,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260722_181957_RENDER_8cab"
@@ -321,10 +303,28 @@
       "notional_usd": 3491.248350333786,
       "true_notional": 13964.993401335145,
       "opened_at": "2026-07-22T19:07:10.654559Z",
-      "current_pnl_pct": 0.02290155170004325,
+      "current_pnl_pct": -0.004555348074372406,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260722_190710_HYPE_fb04"
+    },
+    {
+      "id": "pos_silver_basin_20260722_201003_AVAX_4958",
+      "agent_id": "silver_basin",
+      "asset": "AVAX-PERP",
+      "direction": "short",
+      "entry_price": 6.5997032350544655,
+      "stop_loss_price": 6.731796,
+      "take_profit_price": 6.335808,
+      "leverage": 4,
+      "position_size_pct": 0.07500000000000001,
+      "notional_usd": 3486.460074994887,
+      "true_notional": 13945.840299979547,
+      "opened_at": "2026-07-22T20:10:03.638718Z",
+      "current_pnl_pct": -0.007271093573913015,
+      "max_hold_hours": 8.0,
+      "mode": "paper",
+      "trade_id": "silver_basin_20260722_201003_AVAX_4958"
     },
     {
       "id": "pos_violet_lion_20260721_021011_ETH_5c08",
@@ -339,7 +339,7 @@
       "notional_usd": 3801.2685237315077,
       "true_notional": 11403.805571194524,
       "opened_at": "2026-07-21T02:10:11.804955Z",
-      "current_pnl_pct": 0.02086484444157966,
+      "current_pnl_pct": 0.024943702249820475,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "violet_lion_20260721_021011_ETH_5c08"
@@ -357,7 +357,7 @@
       "notional_usd": 3786.372431336046,
       "true_notional": 11359.117294008138,
       "opened_at": "2026-07-21T17:47:43.665094Z",
-      "current_pnl_pct": 0.0076220266890816716,
+      "current_pnl_pct": 0.012304746659607778,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "violet_lion_20260721_174743_SOL_4ee1"
