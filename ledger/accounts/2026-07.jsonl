@@ -190,3 +190,4 @@
 {"ts": "2026-07-22T01:02:16.168703Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46531.774335008304, "peak_balance": 50000.0}
 {"ts": "2026-07-22T03:39:17.750324Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49716.05272331219, "peak_balance": 50186.064602088234}
 {"ts": "2026-07-22T05:13:31.819636Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49761.380803173044, "peak_balance": 50186.064602088234}
+{"ts": "2026-07-22T05:25:02.476706Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50121.63181956415, "peak_balance": 50341.13321335586}
