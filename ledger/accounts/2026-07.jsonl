@@ -227,3 +227,4 @@
 {"ts": "2026-07-23T02:24:56.860248Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46677.21937052043, "peak_balance": 50000.0}
 {"ts": "2026-07-23T03:09:57.150233Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46866.170340390156, "peak_balance": 50000.0}
 {"ts": "2026-07-23T04:14:59.999816Z", "agent_id": "silver_basin", "mode": "paper", "balance": 47007.713128394535, "peak_balance": 50000.0}
+{"ts": "2026-07-23T04:29:57.320039Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51428.26817780513, "peak_balance": 51428.26817780513}
