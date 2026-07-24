@@ -250,3 +250,4 @@
 {"ts": "2026-07-23T21:14:57.237591Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47517.189143022886, "peak_balance": 50036.47927696076}
 {"ts": "2026-07-23T22:14:56.247946Z", "agent_id": "silver_basin", "mode": "paper", "balance": 47503.44599857295, "peak_balance": 50000.0}
 {"ts": "2026-07-23T23:13:25.312644Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49574.51240540935, "peak_balance": 50186.064602088234}
+{"ts": "2026-07-24T02:59:56.530202Z", "agent_id": "silver_basin", "mode": "paper", "balance": 47593.85363356407, "peak_balance": 50000.0}
