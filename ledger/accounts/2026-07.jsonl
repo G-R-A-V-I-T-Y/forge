@@ -254,3 +254,14 @@
 {"ts": "2026-07-24T03:04:56.492981Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47571.96816260598, "peak_balance": 50036.47927696076}
 {"ts": "2026-07-24T03:19:56.401932Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47496.017197549016, "peak_balance": 50036.47927696076}
 {"ts": "2026-07-24T03:23:27.118002Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49534.823969494166, "peak_balance": 50186.064602088234}
+{"ts": "2026-07-24T21:08:06.386127Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50218.318542491645, "peak_balance": 50341.13321335586}
+{"ts": "2026-07-24T21:08:06.392660Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50141.47542986664, "peak_balance": 50341.13321335586}
+{"ts": "2026-07-24T21:08:06.395853Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 49824.45335623171, "peak_balance": 50186.064602088234}
+{"ts": "2026-07-24T21:08:06.399865Z", "agent_id": "crimson_fox", "mode": "paper", "balance": 50017.525143157094, "peak_balance": 50341.13321335586}
+{"ts": "2026-07-24T21:08:06.404062Z", "agent_id": "violet_lion", "mode": "paper", "balance": 48989.7186762744, "peak_balance": 50417.94976138105}
+{"ts": "2026-07-24T21:08:06.407186Z", "agent_id": "silver_basin", "mode": "paper", "balance": 48046.79871923978, "peak_balance": 50000.0}
+{"ts": "2026-07-24T21:08:06.410218Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47293.3410266348, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-24T21:08:06.413741Z", "agent_id": "silver_basin", "mode": "paper", "balance": 48082.86584152787, "peak_balance": 50000.0}
+{"ts": "2026-07-24T21:08:06.417896Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47157.86804672196, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-24T21:08:06.420905Z", "agent_id": "silver_basin", "mode": "paper", "balance": 48313.53868112244, "peak_balance": 50000.0}
+{"ts": "2026-07-24T21:08:06.423945Z", "agent_id": "violet_lion", "mode": "paper", "balance": 48777.327519329076, "peak_balance": 50417.94976138105}
