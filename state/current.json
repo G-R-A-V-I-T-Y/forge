@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T17:31:31Z",
+  "generated_at": "2026-07-25T17:36:31Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.002575308012361525,
+      "current_pnl_pct": 0.0033088806670915163,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 5639.784656685916,
       "true_notional": 16919.35397005775,
       "opened_at": "2026-07-25T09:55:52.328097Z",
-      "current_pnl_pct": 0.011627361072302347,
+      "current_pnl_pct": 0.01383093367244866,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260725_095552_BTC_7bef"
@@ -195,10 +195,46 @@
       "notional_usd": 5619.787061085553,
       "true_notional": 16859.36118325666,
       "opened_at": "2026-07-25T17:16:24.324735Z",
-      "current_pnl_pct": -0.009014447443256354,
+      "current_pnl_pct": -0.008655385552193258,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260725_171624_ARB_83d7"
+    },
+    {
+      "id": "pos_iron_moth_20260725_173414_HYPE_a292",
+      "agent_id": "iron_moth",
+      "asset": "HYPE-PERP",
+      "direction": "long",
+      "entry_price": 58.126017203857096,
+      "stop_loss_price": 56.67285,
+      "take_profit_price": 61.0323,
+      "leverage": 3,
+      "position_size_pct": 0.12,
+      "notional_usd": 5619.787061085553,
+      "true_notional": 16859.36118325666,
+      "opened_at": "2026-07-25T17:34:14.829574Z",
+      "current_pnl_pct": 0.010373124074785177,
+      "max_hold_hours": 12.0,
+      "mode": "paper",
+      "trade_id": "iron_moth_20260725_173414_HYPE_a292"
+    },
+    {
+      "id": "pos_jade_hawk_20260725_173414_HYPE_e210",
+      "agent_id": "jade_hawk",
+      "asset": "HYPE-PERP",
+      "direction": "short",
+      "entry_price": 58.1259827961429,
+      "stop_loss_price": 58.99788999999999,
+      "take_profit_price": 56.96348,
+      "leverage": 3,
+      "position_size_pct": 0.05,
+      "notional_usd": 2581.003827993287,
+      "true_notional": 7743.011483979861,
+      "opened_at": "2026-07-25T17:34:14.957735Z",
+      "current_pnl_pct": -0.010374906067159222,
+      "max_hold_hours": 4.0,
+      "mode": "paper",
+      "trade_id": "jade_hawk_20260725_173414_HYPE_e210"
     },
     {
       "id": "pos_silver_basin_20260725_171624_ARB_eb57",
@@ -213,7 +249,7 @@
       "notional_usd": 4782.6201752895095,
       "true_notional": 19130.480701158038,
       "opened_at": "2026-07-25T17:16:24.323722Z",
-      "current_pnl_pct": -0.04717930197032106,
+      "current_pnl_pct": -0.047665157828900746,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260725_171624_ARB_eb57"
@@ -231,7 +267,7 @@
       "notional_usd": 3707.07689146901,
       "true_notional": 11121.23067440703,
       "opened_at": "2026-07-25T08:07:09.634521Z",
-      "current_pnl_pct": -0.025071528067831278,
+      "current_pnl_pct": -0.029438811313357578,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "violet_lion_20260725_080709_ETH_94ca"
