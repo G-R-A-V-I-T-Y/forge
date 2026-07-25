@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-25T05:13:10Z",
+  "generated_at": "2026-07-25T05:18:11Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.0008116120552447374,
+      "current_pnl_pct": 0.0008740437705409068,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 2490.0463244156604,
       "true_notional": 7470.138973246982,
       "opened_at": "2026-07-25T01:06:38.106394Z",
-      "current_pnl_pct": 4.678435531715603e-05,
+      "current_pnl_pct": -0.00014035598438807354,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260725_010638_BTC_5a56"
@@ -195,7 +195,7 @@
       "notional_usd": 2512.4758988206613,
       "true_notional": 7537.427696461984,
       "opened_at": "2026-07-25T02:25:59.893633Z",
-      "current_pnl_pct": -0.010996863614517242,
+      "current_pnl_pct": -0.010798157294737824,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260725_022559_FET_d993"
@@ -213,7 +213,7 @@
       "notional_usd": 2512.4758988206613,
       "true_notional": 7537.427696461984,
       "opened_at": "2026-07-25T02:41:48.915317Z",
-      "current_pnl_pct": -0.0007436116470296143,
+      "current_pnl_pct": -0.0020707870612919005,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260725_024148_BNB_48ed"
@@ -231,7 +231,7 @@
       "notional_usd": 5658.944165606635,
       "true_notional": 16976.832496819905,
       "opened_at": "2026-07-24T21:25:19.795819Z",
-      "current_pnl_pct": 0.028240111076427488,
+      "current_pnl_pct": 0.027913629385813345,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260724_212519_SOL_c272"
@@ -249,7 +249,7 @@
       "notional_usd": 5658.944165606635,
       "true_notional": 16976.832496819905,
       "opened_at": "2026-07-24T21:41:38.963379Z",
-      "current_pnl_pct": -0.019566275546862,
+      "current_pnl_pct": -0.019762964897119782,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260724_214138_FET_1bf9"
@@ -267,7 +267,7 @@
       "notional_usd": 5658.944165606635,
       "true_notional": 16976.832496819905,
       "opened_at": "2026-07-24T22:28:47.385378Z",
-      "current_pnl_pct": -0.04190847175857511,
+      "current_pnl_pct": -0.04148877898387819,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260724_222847_AAVE_46fb"
@@ -285,7 +285,7 @@
       "notional_usd": 3623.5154010841834,
       "true_notional": 14494.061604336734,
       "opened_at": "2026-07-24T22:12:44.147661Z",
-      "current_pnl_pct": -0.003297872330079007,
+      "current_pnl_pct": -0.0027225848298635573,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260724_221244_AVAX_7fcb"
@@ -303,10 +303,28 @@
       "notional_usd": 3623.5154010841834,
       "true_notional": 14494.061604336734,
       "opened_at": "2026-07-24T23:16:34.924805Z",
-      "current_pnl_pct": -0.0023668523968446245,
+      "current_pnl_pct": -0.0019365366402165462,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260724_231634_ETH_695c"
+    },
+    {
+      "id": "pos_silver_basin_20260725_051738_BTC_7f67",
+      "agent_id": "silver_basin",
+      "asset": "BTC-PERP",
+      "direction": "short",
+      "entry_price": 64121.99991275269,
+      "stop_loss_price": 65404.44,
+      "take_profit_price": 61557.119999999995,
+      "leverage": 4,
+      "position_size_pct": 0.07500000000000001,
+      "notional_usd": 3612.851490926169,
+      "true_notional": 14451.405963704676,
+      "opened_at": "2026-07-25T05:17:38.433445Z",
+      "current_pnl_pct": -0.0002495297871403168,
+      "max_hold_hours": 8.0,
+      "mode": "paper",
+      "trade_id": "silver_basin_20260725_051738_BTC_7f67"
     }
   ]
 }
