@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-27T04:50:36Z",
+  "generated_at": "2026-07-27T04:55:35Z",
   "agents": [
     {
       "id": "iron_moth",
@@ -159,7 +159,7 @@
       "notional_usd": 5000.0,
       "true_notional": 5000.0,
       "opened_at": "2026-07-12T18:06:11.520333Z",
-      "current_pnl_pct": 0.019728421789984088,
+      "current_pnl_pct": 0.01882316191818963,
       "max_hold_hours": 8760.0,
       "mode": "paper",
       "trade_id": "benchmark_btc_hold_20260712_180611_BTC_c440"
@@ -177,7 +177,7 @@
       "notional_usd": 2506.66996260902,
       "true_notional": 7520.00988782706,
       "opened_at": "2026-07-25T21:57:50.945502Z",
-      "current_pnl_pct": 0.030976308525098913,
+      "current_pnl_pct": 0.03500555550033147,
       "max_hold_hours": 48.0,
       "mode": "paper",
       "trade_id": "benchmark_random_walk_20260725_215750_AVAX_3443"
@@ -195,7 +195,7 @@
       "notional_usd": 5756.924510817226,
       "true_notional": 17270.77353245168,
       "opened_at": "2026-07-27T04:20:33.962641Z",
-      "current_pnl_pct": -0.010685103365152644,
+      "current_pnl_pct": -0.011851567731975765,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260727_042033_SUI_da9c"
@@ -213,7 +213,7 @@
       "notional_usd": 4317.693383112921,
       "true_notional": 12953.080149338763,
       "opened_at": "2026-07-27T04:40:07.222538Z",
-      "current_pnl_pct": 0.004673969658788706,
+      "current_pnl_pct": 0.003617686121845683,
       "max_hold_hours": 12.0,
       "mode": "paper",
       "trade_id": "iron_moth_20260727_044007_TAO_ac0f"
@@ -249,7 +249,7 @@
       "notional_usd": 4638.356326945618,
       "true_notional": 18553.425307782472,
       "opened_at": "2026-07-27T04:20:34.036548Z",
-      "current_pnl_pct": 0.01264250853065457,
+      "current_pnl_pct": 0.014198420367450386,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260727_042034_SUI_f360"
@@ -267,7 +267,7 @@
       "notional_usd": 3478.767245209214,
       "true_notional": 13915.068980836855,
       "opened_at": "2026-07-27T04:40:07.218029Z",
-      "current_pnl_pct": -0.0026343609579281284,
+      "current_pnl_pct": 0.0009189618592200614,
       "max_hold_hours": 8.0,
       "mode": "paper",
       "trade_id": "silver_basin_20260727_044007_BTC_26d3"
