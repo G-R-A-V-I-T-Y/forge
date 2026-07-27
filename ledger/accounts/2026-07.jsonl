@@ -301,3 +301,15 @@
 {"ts": "2026-07-26T08:59:52.402119Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 50229.86451295737, "peak_balance": 50313.89669139999}
 {"ts": "2026-07-26T09:21:27.871969Z", "agent_id": "silver_basin", "mode": "paper", "balance": 47385.50906486745, "peak_balance": 50000.0}
 {"ts": "2026-07-26T09:46:26.409986Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51637.568084992934, "peak_balance": 51651.58501168982}
+{"ts": "2026-07-27T04:20:31.114211Z", "agent_id": "violet_lion", "mode": "paper", "balance": 48359.87904573409, "peak_balance": 50417.94976138105}
+{"ts": "2026-07-27T04:20:31.423518Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47724.17121786059, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T04:20:31.429811Z", "agent_id": "violet_lion", "mode": "paper", "balance": 48042.25855481748, "peak_balance": 50417.94976138105}
+{"ts": "2026-07-27T04:20:31.433351Z", "agent_id": "violet_lion", "mode": "paper", "balance": 47809.153018184086, "peak_balance": 50417.94976138105}
+{"ts": "2026-07-27T04:20:31.437578Z", "agent_id": "silver_basin", "mode": "paper", "balance": 47241.20428813571, "peak_balance": 50000.0}
+{"ts": "2026-07-27T04:20:31.442376Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47620.08703280387, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T04:20:31.446588Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47974.37092347689, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T04:20:31.451637Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51448.63262785232, "peak_balance": 51651.58501168982}
+{"ts": "2026-07-27T04:20:31.454942Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46592.12644431558, "peak_balance": 50000.0}
+{"ts": "2026-07-27T04:20:31.459724Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51319.16138202957, "peak_balance": 51651.58501168982}
+{"ts": "2026-07-27T04:20:31.464980Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46383.56326945618, "peak_balance": 50000.0}
+{"ts": "2026-07-27T04:20:33.945763Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 50475.44033229849, "peak_balance": 50475.44033229849}
