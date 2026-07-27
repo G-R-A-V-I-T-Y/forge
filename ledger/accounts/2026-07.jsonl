@@ -316,3 +316,11 @@
 {"ts": "2026-07-27T06:28:34.182803Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 50549.06114022366, "peak_balance": 50549.06114022366}
 {"ts": "2026-07-27T07:20:35.956217Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51137.83038459177, "peak_balance": 51651.58501168982}
 {"ts": "2026-07-27T08:20:36.162958Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51154.82999238094, "peak_balance": 51651.58501168982}
+{"ts": "2026-07-27T17:24:18.081397Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47616.329359148884, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T17:24:18.091340Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46734.90247351786, "peak_balance": 50000.0}
+{"ts": "2026-07-27T17:24:18.097359Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46786.96783710683, "peak_balance": 50000.0}
+{"ts": "2026-07-27T17:24:18.100378Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47328.390803325674, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T17:24:18.105632Z", "agent_id": "iron_moth", "mode": "paper", "balance": 47302.390690061926, "peak_balance": 50036.47927696076}
+{"ts": "2026-07-27T17:24:18.109160Z", "agent_id": "silver_basin", "mode": "paper", "balance": 46866.70435368574, "peak_balance": 50000.0}
+{"ts": "2026-07-27T17:24:18.113196Z", "agent_id": "jade_hawk", "mode": "paper", "balance": 51216.06199573843, "peak_balance": 51651.58501168982}
+{"ts": "2026-07-27T17:24:18.119036Z", "agent_id": "benchmark_random_walk", "mode": "paper", "balance": 50391.96593130809, "peak_balance": 50549.06114022366}
